@@ -94,15 +94,18 @@ class SessionState:
                 self.user_identity = kwami_id
                 logger.info(f"Resolved user_identity from agent config: {kwami_id}")
 
-        # Report usage to credits system
+        # Report usage to credits system (use Supabase user id for credits; user_identity may be per-kwami memory id)
         if self.user_identity and self.room_name and self.usage_tracker.has_usage:
+            credits_user_id = self.user_identity
+            if self.user_identity.startswith("kwami_") and self.user_identity.count("_") >= 2:
+                credits_user_id = self.user_identity.split("_", 2)[1]
             logger.info(
-                f"Reporting usage: user={self.user_identity}, "
+                f"Reporting usage: user={credits_user_id}, "
                 f"room={self.room_name}, has_usage={self.usage_tracker.has_usage}"
             )
             try:
                 await self.usage_reporter.report(
-                    user_id=self.user_identity,
+                    user_id=credits_user_id,
                     session_id=self.room_name,
                     tracker=self.usage_tracker,
                 )
