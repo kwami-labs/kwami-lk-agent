@@ -1,3 +1,4 @@
+from livekit.agents import inference
 from livekit.plugins import deepgram, openai
 
 try:
@@ -68,10 +69,16 @@ def create_stt(config: KwamiVoiceConfig):
                 languages=[config.stt_language or "en-US"],
             )
         
-        elif provider == STTProviders.ELEVENLABS and elevenlabs is not None:
-            return elevenlabs.STT(
-                model_id=model or "scribe_v1",
-                language_code=config.stt_language or "en",
+        elif provider == STTProviders.ELEVENLABS:
+            # Use LiveKit Inference so no ELEVEN_API_KEY needed in the agent
+            stt_model = (model or "scribe-v2-realtime").replace("_", "-")
+            if not stt_model.startswith("scribe"):
+                stt_model = "scribe-v2-realtime"
+            model_string = f"elevenlabs/{stt_model}"
+            logger.info(f"🎤 Using LiveKit Inference for ElevenLabs STT: {model_string}")
+            return inference.STT(
+                model=model_string,
+                language=config.stt_language or "en",
             )
         
         elif provider == STTProviders.CARTESIA and cartesia is not None:
