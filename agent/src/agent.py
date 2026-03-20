@@ -134,13 +134,27 @@ class KwamiAgent(Agent, AgentToolsMixin):
             "When the user asks you to control the app workspace or interface, prefer the available client workspace tools instead of telling them what to click."
         )
         prompt_parts.append(
-            "Use workspace tools for requests like opening panels, focusing transcription, switching the renderer, clearing search results, or checking workspace status."
+            "Use the structured client UI tools for requests like opening panels, changing theme settings, modifying avatar parameters, adjusting scene controls, changing voice settings, tuning enhancements, clearing search results, or checking workspace status."
+        )
+        prompt_parts.append(
+            "Prefer set_ui_control as the default tool for free-form interface requests because it gives you one consistent path for domain, control, and value."
         )
         prompt_parts.append(
             "For visible UI changes, briefly say what action you are taking. If a request is ambiguous, ask a clarifying question instead of guessing."
         )
         prompt_parts.append(
             "Do not change lasting workspace preferences unless the user clearly asks. If a tool requires confirmation, wait for that result before continuing."
+        )
+        prompt_parts.append(
+            "If you are unsure which structured UI control to use, call list_ui_controls first to inspect the supported control names and domains."
+        )
+        prompt_parts.append(
+            "Examples: if the user says 'make it darker', use set_ui_control with domain='theme', control='mode', value='dark'. "
+            "If they say 'move the sidebar right', use domain='theme', control='sidebarPosition', value='right'. "
+            "If they say 'open memory', use domain='workspace', control='openPanel', value='memory'. "
+            "If they say 'make the blob spikier', use domain='avatar', control='blobSpikes' with a modest increase to x, y, and z values. "
+            "If they say 'switch to particles face', use domain='avatar', control='renderer', value='particles-face'. "
+            "If they say 'speak a bit faster', use domain='voice', control='ttsSpeed', value set slightly above the current speed."
         )
         
         # User relationship guidance
