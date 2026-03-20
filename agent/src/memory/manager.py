@@ -47,10 +47,12 @@ class KwamiMemory:
         config: KwamiMemoryConfig,
         kwami_id: str,
         kwami_name: str = "Kwami",
+        usage_tracker=None,
     ):
         self.config = config
         self.kwami_id = kwami_id
         self.kwami_name = kwami_name
+        self._usage_tracker = usage_tracker
         self._client: Optional["AsyncZep"] = None
         self._user_id: Optional[str] = None
         self._session_id: Optional[str] = None
@@ -86,6 +88,20 @@ class KwamiMemory:
     def session_id(self) -> Optional[str]:
         """Get the current Zep session ID."""
         return self._session_id
+
+    def set_usage_tracker(self, usage_tracker) -> None:
+        """Attach the shared session usage tracker."""
+        self._usage_tracker = usage_tracker
+
+    def _record_usage(self, model_id: str, units_used: float = 1.0) -> None:
+        """Record a billable Zep operation when tracking is enabled."""
+        if self._usage_tracker:
+            self._usage_tracker.record_external_usage(
+                "memory",
+                model_id,
+                units_used=units_used,
+                request_count=1,
+            )
 
     # ========================================================================
     # Initialization
@@ -157,6 +173,7 @@ class KwamiMemory:
                         "created_at": datetime.utcnow().isoformat(),
                     },
                 )
+                self._record_usage("zep/create_user")
                 logger.info(f"Created Zep user: {self._user_id}")
             except Exception as e:
                 error_msg = str(e).lower()
@@ -179,6 +196,7 @@ class KwamiMemory:
                     thread_id=self._session_id,
                     user_id=self._user_id,
                 )
+                self._record_usage("zep/create_thread")
                 logger.info(f"Created Zep thread: {self._session_id}")
             except Exception as e:
                 logger.error(
@@ -280,6 +298,7 @@ class KwamiMemory:
                 messages=messages,
                 ignore_roles=["assistant"],
             )
+            self._record_usage("zep/add_messages")
             logger.debug(
                 f"Added {len(messages)} messages to memory "
                 f"(user: {user_name}, assistant: {assistant_name})"
@@ -348,6 +367,7 @@ class KwamiMemory:
                 messages=[message],
                 ignore_roles=ignore_roles,
             )
+            self._record_usage("zep/add_messages")
 
             logger.debug(f"Added {role} message to memory: {content[:50]}...")
 
@@ -389,6 +409,7 @@ class KwamiMemory:
                 thread_id=self._session_id,
                 messages=[message],
             )
+            self._record_usage("zep/add_messages")
             logger.debug(f"Flushed pending user message: {content[:50]}...")
         except Exception as e:
             logger.warning(f"Failed to flush pending message: {e}")
@@ -422,7 +443,7 @@ class KwamiMemory:
             return MemoryContext()
 
         try:
-            return await get_context(
+            context = await get_context(
                 client=self._client,
                 user_id=self._user_id,
                 session_id=self._session_id,
@@ -432,6 +453,8 @@ class KwamiMemory:
                 min_relevance=self.config.min_fact_relevance,
                 include_facts=self.config.include_facts,
             )
+            self._record_usage("zep/get_context")
+            return context
         except Exception as e:
             logger.error(f"Failed to get memory context: {e}")
             return MemoryContext()
@@ -452,7 +475,9 @@ class KwamiMemory:
         """
         if not self._initialized or not self._client:
             return []
-        return await search_thread(self._client, self._session_id, query, limit)
+        results = await search_thread(self._client, self._session_id, query, limit)
+        self._record_usage("zep/thread_search")
+        return results
 
     async def search_by_entity_type(
         self,
@@ -472,7 +497,7 @@ class KwamiMemory:
         """
         if not self._initialized or not self._client:
             return []
-        return await search_graph(
+        results = await search_graph(
             self._client,
             self._user_id,
             query,
@@ -480,6 +505,8 @@ class KwamiMemory:
             limit=limit,
             node_labels=entity_types,
         )
+        self._record_usage("zep/graph_search")
+        return results
 
     async def get_entities_by_type(
         self,
@@ -527,6 +554,7 @@ class KwamiMemory:
             name = await get_user_name(
                 self._client, self._user_id, self.kwami_name
             )
+            self._record_usage("zep/get_user_name")
             if name:
                 self._cached_user_name = name
             return name
@@ -624,6 +652,7 @@ async def create_memory(
     config: KwamiMemoryConfig,
     kwami_id: str,
     kwami_name: str = "Kwami",
+    usage_tracker=None,
 ) -> Optional[KwamiMemory]:
     """Factory function to create and initialize a KwamiMemory instance.
 
@@ -635,7 +664,7 @@ async def create_memory(
     Returns:
         Initialized KwamiMemory instance, or None if initialization fails.
     """
-    memory = KwamiMemory(config, kwami_id, kwami_name)
+    memory = KwamiMemory(config, kwami_id, kwami_name, usage_tracker=usage_tracker)
 
     if not memory.is_enabled:
         logger.info(f"Memory disabled for Kwami '{kwami_name}'")
