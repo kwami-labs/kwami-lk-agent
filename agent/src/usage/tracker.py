@@ -1,10 +1,11 @@
 """Usage tracker for monitoring AI resource consumption during a session.
 
 Tracks:
-- LLM token usage (prompt + completion tokens)
+- LLM token usage (prompt, completion, and cached input tokens)
 - STT audio duration (minutes)
 - TTS character count
 - Realtime model usage (duration in minutes for pricing)
+- External paid tool and memory operations (request-based)
 """
 
 from __future__ import annotations
@@ -23,10 +24,18 @@ logger = get_logger("usage.tracker")
 class ModelUsage:
     """Accumulated usage for a single model."""
 
-    model_type: str  # 'llm', 'stt', 'tts', 'realtime'
+    model_type: str  # 'llm', 'stt', 'tts', 'realtime', 'tool', 'memory'
     model_id: str
     total_units: float = 0.0  # tokens for LLM, minutes for STT/realtime, chars for TTS
     event_count: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    cached_input_tokens: int = 0
+    audio_input_minutes: float = 0.0
+    audio_output_minutes: float = 0.0
+    text_input_tokens: int = 0
+    text_output_tokens: int = 0
+    request_count: int = 0
 
 
 def _get_model_id(metrics: Any) -> str:
@@ -40,6 +49,30 @@ def _get_model_id(metrics: Any) -> str:
         if name:
             return name
     return getattr(metrics, "label", None) or "unknown"
+
+
+def _get_int_metric(metrics: Any, *names: str) -> int:
+    """Read the first present integer-like metric attribute."""
+    for name in names:
+        value = getattr(metrics, name, None)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                continue
+    return 0
+
+
+def _get_float_metric(metrics: Any, *names: str) -> float:
+    """Read the first present float-like metric attribute."""
+    for name in names:
+        value = getattr(metrics, name, None)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
 
 
 class UsageTracker:
@@ -71,9 +104,15 @@ class UsageTracker:
         Attributes used: prompt_tokens, completion_tokens, total_tokens, label, metadata.
         """
         model_id = _get_model_id(metrics)
-        total_tokens = getattr(metrics, "total_tokens", 0)
-        prompt_tokens = getattr(metrics, "prompt_tokens", 0)
-        completion_tokens = getattr(metrics, "completion_tokens", 0)
+        total_tokens = _get_int_metric(metrics, "total_tokens")
+        prompt_tokens = _get_int_metric(metrics, "prompt_tokens", "input_tokens")
+        completion_tokens = _get_int_metric(metrics, "completion_tokens", "output_tokens")
+        cached_input_tokens = _get_int_metric(
+            metrics,
+            "cached_input_tokens",
+            "cached_tokens",
+            "prompt_cached_tokens",
+        )
         tokens = total_tokens or (prompt_tokens + completion_tokens)
 
         if tokens <= 0:
@@ -83,6 +122,9 @@ class UsageTracker:
             entry = self._get_or_create("llm", model_id)
             entry.total_units += tokens
             entry.event_count += 1
+            entry.prompt_tokens += prompt_tokens
+            entry.completion_tokens += completion_tokens
+            entry.cached_input_tokens += cached_input_tokens
 
         logger.info(
             f"LLM usage: {model_id} +{tokens} tokens "
@@ -99,7 +141,7 @@ class UsageTracker:
         Attributes used: audio_duration, label, metadata.
         """
         model_id = _get_model_id(metrics)
-        audio_duration = getattr(metrics, "audio_duration", 0.0)
+        audio_duration = _get_float_metric(metrics, "audio_duration")
 
         if audio_duration <= 0:
             return
@@ -109,6 +151,7 @@ class UsageTracker:
             entry = self._get_or_create("stt", model_id)
             entry.total_units += minutes
             entry.event_count += 1
+            entry.audio_input_minutes += minutes
 
         logger.info(
             f"STT usage: {model_id} +{minutes:.3f} min "
@@ -125,7 +168,7 @@ class UsageTracker:
         Attributes used: characters_count, label, metadata.
         """
         model_id = _get_model_id(metrics)
-        characters = getattr(metrics, "characters_count", 0)
+        characters = _get_int_metric(metrics, "characters_count")
 
         if characters <= 0:
             return
@@ -151,18 +194,80 @@ class UsageTracker:
         matching the API's RealtimePricing (per-minute audio).
         """
         model_id = _get_model_id(metrics)
-        duration_seconds = getattr(metrics, "duration", 0.0)
-        if duration_seconds <= 0:
+        duration_seconds = _get_float_metric(metrics, "duration")
+        audio_input_minutes = _get_float_metric(
+            metrics,
+            "audio_input_minutes",
+            "input_audio_minutes",
+        )
+        audio_output_minutes = _get_float_metric(
+            metrics,
+            "audio_output_minutes",
+            "output_audio_minutes",
+        )
+        text_input_tokens = _get_int_metric(
+            metrics,
+            "text_input_tokens",
+            "input_tokens",
+        )
+        text_output_tokens = _get_int_metric(
+            metrics,
+            "text_output_tokens",
+            "output_tokens",
+        )
+
+        if duration_seconds <= 0 and not any(
+            (
+                audio_input_minutes,
+                audio_output_minutes,
+                text_input_tokens,
+                text_output_tokens,
+            )
+        ):
             return
         minutes = duration_seconds / 60.0
+        normalized_units = minutes or (audio_input_minutes + audio_output_minutes)
         with self._lock:
             entry = self._get_or_create("realtime", model_id)
-            entry.total_units += minutes
+            entry.total_units += normalized_units
             entry.event_count += 1
+            entry.audio_input_minutes += audio_input_minutes
+            entry.audio_output_minutes += audio_output_minutes
+            entry.text_input_tokens += text_input_tokens
+            entry.text_output_tokens += text_output_tokens
 
         logger.info(
-            f"Realtime usage: {model_id} +{minutes:.3f} min "
+            f"Realtime usage: {model_id} +{normalized_units:.3f} min "
             f"(total: {entry.total_units:.3f} min)"
+        )
+
+    # -----------------------------------------------------------------
+    # External service tracking
+    # -----------------------------------------------------------------
+
+    def record_external_usage(
+        self,
+        model_type: str,
+        model_id: str,
+        *,
+        units_used: float = 1.0,
+        request_count: int = 1,
+    ) -> None:
+        """Track a paid external operation such as Tavily or Zep."""
+        if units_used <= 0 and request_count <= 0:
+            return
+
+        with self._lock:
+            entry = self._get_or_create(model_type, model_id)
+            entry.total_units += units_used
+            entry.event_count += 1
+            entry.request_count += request_count
+
+        logger.info(
+            "External usage: %s %s +%s units",
+            model_type,
+            model_id,
+            units_used,
         )
 
     # -----------------------------------------------------------------
@@ -179,11 +284,29 @@ class UsageTracker:
             items = []
             for entry in self._usage.values():
                 if entry.total_units > 0:
-                    items.append({
+                    item = {
                         "model_type": entry.model_type,
                         "model_id": entry.model_id,
                         "units_used": round(entry.total_units, 6),
-                    })
+                        "event_count": entry.event_count,
+                    }
+                    if entry.prompt_tokens:
+                        item["prompt_tokens"] = entry.prompt_tokens
+                    if entry.completion_tokens:
+                        item["completion_tokens"] = entry.completion_tokens
+                    if entry.cached_input_tokens:
+                        item["cached_input_tokens"] = entry.cached_input_tokens
+                    if entry.audio_input_minutes:
+                        item["audio_input_minutes"] = round(entry.audio_input_minutes, 6)
+                    if entry.audio_output_minutes:
+                        item["audio_output_minutes"] = round(entry.audio_output_minutes, 6)
+                    if entry.text_input_tokens:
+                        item["text_input_tokens"] = entry.text_input_tokens
+                    if entry.text_output_tokens:
+                        item["text_output_tokens"] = entry.text_output_tokens
+                    if entry.request_count:
+                        item["request_count"] = entry.request_count
+                    items.append(item)
             return items
 
     @property
