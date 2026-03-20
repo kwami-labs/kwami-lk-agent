@@ -82,7 +82,12 @@ def _extract_features(content: str, max_items: int = 8) -> List[str]:
     return features[:max_items]
 
 
-async def _tavily_extract_images(api_key: str, urls: List[str], timeout: float = 12.0) -> Dict[str, List[str]]:
+async def _tavily_extract_images(
+    api_key: str,
+    urls: List[str],
+    timeout: float = 12.0,
+    usage_tracker: Any = None,
+) -> Dict[str, List[str]]:
     """Extract content and images from URLs via Tavily Extract. Returns url -> list of image URLs."""
     out: Dict[str, List[str]] = {u: [] for u in urls}
     if not api_key or not urls:
@@ -95,6 +100,13 @@ async def _tavily_extract_images(api_key: str, urls: List[str], timeout: float =
                 headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             )
             r.raise_for_status()
+            if usage_tracker:
+                usage_tracker.record_external_usage(
+                    "tool",
+                    "tavily/extract",
+                    units_used=1.0,
+                    request_count=1,
+                )
             data = r.json()
             for item in (data.get("results") or []):
                 url = item.get("url")
@@ -106,7 +118,11 @@ async def _tavily_extract_images(api_key: str, urls: List[str], timeout: float =
     return out
 
 
-async def _fetch_image_for_url(url: str, timeout: float = 3.5) -> Optional[str]:
+async def _fetch_image_for_url(
+    url: str,
+    timeout: float = 3.5,
+    usage_tracker: Any = None,
+) -> Optional[str]:
     """Try to get og:image or primary image for a URL via Microlink (no key required)."""
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -115,6 +131,13 @@ async def _fetch_image_for_url(url: str, timeout: float = 3.5) -> Optional[str]:
                 params={"url": url, "screenshot": "false", "video": "false"},
             )
             r.raise_for_status()
+            if usage_tracker:
+                usage_tracker.record_external_usage(
+                    "tool",
+                    "microlink/fetch",
+                    units_used=1.0,
+                    request_count=1,
+                )
             data = r.json()
             d = data.get("data") or {}
             img = d.get("image")
@@ -167,9 +190,14 @@ class AgentToolsMixin:
         return {
             "kwami_id": self.kwami_config.kwami_id,
             "kwami_name": self.kwami_config.kwami_name,
+            "soul": {
+                "name": self.kwami_config.soul.name,
+                "personality": self.kwami_config.soul.personality,
+            },
+            # Backward compatibility for older clients still reading "persona".
             "persona": {
-                "name": self.kwami_config.persona.name,
-                "personality": self.kwami_config.persona.personality,
+                "name": self.kwami_config.soul.name,
+                "personality": self.kwami_config.soul.personality,
             },
         }
 
@@ -394,6 +422,13 @@ class AgentToolsMixin:
                     params={"engine": "google_shopping", "q": query, "api_key": api_key, "num": max_results},
                 )
                 r.raise_for_status()
+                if getattr(self, "usage_tracker", None):
+                    self.usage_tracker.record_external_usage(
+                        "tool",
+                        "serpapi/google_shopping",
+                        units_used=1.0,
+                        request_count=1,
+                    )
                 data = r.json()
         except Exception as e:
             logger.warning("SerpApi product search failed: %s", e)
@@ -492,6 +527,13 @@ class AgentToolsMixin:
                     headers=headers,
                 )
                 resp.raise_for_status()
+                if getattr(self, "usage_tracker", None):
+                    self.usage_tracker.record_external_usage(
+                        "tool",
+                        "tavily/search",
+                        units_used=1.0,
+                        request_count=1,
+                    )
                 data = resp.json()
         except httpx.HTTPStatusError as e:
             body = ""
@@ -558,7 +600,11 @@ class AgentToolsMixin:
 
         # Get images: prefer Tavily Extract (real page images), fallback to Microlink
         result_urls = [u["url"] for u in ui_results]
-        extract_images = await _tavily_extract_images(api_key, result_urls)
+        extract_images = await _tavily_extract_images(
+            api_key,
+            result_urls,
+            usage_tracker=getattr(self, "usage_tracker", None),
+        )
         for i, u in enumerate(ui_results):
             imgs = extract_images.get(u["url"]) or []
             if imgs:
@@ -567,7 +613,10 @@ class AgentToolsMixin:
         async def add_image_fallback(idx: int, url: str) -> None:
             if ui_results[idx].get("image"):
                 return
-            img = await _fetch_image_for_url(url)
+            img = await _fetch_image_for_url(
+                url,
+                usage_tracker=getattr(self, "usage_tracker", None),
+            )
             if img and idx < len(ui_results):
                 ui_results[idx]["image"] = (img or "")[:400]
 
