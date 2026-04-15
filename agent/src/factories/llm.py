@@ -31,10 +31,18 @@ def create_llm(config: KwamiVoiceConfig):
     
     if provider == "openai":
         temp = _openai_temperature(config, model or "")
-        return openai.LLM(
-            model=model or "gpt-4o-mini",
-            temperature=temp,
-        )
+        try:
+            return openai.LLM(
+                model=model or "gpt-4o-mini",
+                temperature=temp,
+                max_tokens=config.llm_max_tokens,
+            )
+        except TypeError:
+            # Older plugin versions may not expose max_tokens in constructor.
+            return openai.LLM(
+                model=model or "gpt-4o-mini",
+                temperature=temp,
+            )
     
     elif provider == "google" and google is not None:
         return google.LLM(

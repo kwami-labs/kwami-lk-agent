@@ -437,6 +437,8 @@ async def update_llm(
         new_voice.llm_model = strip_model_prefix(config["model"], llm_provider)
     if config.get("temperature"):
         new_voice.llm_temperature = config["temperature"]
+    if config.get("maxTokens"):
+        new_voice.llm_max_tokens = config["maxTokens"]
     
     new_config.voice = new_voice
     new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
