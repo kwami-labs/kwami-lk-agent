@@ -81,7 +81,6 @@ class KwamiSoulConfig:
         "compassionate",
     ] = "warm"
     emotional_traits: dict[str, float] = field(default_factory=dict)
-    emotional_trait_weights: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass

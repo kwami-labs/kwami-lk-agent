@@ -154,13 +154,6 @@ class KwamiAgent(Agent, AgentToolsMixin):
                 "creativity": 0.9,
                 "patience": 1.15,
             }
-            if isinstance(getattr(soul, "emotional_trait_weights", None), dict):
-                for key, value in soul.emotional_trait_weights.items():
-                    if key in trait_weights:
-                        try:
-                            trait_weights[key] = max(0.5, min(1.5, float(value)))
-                        except (TypeError, ValueError):
-                            continue
             weighted_traits = []
             for key, value in soul.emotional_traits.items():
                 if key not in trait_labels:

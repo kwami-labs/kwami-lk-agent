@@ -129,11 +129,6 @@ async def handle_full_config(
         emotional_traits = _value_from_keys(soul_data, "emotionalTraits", "emotional_traits")
         if isinstance(emotional_traits, dict):
             new_config.soul.emotional_traits = emotional_traits
-        emotional_trait_weights = _value_from_keys(
-            soul_data, "emotionalTraitWeights", "emotional_trait_weights"
-        )
-        if isinstance(emotional_trait_weights, dict):
-            new_config.soul.emotional_trait_weights = emotional_trait_weights
         
         # 2. Initialize Memory
         memory = None
@@ -505,13 +500,6 @@ async def update_soul(
         emotional_traits = _value_from_keys(config, "emotionalTraits", "emotional_traits")
         if isinstance(emotional_traits, dict):
             soul.emotional_traits = emotional_traits
-            updated = True
-    if "emotionalTraitWeights" in config or "emotional_trait_weights" in config:
-        emotional_trait_weights = _value_from_keys(
-            config, "emotionalTraitWeights", "emotional_trait_weights"
-        )
-        if isinstance(emotional_trait_weights, dict):
-            soul.emotional_trait_weights = emotional_trait_weights
             updated = True
     if updated:
         agent.kwami_config.soul = soul
