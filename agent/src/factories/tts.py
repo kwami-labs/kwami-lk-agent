@@ -116,11 +116,30 @@ def create_tts(config: KwamiVoiceConfig):
 
         else:
             logger.warning(f"Unknown TTS provider '{provider}', falling back to OpenAI")
-            return _create_openai_tts(config)
+            return _fallback_to_openai_tts(config, provider)
 
     except Exception as e:
         logger.error(f"Failed to create {provider} TTS: {e}, falling back to OpenAI")
-        return _create_openai_tts(config)
+        return _fallback_to_openai_tts(config, provider)
+
+
+def _fallback_to_openai_tts(config: KwamiVoiceConfig, attempted_provider: str):
+    """Serve OpenAI TTS and record that the configured provider is not in use.
+
+    The config must be corrected, not just logged: `_update_tts_options` in the
+    config handler re-detects the provider to validate incoming voice changes,
+    so leaving `tts_provider` reading "elevenlabs" while an OpenAI client is
+    actually running made every later voice update validate against the wrong
+    provider's voice list.
+    """
+    if attempted_provider != TTSProviders.OPENAI:
+        config.tts_provider = TTSProviders.OPENAI
+        logger.warning(
+            "TTS provider recorded as OpenAI after '%s' could not be created; "
+            "voice validation now follows OpenAI's voice list.",
+            attempted_provider,
+        )
+    return _create_openai_tts(config)
 
 
 # =============================================================================
