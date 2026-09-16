@@ -74,8 +74,7 @@ class UsageReporter:
 
         if not self._api_key:
             logger.warning(
-                "KWAMI_API_KEY not set, skipping usage report. "
-                "Usage will not be billed."
+                "KWAMI_API_KEY not set, skipping usage report. Usage will not be billed."
             )
             return False
 
@@ -98,9 +97,7 @@ class UsageReporter:
                         return True
                     else:
                         body = await resp.text()
-                        logger.error(
-                            f"Usage report failed (HTTP {resp.status}): {body}"
-                        )
+                        logger.error(f"Usage report failed (HTTP {resp.status}): {body}")
                         return False
 
         except Exception as e:

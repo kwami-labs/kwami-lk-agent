@@ -9,8 +9,7 @@ from typing import TYPE_CHECKING
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from zep_cloud.client import AsyncZep
-    from zep_cloud.types import Message as ZepMessage
+    pass
 
 logger = get_logger("memory")
 

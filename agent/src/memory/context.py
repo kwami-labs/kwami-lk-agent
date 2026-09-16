@@ -6,7 +6,7 @@ includes temporal validity information for facts.
 """
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .utils import logger
 
@@ -38,10 +38,10 @@ DEFAULT_CONTEXT_TEMPLATE = """# USER PROFILE
 class MemoryContext:
     """Context retrieved from Zep memory for LLM injection."""
 
-    context_block: Optional[str] = None
+    context_block: str | None = None
     """Pre-formatted context block from Zep context template."""
 
-    summary: Optional[str] = None
+    summary: str | None = None
     facts: list[str] = None
     entities: list[dict] = None
     recent_messages: list[dict] = None
@@ -184,16 +184,21 @@ async def get_context(
 
     # Strategy 2: Fallback to thread context + graph search
     if not context.context_block:
-        # Get thread context (summary)
+        # Get thread context (summary).
+        # `thread.get_context` does not exist in zep-cloud; the real call is
+        # `get_user_context`, which is the same endpoint the template path uses
+        # with template_id omitted. The old name raised AttributeError on every
+        # call, so `summary` was always None and this whole fallback was dead.
         try:
-            thread_context = await client.thread.get_context(
+            thread_context = await client.thread.get_user_context(
                 thread_id=session_id,
-                min_score=min_relevance,
+                min_rating=min_relevance,
+                mode="summary",
             )
             if thread_context and thread_context.context:
                 context.summary = thread_context.context
         except Exception as e:
-            logger.debug(f"Could not retrieve thread context: {e}")
+            logger.warning(f"Could not retrieve thread context: {e}")
 
         # Get facts via graph search
         if include_facts:
@@ -215,7 +220,6 @@ async def get_context(
                         if _is_assistant_fact(fact, assistant_lower):
                             continue
                         # Include temporal validity
-                        valid_at = getattr(edge, "valid_at", None)
                         invalid_at = getattr(edge, "invalid_at", None)
                         if invalid_at and str(invalid_at) != "present":
                             fact = f"{fact} (no longer valid since {invalid_at})"
@@ -225,9 +229,13 @@ async def get_context(
 
     # Always get recent messages (not part of context template)
     try:
-        messages_response = await client.thread.get_messages(
+        # `thread.get_messages` does not exist; the accessor is `thread.get`,
+        # with `lastn` selecting the most recent turns. Until this was fixed,
+        # `recent_messages` was unconditionally empty, which in turn made
+        # `is_returning_user` and the recent-topics greeting unreachable.
+        messages_response = await client.thread.get(
             thread_id=session_id,
-            limit=max_messages,
+            lastn=max_messages,
         )
         if messages_response and messages_response.messages:
             context.recent_messages = [

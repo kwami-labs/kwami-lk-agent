@@ -22,13 +22,13 @@ from livekit.plugins import silero
 
 from .agent import KwamiAgent
 from .config import KwamiConfig
-from .factories import create_llm, create_stt, create_tts, create_realtime_model
-from .handlers import handle_full_config, handle_config_update, handle_tool_result
-from .memory import create_memory
+from .factories import create_llm, create_realtime_model, create_stt, create_tts
+from .handlers import handle_config_update, handle_full_config, handle_tool_result
 from .room_context import set_current_room
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
-from .session import SessionState, create_session_state
+from .session import create_session_state
 from .utils.logging import get_logger
+from .utils.room import is_agent_participant, resolve_user_identity
 
 logger = get_logger()
 
@@ -49,25 +49,20 @@ async def entrypoint(ctx: JobContext) -> None:
     set_current_room(ctx.room)
     logger.info(f"Kwami session starting in room: {ctx.room.name}")
 
-    # Log participants and extract user identity
-    logger.info(f"Room has {len(ctx.room.remote_participants)} remote participants")
+    # The room is NOT connected yet -- JobContext.room is populated by
+    # session.start() below, so participants are resolved after that point.
     user_identity = None
-    for pid, p in ctx.room.remote_participants.items():
-        logger.info(f"  - {p.identity} (connected: {p.is_connected})")
-        if not p.identity.startswith("agent"):
-            user_identity = p.identity
-            logger.info(f"User identity: {user_identity}")
 
     # Get prewarmed VAD
     vad = ctx.proc.userdata["vad"]
-    
+
     # Create initial agent with default configuration.
     # Skip greeting -- this is a placeholder agent until the frontend sends
     # the real config via the "config" data message. The configured agent
     # will greet properly with the correct persona, voice, and memory.
     config = KwamiConfig()
     initial_agent = create_agent_from_config(config, vad, skip_greeting=True)
-    
+
     # Create session and state
     session = AgentSession()
     state = create_session_state(
@@ -93,27 +88,23 @@ async def entrypoint(ctx: JobContext) -> None:
             state.usage_tracker.on_tts_metrics(metrics)
         elif metrics_type == "realtime_model_metrics":
             state.usage_tracker.on_realtime_metrics(metrics)
-    
+
     # Setup data handler for config updates and tool results
     def handle_data(data: rtc.DataPacket) -> None:
         try:
             payload = data.data.decode("utf-8")
             message = json.loads(payload)
             msg_type = message.get("type")
-            
+
             logger.info(f"Received data message: {msg_type}")
-            
+
             if msg_type == "config":
                 asyncio.create_task(
-                    handle_full_config(
-                        session, state, message, vad, create_agent_from_config
-                    )
+                    handle_full_config(session, state, message, vad, create_agent_from_config)
                 )
             elif msg_type == "config_update":
                 asyncio.create_task(
-                    handle_config_update(
-                        session, state, message, vad, create_agent_from_config
-                    )
+                    handle_config_update(session, state, message, vad, create_agent_from_config)
                 )
             elif msg_type == "tool_result":
                 handle_tool_result(
@@ -133,15 +124,16 @@ async def entrypoint(ctx: JobContext) -> None:
             elif msg_type == "search_similar":
                 # Client "Find similar" button: run a product search like the selected result
                 title = (message.get("title") or "").strip() or "similar products"
-                url = message.get("url") or ""
                 if state.current_agent and title:
                     query = f"similar to {title[:80]} buy"
                     logger.info("Running similar search from client: query=%s", query[:60])
                     ctx_simple = type("Ctx", (), {"room": ctx.room})()
                     asyncio.create_task(
-                        state.current_agent.web_search(ctx_simple, query, max_results=5, search_for_products=True)
+                        state.current_agent.web_search(
+                            ctx_simple, query, max_results=5, search_for_products=True
+                        )
                     )
-                
+
         except Exception as e:
             logger.error(f"Error handling data message: {e}")
 
@@ -160,6 +152,25 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
+    # Now that the room is connected, the participant list is real.
+    if not state.user_identity:
+        state.user_identity = resolve_user_identity(ctx.room)
+    logger.info(
+        "Room connected with %d remote participant(s); user identity: %s",
+        len(ctx.room.remote_participants),
+        state.user_identity or "<unresolved>",
+    )
+
+    @ctx.room.on("participant_connected")
+    def on_participant_connected(participant) -> None:
+        # A human can join after the agent; without this the session would
+        # finish with no user_identity and its usage would never be billed.
+        if state.user_identity or is_agent_participant(participant):
+            return
+        if participant.identity:
+            state.user_identity = participant.identity
+            logger.info("Resolved user identity on join: %s", state.user_identity)
+
     kwami_id = resolve_kwami_id(ctx)
     if kwami_id:
         logger.info("Resolved telephony kwami_id: %s", kwami_id)
@@ -172,7 +183,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 vad,
                 create_agent_from_config,
             )
-    
+
     logger.info(f"Kwami session started for room: {ctx.room.name}")
 
 
@@ -183,18 +194,18 @@ def create_agent_from_config(
     skip_greeting: bool = False,
 ) -> KwamiAgent:
     """Create a KwamiAgent instance from a configuration object.
-    
+
     Args:
         config: The Kwami configuration.
         vad: Voice Activity Detection instance.
         memory: Optional memory instance.
         skip_greeting: If True, skip the initial greeting (for reconfigurations).
-        
+
     Returns:
         Configured KwamiAgent instance.
     """
     voice_config = config.voice
-    
+
     if voice_config.pipeline_type == "realtime":
         logger.info(
             f"Using realtime pipeline: "

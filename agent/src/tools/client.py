@@ -3,7 +3,7 @@
 import asyncio
 import json
 import uuid
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any
 
 from livekit.agents import RunContext, function_tool
 
@@ -19,7 +19,7 @@ logger = get_logger("client_tools")
 
 class ClientToolManager:
     """Manages dynamic tools that are executed on the client side.
-    
+
     This class handles:
     - Registration of client-defined tools
     - Forwarding tool calls to the client via data channel
@@ -28,18 +28,18 @@ class ClientToolManager:
 
     def __init__(self, kwami_agent: "KwamiAgent"):
         """Initialize the client tool manager.
-        
+
         Args:
             kwami_agent: The KwamiAgent instance (needed to access the room for sending data)
         """
         self.agent = kwami_agent
-        self.pending_calls: Dict[str, asyncio.Future] = {}
-        self.registered_tools: List[Dict[str, Any]] = []
-        self._tools: List[Any] = []
+        self.pending_calls: dict[str, asyncio.Future] = {}
+        self.registered_tools: list[dict[str, Any]] = []
+        self._tools: list[Any] = []
 
-    def register_client_tools(self, tool_definitions: List[Dict[str, Any]]) -> None:
+    def register_client_tools(self, tool_definitions: list[dict[str, Any]]) -> None:
         """Register tools defined in configuration for the LLM.
-        
+
         Args:
             tool_definitions: List of tool definition dictionaries.
         """
@@ -50,7 +50,7 @@ class ClientToolManager:
             # Validate tool definition
             if not validate_tool_definition(tool_def):
                 continue
-            
+
             # Handle different formats
             func_def = tool_def.get("function", tool_def)
             tool_name = func_def.get("name")
@@ -71,12 +71,12 @@ class ClientToolManager:
         parameters: dict,
     ) -> Any:
         """Create a function tool that forwards calls to the client.
-        
+
         Args:
             tool_name: The name of the tool.
             description: Tool description for the LLM.
             parameters: JSON schema for tool parameters.
-            
+
         Returns:
             A function_tool decorated handler.
         """
@@ -85,7 +85,9 @@ class ClientToolManager:
             "type": "function",
             "name": tool_name,
             "description": description,
-            "parameters": parameters if parameters else {
+            "parameters": parameters
+            if parameters
+            else {
                 "type": "object",
                 "properties": {},
                 "required": [],
@@ -135,7 +137,7 @@ class ClientToolManager:
                 try:
                     result = await asyncio.wait_for(result_future, timeout=30.0)
                     return result
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     logger.warning(f"Tool call timed out: {tool_name} ({tool_call_id})")
                     return "Error: Tool execution timed out"
 
@@ -151,11 +153,11 @@ class ClientToolManager:
     def handle_tool_result(
         self,
         tool_call_id: str,
-        result: Optional[str],
-        error: Optional[str] = None,
+        result: str | None,
+        error: str | None = None,
     ) -> None:
         """Handle incoming tool result from client.
-        
+
         Args:
             tool_call_id: The ID of the tool call.
             result: The result string from the client.
@@ -164,20 +166,20 @@ class ClientToolManager:
         if tool_call_id not in self.pending_calls:
             logger.warning(f"Received result for unknown tool call: {tool_call_id}")
             return
-        
+
         future = self.pending_calls[tool_call_id]
         if future.done():
             logger.warning(f"Tool call already completed: {tool_call_id}")
             return
-        
+
         if error:
             future.set_result(f"Error from client: {error}")
         else:
             future.set_result(result or "")
 
-    def create_client_tools(self) -> List[Any]:
+    def create_client_tools(self) -> list[Any]:
         """Return the list of registered client tools.
-        
+
         Returns:
             List of function_tool instances.
         """

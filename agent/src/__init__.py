@@ -3,10 +3,10 @@
 from .agent import KwamiAgent
 from .config import (
     KwamiConfig,
-    KwamiVoiceConfig,
-    KwamiSoulConfig,
-    KwamiPersonaConfig,
     KwamiMemoryConfig,
+    KwamiPersonaConfig,
+    KwamiSoulConfig,
+    KwamiVoiceConfig,
 )
 from .memory import KwamiMemory, create_memory
 from .session import SessionState, create_session_state

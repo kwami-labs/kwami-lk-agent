@@ -11,7 +11,7 @@ Tracks:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import Lock
 from typing import Any
 
@@ -126,10 +126,7 @@ class UsageTracker:
             entry.completion_tokens += completion_tokens
             entry.cached_input_tokens += cached_input_tokens
 
-        logger.info(
-            f"LLM usage: {model_id} +{tokens} tokens "
-            f"(total: {entry.total_units:.0f})"
-        )
+        logger.info(f"LLM usage: {model_id} +{tokens} tokens (total: {entry.total_units:.0f})")
 
     # -----------------------------------------------------------------
     # STT tracking
@@ -154,8 +151,7 @@ class UsageTracker:
             entry.audio_input_minutes += minutes
 
         logger.info(
-            f"STT usage: {model_id} +{minutes:.3f} min "
-            f"(total: {entry.total_units:.3f} min)"
+            f"STT usage: {model_id} +{minutes:.3f} min (total: {entry.total_units:.3f} min)"
         )
 
     # -----------------------------------------------------------------
@@ -179,8 +175,7 @@ class UsageTracker:
             entry.event_count += 1
 
         logger.info(
-            f"TTS usage: {model_id} +{characters} chars "
-            f"(total: {entry.total_units:.0f} chars)"
+            f"TTS usage: {model_id} +{characters} chars (total: {entry.total_units:.0f} chars)"
         )
 
     # -----------------------------------------------------------------

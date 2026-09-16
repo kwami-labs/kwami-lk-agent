@@ -11,9 +11,9 @@ Key fixes over the previous implementation:
   Preference, Location, Event, Object, Topic, Organization, Document)
 """
 
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
-from .utils import get_zep_imports, logger
+from .utils import logger
 
 if TYPE_CHECKING:
     from zep_cloud.client import AsyncZep
@@ -64,8 +64,7 @@ DEFAULT_ENTITY_TYPES: list[dict] = [
     {
         "name": "Goal",
         "description": (
-            "User goals, objectives, aspirations, or things they want "
-            "to achieve or learn."
+            "User goals, objectives, aspirations, or things they want to achieve or learn."
         ),
         "fields": {
             "timeframe": "Timeframe for the goal (e.g., short-term, long-term, ongoing)",
@@ -182,8 +181,8 @@ def _build_entity_models(
         Dict mapping entity type names to their model classes.
     """
     try:
-        from zep_cloud.external_clients.ontology import EntityModel, EntityText
         from pydantic import Field
+        from zep_cloud.external_clients.ontology import EntityModel, EntityText
     except ImportError:
         logger.warning("Zep ontology SDK classes not available")
         return {}
@@ -237,9 +236,9 @@ def _build_edge_models(
         Dict mapping edge type names to (model_class, [constraints]) tuples.
     """
     try:
-        from zep_cloud.external_clients.ontology import EdgeModel, EntityText
-        from zep_cloud import EntityEdgeSourceTarget
         from pydantic import Field
+        from zep_cloud import EntityEdgeSourceTarget
+        from zep_cloud.external_clients.ontology import EdgeModel, EntityText
     except ImportError:
         logger.warning("Zep ontology SDK classes not available")
         return {}
@@ -331,44 +330,8 @@ async def configure_ontology(
         return True
 
     except ImportError:
-        logger.warning(
-            "Zep ontology SDK classes not available, skipping ontology configuration"
-        )
+        logger.warning("Zep ontology SDK classes not available, skipping ontology configuration")
         return False
     except Exception as e:
-        logger.warning(
-            f"Could not configure ontology (may not be supported on your plan): {e}"
-        )
+        logger.warning(f"Could not configure ontology (may not be supported on your plan): {e}")
         return False
-
-
-async def get_ontology(
-    client: "AsyncZep",
-    user_id: str,
-) -> dict | None:
-    """Get the current ontology configuration.
-
-    Args:
-        client: The async Zep client.
-        user_id: The Zep user ID to get the ontology for.
-
-    Returns:
-        Dict with 'entity_types' and 'edge_types', or None if not available.
-    """
-    try:
-        ontology = await client.graph.get_ontology(user_id=user_id)
-        if ontology:
-            return {
-                "entity_types": [
-                    {"name": e.name, "description": e.description}
-                    for e in (ontology.entity_types or [])
-                ],
-                "edge_types": [
-                    {"name": e.name, "description": e.description}
-                    for e in (ontology.edge_types or [])
-                ],
-            }
-    except Exception as e:
-        logger.debug(f"Could not get ontology: {e}")
-
-    return None
