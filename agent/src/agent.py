@@ -290,12 +290,16 @@ class KwamiAgent(Agent, AgentToolsMixin):
             return
 
         try:
-            # Pre-cache user name for message attribution
-            user_name = await self._memory.get_user_name()
+            # These two are independent Zep round-trips and both sit on the
+            # critical path before the first utterance, so run them together
+            # rather than back to back.
+            user_name, context = await asyncio.gather(
+                self._memory.get_user_name(),
+                self._memory.get_context(),
+            )
             if user_name:
                 logger.info(f"Cached user name from memory: {user_name}")
 
-            context = await self._memory.get_context()
             memory_text = context.to_system_prompt_addition()
 
             if memory_text:
