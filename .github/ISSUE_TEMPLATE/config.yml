@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/kwami-labs/kwami-lk-agent/security/advisories/new
+    about: Report a vulnerability privately. Do not file a public issue.
+  - name: Documentation
+    url: https://github.com/kwami-labs/kwami-lk-agent/blob/dev/docs/README.md
+    about: Architecture, protocol, security, and development guides.
