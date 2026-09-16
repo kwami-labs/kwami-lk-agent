@@ -1,8 +1,19 @@
 # Kwami LiveKit Agent
 
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](./LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.13-blue.svg)](./agent/pyproject.toml)
+[![CI](https://github.com/kwami-labs/kwami-lk-agent/actions/workflows/test.yml/badge.svg)](https://github.com/kwami-labs/kwami-lk-agent/actions/workflows/test.yml)
+
 LiveKit Cloud agent for Kwami AI voice interactions. A Python voice agent built
 on [livekit-agents](https://docs.livekit.io/agents/), configured at runtime by
 the Kwami frontend over the LiveKit data channel.
+
+**[Documentation](./docs/README.md)** ·
+**[Architecture](./docs/architecture.md)** ·
+**[Protocol](./docs/protocol.md)** ·
+**[Security](./docs/security.md)** ·
+**[Contributing](./CONTRIBUTING.md)** ·
+**[Changelog](./CHANGELOG.md)**
 
 ## Quick Start
 
@@ -25,24 +36,32 @@ kwami-lk-agent/
 ├── agent/
 │   ├── src/
 │   │   ├── main.py             # Entry point: worker, job lifecycle, data-channel dispatch
-│   │   ├── agent.py            # KwamiAgent: prompt assembly, framework hooks, greeting
+│   │   ├── agent.py            # KwamiAgent: hooks, greeting, memory injection
 │   │   ├── session.py          # SessionState: agent swaps, resource ownership, usage reporting
-│   │   ├── config.py           # KwamiConfig and nested voice/soul/memory config
+│   │   ├── settings.py         # Frozen process Settings (env → values)
 │   │   ├── constants.py        # Provider, model and voice catalogues
 │   │   ├── runtime_bootstrap.py# Telephony: resolve kwami_id, fetch runtime config
-│   │   ├── room_context.py     # ContextVar holding the active room for tools
-│   │   ├── factories/          # STT / LLM / TTS / VAD / realtime construction
-│   │   ├── handlers/           # config, config_update and tool_result handling
+│   │   ├── domain/             # Pure: config, parsing, prompt, usage maths
+│   │   ├── ports/              # I/O protocols
+│   │   ├── adapters/           # LiveKit publisher, pooled HTTP
+│   │   ├── runtime/            # dispatch, lifecycle, pipeline, AgentDeps
+│   │   ├── factories/          # STT / LLM / TTS / VAD / realtime
+│   │   ├── handlers/           # config, config_update, tool_result
 │   │   ├── memory/             # Zep Cloud: manager, context, search, ontology
-│   │   ├── tools/              # Built-in agent tools and client-side tool bridge
+│   │   ├── tools/              # Built-in tools and client-side tool bridge
 │   │   ├── browser/            # Browser Use Cloud session, CDP, URL safety
-│   │   ├── usage/              # Usage tracking and credit reporting
-│   │   └── utils/              # Logging, provider parsing, room and validation helpers
-│   ├── tests/                  # unit / contract / integration / e2e
+│   │   ├── usage/              # Credit reporting
+│   │   └── utils/              # Logging, provider parsing, room helpers
+│   ├── tests/                  # unit / contract / integration / runtime / e2e
 │   ├── livekit.toml            # LiveKit Cloud config
 │   ├── pyproject.toml
 │   └── Dockerfile
-├── .github/workflows/          # CI: lint, types, tests, coverage, Docker, nightly E2E
+├── docs/                       # Architecture, protocol, security, …
+├── .github/                    # CI, issue and PR templates
+├── CHANGELOG.md
+├── CONTRIBUTING.md
+├── CODE_OF_CONDUCT.md
+├── SECURITY.md
 ├── .env.sample
 ├── Makefile
 └── README.md
@@ -76,7 +95,10 @@ Four layers under `agent/tests/`:
   SDKs: that the hooks we override exist with the signatures we use, that every
   advertised provider constructs, that every Zep method we call is real.
 - **`integration/`** — wiring, against a real `livekit.agents.Agent` and mocked transports.
+- **`runtime/`** — pipeline construction and job-lifecycle helpers, without a worker.
 - **`e2e/`** — marked `live`, excluded by default; runs against real providers.
+
+Longer notes: [docs/testing.md](./docs/testing.md).
 
 **Never stub `livekit` or `zep_cloud` in tests.** Both are installed and are
 imported for real. An earlier version of `conftest.py` replaced them with
@@ -109,6 +131,8 @@ Memory is enabled automatically when `ZEP_API_KEY` is set.
   timeout so a slow Zep can never delay the greeting
 - The agent exposes `remember_fact` and `recall_memories` tools
 
+Details: [docs/memory.md](./docs/memory.md).
+
 ## Browsing
 
 The agent can drive a cloud browser (Browser Use Cloud) that the user watches
@@ -125,6 +149,8 @@ keeps the user's cookies and logins:
 A browser is never started for a session without a real `kwami_id`, because
 profiles are per-user and a shared one would leak logins between users.
 
+Details: [docs/security.md](./docs/security.md).
+
 ## Deployment
 
 ```bash
@@ -135,6 +161,7 @@ lk agent deploy        # or: make deploy
 
 LiveKit Cloud handles scaling, lifecycle, and hosting. CI builds the image on
 every push so deploy breakage is caught before `lk agent deploy`.
+Details: [docs/deployment.md](./docs/deployment.md).
 
 ## Environment Variables
 
@@ -168,12 +195,32 @@ Some LLM providers (`anthropic`, `groq`, `google`) need their own
 installed the agent logs a warning and falls back to OpenAI rather than failing
 the session.
 
+## Documentation
+
+| Guide | Topic |
+| --- | --- |
+| [Architecture](./docs/architecture.md) | Hexagonal layout, session lifecycle, voice pipelines |
+| [Protocol](./docs/protocol.md) | Data-channel messages (`config`, tools, search, browser) |
+| [Configuration](./docs/configuration.md) | Environment variables and `KwamiConfig` |
+| [Memory](./docs/memory.md) | Zep threads, graph, ontology |
+| [Security](./docs/security.md) | Threat model, browser SSRF, prompt injection |
+| [Billing](./docs/billing.md) | Usage tracking and credit reporting |
+| [Development](./docs/development.md) | Local setup and conventions |
+| [Testing](./docs/testing.md) | Unit / contract / integration / live e2e |
+| [Deployment](./docs/deployment.md) | Docker and LiveKit Cloud |
+
 ## Related Repositories
 
 - **[kwami-lk-api](https://github.com/alexcolls/kwami-lk-api)** - Token endpoint and memory API
 - **[kwami-ai](https://github.com/alexcolls/kwami-ai)** - TypeScript SDK
 - **[kwami-ai-pg](https://github.com/alexcolls/kwami-ai-pg)** - Playground Vue app
 
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). By participating you agree to the
+[Code of Conduct](./CODE_OF_CONDUCT.md). Security reports go through
+[SECURITY.md](./SECURITY.md), not public issues.
+
 ## License
 
-Apache 2.0
+Licensed under the [Apache License 2.0](./LICENSE).
