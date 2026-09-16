@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from livekit.agents.voice.agent import find_function_tools
 
 from ..config import KwamiConfig
+from ..domain import clone_config, integer, number, section, text
 from ..memory import create_memory
 from ..utils.logging import get_logger, log_error
 from ..utils.provider import detect_provider_change, strip_model_prefix
@@ -76,43 +77,56 @@ async def handle_full_config(
         # 1. Parse into KwamiConfig
         new_config = KwamiConfig()
 
-        # Apply frontend voice config
-        voice_data = message.get("voice", {})
+        # Apply frontend voice config. `section` tolerates a null or wrong-typed
+        # "voice" key, which used to raise and drop the entire config message.
+        voice_data = section(message, "voice")
 
-        # TTS
-        tts_data = voice_data.get("tts", {})
-        if tts_data.get("provider"):
-            new_config.voice.tts_provider = tts_data["provider"]
-        if tts_data.get("model"):
+        # TTS. Numeric fields go through `number`, so an explicit 0 is honoured
+        # rather than being read as "not provided".
+        tts_data = section(voice_data, "tts")
+        tts_provider_in = text(tts_data, "provider")
+        if tts_provider_in:
+            new_config.voice.tts_provider = tts_provider_in
+        tts_model_in = text(tts_data, "model")
+        if tts_model_in:
             # Strip provider prefix from model (e.g. "openai/tts-1" -> "tts-1")
-            tts_provider = tts_data.get("provider") or new_config.voice.tts_provider
-            new_config.voice.tts_model = strip_model_prefix(tts_data["model"], tts_provider)
-        if tts_data.get("voice"):
-            new_config.voice.tts_voice = tts_data["voice"]
-        if tts_data.get("speed"):
-            new_config.voice.tts_speed = tts_data["speed"]
+            tts_provider = tts_provider_in or new_config.voice.tts_provider
+            new_config.voice.tts_model = strip_model_prefix(tts_model_in, tts_provider)
+        tts_voice_in = text(tts_data, "voice")
+        if tts_voice_in:
+            new_config.voice.tts_voice = tts_voice_in
+        tts_speed_in = number(tts_data, "speed")
+        if tts_speed_in is not None:
+            new_config.voice.tts_speed = tts_speed_in
 
         # LLM
-        llm_data = voice_data.get("llm", {})
-        if llm_data.get("provider"):
-            new_config.voice.llm_provider = llm_data["provider"]
-        if llm_data.get("model"):
-            llm_provider = llm_data.get("provider") or new_config.voice.llm_provider
-            new_config.voice.llm_model = strip_model_prefix(llm_data["model"], llm_provider)
-        if llm_data.get("temperature"):
-            new_config.voice.llm_temperature = llm_data["temperature"]
-        if llm_data.get("maxTokens"):
-            new_config.voice.llm_max_tokens = llm_data["maxTokens"]
+        llm_data = section(voice_data, "llm")
+        llm_provider_in = text(llm_data, "provider")
+        if llm_provider_in:
+            new_config.voice.llm_provider = llm_provider_in
+        llm_model_in = text(llm_data, "model")
+        if llm_model_in:
+            llm_provider = llm_provider_in or new_config.voice.llm_provider
+            new_config.voice.llm_model = strip_model_prefix(llm_model_in, llm_provider)
+        temperature_in = number(llm_data, "temperature")
+        if temperature_in is not None:
+            new_config.voice.llm_temperature = temperature_in
+        max_tokens_in = integer(llm_data, "maxTokens", "max_tokens")
+        if max_tokens_in is not None:
+            new_config.voice.llm_max_tokens = max_tokens_in
 
         # STT
-        stt_data = voice_data.get("stt", {})
-        if stt_data.get("provider"):
-            new_config.voice.stt_provider = stt_data["provider"]
-        if stt_data.get("model"):
-            stt_provider = stt_data.get("provider") or new_config.voice.stt_provider
-            new_config.voice.stt_model = strip_model_prefix(stt_data["model"], stt_provider)
-        if stt_data.get("language"):
-            new_config.voice.stt_language = stt_data["language"]
+        stt_data = section(voice_data, "stt")
+        stt_provider_in = text(stt_data, "provider")
+        if stt_provider_in:
+            new_config.voice.stt_provider = stt_provider_in
+        stt_model_in = text(stt_data, "model")
+        if stt_model_in:
+            stt_provider = stt_provider_in or new_config.voice.stt_provider
+            new_config.voice.stt_model = strip_model_prefix(stt_model_in, stt_provider)
+        stt_language_in = text(stt_data, "language")
+        if stt_language_in:
+            new_config.voice.stt_language = stt_language_in
 
         # Kwami details
         # Use kwamiId from message, or fall back to user_identity (participant name)
@@ -319,10 +333,11 @@ async def update_voice(
             # (e.g. Rime "astra") carries over to the new provider (e.g. ElevenLabs)
             # where it doesn't exist.
             new_voice_config.tts_voice = ""
-        if config.get("tts_speed"):
-            new_voice_config.tts_speed = config["tts_speed"]
+        speed_in = number(config, "tts_speed")
+        if speed_in is not None:
+            new_voice_config.tts_speed = speed_in
 
-        new_config = replace(agent.kwami_config)
+        new_config = clone_config(agent.kwami_config)
         new_config.voice = new_voice_config
 
         new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
@@ -386,8 +401,9 @@ async def _update_tts_options(
                 updates["voice"] = new_voice
 
     # LiveKit Inference TTS (ElevenLabs, Rime) doesn't support speed in update_options
-    if config.get("tts_speed") and not is_inference_tts:
-        updates["speed"] = float(config["tts_speed"])
+    speed_in = number(config, "tts_speed")
+    if speed_in is not None and not is_inference_tts:
+        updates["speed"] = speed_in
 
     if updates and hasattr(agent.tts, "update_options"):
         try:
@@ -395,8 +411,8 @@ async def _update_tts_options(
             # Update stored config to reflect new values
             if new_voice:
                 agent.kwami_config.voice.tts_voice = new_voice
-            if config.get("tts_speed"):
-                agent.kwami_config.voice.tts_speed = config["tts_speed"]
+            if speed_in is not None:
+                agent.kwami_config.voice.tts_speed = speed_in
             logger.info(f"Updated TTS options: {updates}")
         except Exception as e:
             logger.warning(f"Failed to update TTS options: {e}")
@@ -434,7 +450,7 @@ async def _update_stt_if_needed(
         if config.get("stt_language"):
             new_voice_config.stt_language = config["stt_language"]
 
-        new_config = replace(agent.kwami_config)
+        new_config = clone_config(agent.kwami_config)
         new_config.voice = new_voice_config
 
         new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
@@ -468,18 +484,22 @@ async def update_llm(
         vad: Voice Activity Detection instance.
         create_agent_fn: Function to create a new agent from config.
     """
-    new_config = replace(agent.kwami_config)
+    new_config = clone_config(agent.kwami_config)
     new_voice = replace(new_config.voice)
 
-    if config.get("provider"):
-        new_voice.llm_provider = config["provider"]
-    if config.get("model"):
-        llm_provider = config.get("provider") or new_voice.llm_provider
-        new_voice.llm_model = strip_model_prefix(config["model"], llm_provider)
-    if config.get("temperature"):
-        new_voice.llm_temperature = config["temperature"]
-    if config.get("maxTokens"):
-        new_voice.llm_max_tokens = config["maxTokens"]
+    provider_in = text(config, "provider")
+    if provider_in:
+        new_voice.llm_provider = provider_in
+    model_in = text(config, "model")
+    if model_in:
+        llm_provider = provider_in or new_voice.llm_provider
+        new_voice.llm_model = strip_model_prefix(model_in, llm_provider)
+    temperature_in = number(config, "temperature")
+    if temperature_in is not None:
+        new_voice.llm_temperature = temperature_in
+    max_tokens_in = integer(config, "maxTokens", "max_tokens")
+    if max_tokens_in is not None:
+        new_voice.llm_max_tokens = max_tokens_in
 
     new_config.voice = new_voice
     new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
