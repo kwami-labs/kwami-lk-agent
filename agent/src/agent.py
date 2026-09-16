@@ -353,7 +353,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
                 self._inject_memory_context(),
                 timeout=Timeouts.MEMORY_CONTEXT,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(
                 "Memory context timed out after %.1fs; greeting without it.",
                 Timeouts.MEMORY_CONTEXT,
