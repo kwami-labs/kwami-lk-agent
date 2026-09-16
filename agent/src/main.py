@@ -1,7 +1,6 @@
 """Kwami Agent - Entry point for LiveKit Cloud agent sessions."""
 
 import asyncio
-import json
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,8 +22,9 @@ from livekit.plugins import silero
 from .agent import KwamiAgent
 from .config import KwamiConfig
 from .factories import create_llm, create_realtime_model, create_stt, create_tts
-from .handlers import handle_config_update, handle_full_config, handle_tool_result
+from .handlers import handle_full_config
 from .room_context import set_current_room
+from .runtime import DataMessageRouter, decode_data_message, route_metrics
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
@@ -84,69 +84,23 @@ async def entrypoint(ctx: JobContext) -> None:
     # Wire up metrics events for usage tracking
     @session.on("metrics_collected")
     def on_metrics(event):
-        metrics = event.metrics
-        metrics_type = getattr(metrics, "type", None)
-        if metrics_type == "llm_metrics":
-            state.usage_tracker.on_llm_metrics(metrics)
-        elif metrics_type == "stt_metrics":
-            state.usage_tracker.on_stt_metrics(metrics)
-        elif metrics_type == "tts_metrics":
-            state.usage_tracker.on_tts_metrics(metrics)
-        elif metrics_type == "realtime_model_metrics":
-            state.usage_tracker.on_realtime_metrics(metrics)
+        route_metrics(state.usage_tracker, event.metrics)
 
-    # Setup data handler for config updates and tool results
+    # Routing lives in runtime.dispatch so each branch is reachable from a test.
+    router = DataMessageRouter(
+        session=session,
+        state=state,
+        vad=vad,
+        create_agent_fn=create_agent_from_config,
+        room=ctx.room,
+    )
+
     def handle_data(data: rtc.DataPacket) -> None:
+        message = decode_data_message(data.data)
+        if message is None:
+            return
         try:
-            payload = data.data.decode("utf-8")
-            message = json.loads(payload)
-            msg_type = message.get("type")
-
-            logger.info(f"Received data message: {msg_type}")
-
-            if msg_type == "config":
-                # Serialized: concurrent config handling raced on update_agent.
-                state.spawn(
-                    state.run_serialized(
-                        handle_full_config(session, state, message, vad, create_agent_from_config)
-                    ),
-                    name="handle_full_config",
-                )
-            elif msg_type == "config_update":
-                state.spawn(
-                    state.run_serialized(
-                        handle_config_update(session, state, message, vad, create_agent_from_config)
-                    ),
-                    name="handle_config_update",
-                )
-            elif msg_type == "tool_result":
-                handle_tool_result(
-                    state.current_agent,
-                    message.get("toolCallId"),
-                    message.get("result"),
-                    message.get("error"),
-                )
-            elif msg_type == "browser_close_request":
-                # Frontend user clicked the browser panel close button
-                browser_session = state.active_browser_session
-                if browser_session is not None:
-                    state.spawn(browser_session.close(), name="browser_close_request")
-                    logger.info("Closing cloud browser per user request")
-
-            elif msg_type == "search_similar":
-                # Client "Find similar" button: run a product search like the selected result
-                title = (message.get("title") or "").strip() or "similar products"
-                if state.current_agent and title:
-                    query = f"similar to {title[:80]} buy"
-                    logger.info("Running similar search from client: query=%s", query[:60])
-                    ctx_simple = type("Ctx", (), {"room": ctx.room})()
-                    state.spawn(
-                        state.current_agent.web_search(
-                            ctx_simple, query, max_results=5, search_for_products=True
-                        ),
-                        name="search_similar",
-                    )
-
+            router.handle(message)
         except Exception as e:
             logger.error(f"Error handling data message: {e}")
 
