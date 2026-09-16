@@ -446,7 +446,10 @@ class KwamiMemory:
                 min_relevance=self.config.min_fact_relevance,
                 include_facts=self.config.include_facts,
             )
-            self._record_usage("zep/get_context")
+            # Same rule as graph search: get_context swallows its own errors
+            # and returns an empty context, so bill only on a real result.
+            if context.has_content():
+                self._record_usage("zep/get_context")
             return context
         except Exception as e:
             logger.error(f"Failed to get memory context: {e}")
@@ -504,7 +507,8 @@ class KwamiMemory:
             limit=limit,
             node_labels=entity_types,
         )
-        self._record_usage("zep/graph_search")
+        if results:
+            self._record_usage("zep/graph_search")
         return results
 
     async def get_entities_by_type(

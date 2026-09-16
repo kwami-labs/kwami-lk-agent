@@ -51,6 +51,16 @@ class MemoryContext:
         self.entities = self.entities or []
         self.recent_messages = self.recent_messages or []
 
+    def has_content(self) -> bool:
+        """True when Zep actually returned something.
+
+        The retrieval helpers swallow their own exceptions and hand back an
+        empty context, which is indistinguishable from a successful call
+        against a brand-new user unless it is checked explicitly. Billing keys
+        off this so a failed round-trip is not charged.
+        """
+        return bool(self.context_block or self.summary or self.facts or self.recent_messages)
+
     def to_system_prompt_addition(self) -> str:
         """Convert memory context to text for system prompt injection.
 
