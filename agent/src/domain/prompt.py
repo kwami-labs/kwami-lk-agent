@@ -69,18 +69,6 @@ _STATIC_GUIDANCE_PARTS: tuple[str, ...] = (
     "\n\nYou are interacting via voice. Keep responses concise and conversational.",
     "Do not use emojis, asterisks, markdown, or other special characters.",
     "Speak naturally as if having a real conversation.",
-    "When the user asks you to control the app workspace or interface, prefer the available client workspace tools instead of telling them what to click.",
-    "Use the structured client UI tools for requests like opening panels, changing theme settings, modifying avatar parameters, adjusting scene controls, changing voice settings, tuning enhancements, clearing search results, or checking workspace status.",
-    "Prefer set_ui_control as the default tool for free-form interface requests because it gives you one consistent path for domain, control, and value.",
-    "For visible UI changes, briefly say what action you are taking. If a request is ambiguous, ask a clarifying question instead of guessing.",
-    "Do not change lasting workspace preferences unless the user clearly asks. If a tool requires confirmation, wait for that result before continuing.",
-    "If you are unsure which structured UI control to use, call list_ui_controls first to inspect the supported control names and domains.",
-    "Examples: if the user says 'make it darker', use set_ui_control with domain='theme', control='mode', value='dark'. "
-    "If they say 'move the sidebar right', use domain='theme', control='sidebarPosition', value='right'. "
-    "If they say 'open memory', use domain='workspace', control='openPanel', value='memory'. "
-    "If they say 'make the blob spikier', use domain='avatar', control='blobSpikes' with a modest increase to x, y, and z values. "
-    "If they say 'switch to particles face', use domain='avatar', control='renderer', value='particles-face'. "
-    "If they say 'speak a bit faster', use domain='voice', control='ttsSpeed', value set slightly above the current speed.",
     "\nWhen users share their name, remember it and use it naturally in conversation.",
     "Be genuinely interested in learning about who you're talking to.",
     "\nYou can change your voice or the AI model being used if the user requests it.",
@@ -105,7 +93,31 @@ _STATIC_GUIDANCE_PARTS: tuple[str, ...] = (
 )
 
 # Joined once, at import, rather than rebuilt on every call.
+# Guidance that only makes sense when the frontend has actually registered the
+# UI-control tools. These name `set_ui_control` and `list_ui_controls`, which are
+# client-side tools -- nothing in this repo defines them. Emitting this
+# unconditionally told the model to call tools that did not exist, inviting
+# hallucinated tool calls on any deployment that does not register them.
+_UI_CONTROL_GUIDANCE_PARTS: tuple[str, ...] = (
+    "When the user asks you to control the app workspace or interface, prefer the available client workspace tools instead of telling them what to click.",
+    "Use the structured client UI tools for requests like opening panels, changing theme settings, modifying avatar parameters, adjusting scene controls, changing voice settings, tuning enhancements, clearing search results, or checking workspace status.",
+    "Prefer set_ui_control as the default tool for free-form interface requests because it gives you one consistent path for domain, control, and value.",
+    "For visible UI changes, briefly say what action you are taking. If a request is ambiguous, ask a clarifying question instead of guessing.",
+    "Do not change lasting workspace preferences unless the user clearly asks. If a tool requires confirmation, wait for that result before continuing.",
+    "If you are unsure which structured UI control to use, call list_ui_controls first to inspect the supported control names and domains.",
+    "Examples: if the user says 'make it darker', use set_ui_control with domain='theme', control='mode', value='dark'. "
+    "If they say 'move the sidebar right', use domain='theme', control='sidebarPosition', value='right'. "
+    "If they say 'open memory', use domain='workspace', control='openPanel', value='memory'. "
+    "If they say 'make the blob spikier', use domain='avatar', control='blobSpikes' with a modest increase to x, y, and z values. "
+    "If they say 'switch to particles face', use domain='avatar', control='renderer', value='particles-face'. "
+    "If they say 'speak a bit faster', use domain='voice', control='ttsSpeed', value set slightly above the current speed.",
+)
+
+#: Client tools this guidance depends on; the block is emitted only if present.
+UI_CONTROL_TOOL_NAMES = frozenset({"set_ui_control", "list_ui_controls"})
+
 STATIC_GUIDANCE = "\n".join(_STATIC_GUIDANCE_PARTS)
+UI_CONTROL_GUIDANCE = "\n".join(_UI_CONTROL_GUIDANCE_PARTS)
 
 _MEMORY_HEADER_PARTS: tuple[str, ...] = (
     "\n\n## Your Memory\n",
@@ -163,8 +175,21 @@ def describe_emotional_traits(emotional_traits: Any) -> str | None:
     )
 
 
-def build_system_prompt(soul: Any, memory_context: str | None = None) -> str:
-    """Build the full system prompt for a soul, optionally with memory context."""
+def build_system_prompt(
+    soul: Any,
+    memory_context: str | None = None,
+    client_tool_names: Any = (),
+) -> str:
+    """Build the full system prompt for a soul, optionally with memory context.
+
+    Args:
+        soul: The soul configuration driving persona and tone.
+        memory_context: Retrieved memory, appended under a header and bounded.
+        client_tool_names: Names of client-side tools the frontend registered.
+            The UI-control guidance is emitted only when those tools are really
+            available, so the model is never told to call something that does
+            not exist.
+    """
     parts: list[str] = []
 
     if soul.system_prompt:
@@ -189,6 +214,9 @@ def build_system_prompt(soul: Any, memory_context: str | None = None) -> str:
         parts.append(emotion_profile)
 
     parts.append(STATIC_GUIDANCE)
+
+    if UI_CONTROL_TOOL_NAMES & set(client_tool_names or ()):
+        parts.append(UI_CONTROL_GUIDANCE)
 
     if memory_context:
         parts.append(MEMORY_HEADER)
