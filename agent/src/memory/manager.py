@@ -13,16 +13,16 @@ Key improvements over monolithic memory.py:
 """
 
 import uuid
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Optional
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
-from ..config import KwamiMemoryConfig
+from ..constants import Timeouts
+from ..domain import KwamiMemoryConfig
 from .context import MemoryContext, get_context, setup_context_template
-from .ontology import configure_ontology, get_ontology
+from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
     get_user_name,
-    search_graph,
     search_thread,
 )
 from .utils import get_zep_imports, logger
@@ -53,17 +53,17 @@ class KwamiMemory:
         self.kwami_id = kwami_id
         self.kwami_name = kwami_name
         self._usage_tracker = usage_tracker
-        self._client: Optional["AsyncZep"] = None
-        self._user_id: Optional[str] = None
-        self._session_id: Optional[str] = None
+        self._client: AsyncZep | None = None
+        self._user_id: str | None = None
+        self._session_id: str | None = None
         self._initialized = False
-        self._template_id: Optional[str] = None
+        self._template_id: str | None = None
 
         # Message batching: buffer user message to send with assistant response
-        self._pending_user_message: Optional[tuple[str, str | None]] = None
+        self._pending_user_message: tuple[str, str | None] | None = None
 
         # Cached user name (avoid repeated lookups)
-        self._cached_user_name: Optional[str] = None
+        self._cached_user_name: str | None = None
 
     # ========================================================================
     # Properties
@@ -80,12 +80,12 @@ class KwamiMemory:
         return self._initialized
 
     @property
-    def user_id(self) -> Optional[str]:
+    def user_id(self) -> str | None:
         """Get the Zep user ID for this Kwami."""
         return self._user_id
 
     @property
-    def session_id(self) -> Optional[str]:
+    def session_id(self) -> str | None:
         """Get the current Zep session ID."""
         return self._session_id
 
@@ -123,14 +123,18 @@ class KwamiMemory:
             return False
 
         try:
-            self._client = AsyncZep(api_key=self.config.api_key)
+            # Without an explicit timeout the SDK waits 60s per call, on the
+            # critical path before the greeting.
+            self._client = AsyncZep(
+                api_key=self.config.api_key,
+                timeout=Timeouts.ZEP_REQUEST,
+            )
             self._user_id = self.config.user_id or f"kwami_{self.kwami_id}"
 
             await self._ensure_user_exists()
 
             self._session_id = (
-                self.config.session_id
-                or f"session_{self._user_id}_{uuid.uuid4().hex[:8]}"
+                self.config.session_id or f"session_{self._user_id}_{uuid.uuid4().hex[:8]}"
             )
             await self._ensure_session_exists()
 
@@ -139,9 +143,7 @@ class KwamiMemory:
                 await configure_ontology(self._client, self._user_id)
 
             # Set up context template for structured retrieval
-            self._template_id = await setup_context_template(
-                self._client, self._user_id
-            )
+            self._template_id = await setup_context_template(self._client, self._user_id)
 
             self._initialized = True
             logger.info(
@@ -178,9 +180,7 @@ class KwamiMemory:
             except Exception as e:
                 error_msg = str(e).lower()
                 if "400" in error_msg and "already exists" in error_msg:
-                    logger.info(
-                        f"User {self._user_id} already exists (race condition)"
-                    )
+                    logger.info(f"User {self._user_id} already exists (race condition)")
                     return
                 logger.error(f"Failed to create user {self._user_id}: {e}")
                 raise
@@ -199,18 +199,14 @@ class KwamiMemory:
                 self._record_usage("zep/create_thread")
                 logger.info(f"Created Zep thread: {self._session_id}")
             except Exception as e:
-                logger.error(
-                    f"Failed to create thread {self._session_id}: {e}"
-                )
+                logger.error(f"Failed to create thread {self._session_id}: {e}")
                 raise
 
     # ========================================================================
     # Message Handling
     # ========================================================================
 
-    async def buffer_user_message(
-        self, content: str, name: str | None = None
-    ) -> None:
+    async def buffer_user_message(self, content: str, name: str | None = None) -> None:
         """Buffer a user message to be sent with the next assistant response.
 
         This implements Zep's recommended pattern of sending both user and
@@ -237,9 +233,7 @@ class KwamiMemory:
         self._pending_user_message = (content.strip(), name)
         logger.debug(f"Buffered user message: {content[:50]}...")
 
-    async def add_exchange(
-        self, assistant_content: str, assistant_name: str | None = None
-    ) -> None:
+    async def add_exchange(self, assistant_content: str, assistant_name: str | None = None) -> None:
         """Send buffered user message + assistant response as a batch.
 
         This is the PRIMARY method for adding messages to memory.
@@ -263,7 +257,7 @@ class KwamiMemory:
         messages = []
         user_name = self._cached_user_name or "User"
         assistant_name = assistant_name or self.kwami_name
-        now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
         # Add buffered user message
         if self._pending_user_message:
@@ -312,9 +306,7 @@ class KwamiMemory:
                 f"Traceback: {traceback.format_exc()}"
             )
 
-    async def add_message(
-        self, role: str, content: str, name: str | None = None
-    ) -> None:
+    async def add_message(self, role: str, content: str, name: str | None = None) -> None:
         """Add a single message to memory.
 
         For best results, prefer buffer_user_message() + add_exchange()
@@ -351,7 +343,7 @@ class KwamiMemory:
                 else:
                     name = "System"
 
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             message = ZepMessage(
                 role=role,
                 content=content.strip(),
@@ -398,7 +390,7 @@ class KwamiMemory:
 
         try:
             user_name = name or self._cached_user_name or "User"
-            now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
             message = ZepMessage(
                 role="user",
                 content=content,
@@ -453,7 +445,10 @@ class KwamiMemory:
                 min_relevance=self.config.min_fact_relevance,
                 include_facts=self.config.include_facts,
             )
-            self._record_usage("zep/get_context")
+            # Same rule as graph search: get_context swallows its own errors
+            # and returns an empty context, so bill only on a real result.
+            if context.has_content():
+                self._record_usage("zep/get_context")
             return context
         except Exception as e:
             logger.error(f"Failed to get memory context: {e}")
@@ -475,37 +470,14 @@ class KwamiMemory:
         """
         if not self._initialized or not self._client:
             return []
-        results = await search_thread(self._client, self._session_id, query, limit)
-        self._record_usage("zep/thread_search")
-        return results
-
-    async def search_by_entity_type(
-        self,
-        query: str,
-        entity_types: list[str],
-        limit: int = 10,
-    ) -> list[dict]:
-        """Search the knowledge graph filtered by entity types.
-
-        Args:
-            query: Search query.
-            entity_types: Entity type names to filter by.
-            limit: Maximum number of results.
-
-        Returns:
-            List of matching nodes.
-        """
-        if not self._initialized or not self._client:
-            return []
-        results = await search_graph(
-            self._client,
-            self._user_id,
-            query,
-            scope="nodes",
-            limit=limit,
-            node_labels=entity_types,
+        results = await search_thread(
+            self._client, self._session_id, query, limit, user_id=self._user_id
         )
-        self._record_usage("zep/graph_search")
+        # Bill only when the call produced something. The search helper swallows
+        # its own exceptions and returns [], so an unconditional record here
+        # charged the user for calls that never reached Zep.
+        if results:
+            self._record_usage("zep/graph_search")
         return results
 
     async def get_entities_by_type(
@@ -524,19 +496,9 @@ class KwamiMemory:
         """
         if not self._initialized or not self._client:
             return []
-        return await get_entities_by_type(
-            self._client, self._user_id, entity_type, limit
-        )
+        return await get_entities_by_type(self._client, self._user_id, entity_type, limit)
 
-    async def get_preferences(self, limit: int = 20) -> list[dict]:
-        """Get user preferences from the knowledge graph."""
-        return await self.get_entities_by_type("Preference", limit)
-
-    # ========================================================================
-    # User Identity
-    # ========================================================================
-
-    async def get_user_name(self) -> Optional[str]:
+    async def get_user_name(self) -> str | None:
         """Get the user's name from the knowledge graph.
 
         Caches the result after the first successful lookup.
@@ -551,9 +513,7 @@ class KwamiMemory:
             return None
 
         try:
-            name = await get_user_name(
-                self._client, self._user_id, self.kwami_name
-            )
+            name = await get_user_name(self._client, self._user_id, self.kwami_name)
             self._record_usage("zep/get_user_name")
             if name:
                 self._cached_user_name = name
@@ -573,33 +533,24 @@ class KwamiMemory:
         self._cached_user_name = name
 
     # ========================================================================
-    # Ontology
-    # ========================================================================
-
-    async def get_ontology(self) -> dict | None:
-        """Get the current ontology configuration.
-
-        Returns:
-            Dict with 'entity_types' and 'edge_types', or None.
-        """
-        if not self._client or not self._user_id:
-            return None
-        return await get_ontology(self._client, self._user_id)
-
-    # ========================================================================
     # Session Management
     # ========================================================================
 
-    async def clear_session(self) -> None:
-        """Clear the current thread (session) memory."""
-        if not self._initialized or not self._client:
+    async def _aclose_client(self) -> None:
+        """Release the Zep client's underlying HTTP connection pool."""
+        client = self._client
+        if client is None:
             return
-
-        try:
-            await self._client.thread.delete(thread_id=self._session_id)
-            logger.info(f"Cleared thread memory: {self._session_id}")
-        except Exception as e:
-            logger.error(f"Failed to clear thread: {e}")
+        for closer in ("aclose", "close"):
+            fn = getattr(client, closer, None)
+            if callable(fn):
+                result = fn()
+                if hasattr(result, "__await__"):
+                    await result
+                return
+        httpx_client = getattr(getattr(client, "_client_wrapper", None), "httpx_client", None)
+        if httpx_client is not None and hasattr(httpx_client, "aclose"):
+            await httpx_client.aclose()
 
     async def close(self) -> None:
         """Close the Zep client connection.
@@ -614,38 +565,17 @@ class KwamiMemory:
                 pass
 
         if self._client:
+            # AsyncZep exposes neither close() nor aclose(); the pool lives on
+            # the wrapped httpx client. The old `await self._client.close()`
+            # raised AttributeError into a bare `except: pass`, so every agent
+            # reconfiguration leaked a connection pool.
             try:
-                await self._client.close()
-            except Exception:
-                pass
+                await self._aclose_client()
+            except Exception as e:
+                logger.warning(f"Failed to close Zep client cleanly: {e}")
             self._client = None
         self._initialized = False
         logger.debug("Memory client closed")
-
-    def build_memory_enhanced_prompt(self, base_prompt: str) -> str:
-        """Build system prompt with memory context injection placeholder.
-
-        Args:
-            base_prompt: The original system prompt.
-
-        Returns:
-            Enhanced prompt with memory context placeholder.
-        """
-        if not self.config.auto_inject_context:
-            return base_prompt
-
-        return (
-            f"{base_prompt}\n\n"
-            "## Memory Context\n"
-            "You have access to your persistent memory about past conversations. "
-            "Use this context to provide personalized, contextual responses.\n"
-            "{{MEMORY_CONTEXT}}"
-        )
-
-
-# ============================================================================
-# Factory
-# ============================================================================
 
 
 async def create_memory(
@@ -653,7 +583,7 @@ async def create_memory(
     kwami_id: str,
     kwami_name: str = "Kwami",
     usage_tracker=None,
-) -> Optional[KwamiMemory]:
+) -> KwamiMemory | None:
     """Factory function to create and initialize a KwamiMemory instance.
 
     Args:

@@ -12,6 +12,7 @@ This module contains constants for:
 # Providers
 # =============================================================================
 
+
 class TTSProviders:
     OPENAI = "openai"
     ELEVENLABS = "elevenlabs"
@@ -19,7 +20,7 @@ class TTSProviders:
     DEEPGRAM = "deepgram"
     GOOGLE = "google"
     RIME = "rime"
-    
+
     ALL = {OPENAI, ELEVENLABS, CARTESIA, DEEPGRAM, GOOGLE, RIME}
 
 
@@ -30,7 +31,7 @@ class STTProviders:
     GOOGLE = "google"
     ELEVENLABS = "elevenlabs"
     CARTESIA = "cartesia"
-    
+
     ALL = {DEEPGRAM, OPENAI, ASSEMBLYAI, GOOGLE, ELEVENLABS, CARTESIA}
 
 
@@ -43,7 +44,7 @@ class LLMProviders:
     MISTRAL = "mistral"
     CEREBRAS = "cerebras"
     OLLAMA = "ollama"
-    
+
     ALL = {OPENAI, GOOGLE, ANTHROPIC, GROQ, DEEPSEEK, MISTRAL, CEREBRAS, OLLAMA}
 
 
@@ -51,22 +52,24 @@ class LLMProviders:
 # Voice IDs
 # =============================================================================
 
+
 class OpenAIVoices:
     """OpenAI TTS voice IDs."""
-    ALLOY = "alloy"       # Neutral
-    ASH = "ash"           # Male
-    CORAL = "coral"       # Female
-    ECHO = "echo"         # Male
-    FABLE = "fable"       # Neutral
-    NOVA = "nova"         # Female
-    ONYX = "onyx"         # Male
-    SAGE = "sage"         # Female
-    SHIMMER = "shimmer"   # Female
-    
+
+    ALLOY = "alloy"  # Neutral
+    ASH = "ash"  # Male
+    CORAL = "coral"  # Female
+    ECHO = "echo"  # Male
+    FABLE = "fable"  # Neutral
+    NOVA = "nova"  # Female
+    ONYX = "onyx"  # Male
+    SAGE = "sage"  # Female
+    SHIMMER = "shimmer"  # Female
+
     # Realtime only
     BALLAD = "ballad"
     VERSE = "verse"
-    
+
     ALL = {ALLOY, ASH, CORAL, ECHO, FABLE, NOVA, ONYX, SAGE, SHIMMER, BALLAD, VERSE}
     STANDARD = {ALLOY, ASH, CORAL, ECHO, FABLE, NOVA, ONYX, SAGE, SHIMMER}
     DEFAULT = NOVA
@@ -74,6 +77,7 @@ class OpenAIVoices:
 
 class ElevenLabsVoices:
     """ElevenLabs voice IDs (premade voices)."""
+
     RACHEL = "21m00Tcm4TlvDq8ikWAM"
     DOMI = "AZnzlk1XvdvUeBnXmlld"
     BELLA = "EXAVITQu4vr4xnSDxMaL"
@@ -94,15 +98,35 @@ class ElevenLabsVoices:
     ERIC = "cjVigY5qzO86Huf0OWal"
     CHRIS = "iP95p4xoKVk53GoZ742B"
     BRIAN = "nPczCjzI2devNBz1zQrb"
-    
-    ALL = {RACHEL, DOMI, BELLA, ELLI, JOSH, ARNOLD, ADAM, SAM, DANIEL,
-           CHARLOTTE, LILY, CALLUM, CHARLIE, GEORGE, LIAM, WILL,
-           JESSICA, ERIC, CHRIS, BRIAN}
+
+    ALL = {
+        RACHEL,
+        DOMI,
+        BELLA,
+        ELLI,
+        JOSH,
+        ARNOLD,
+        ADAM,
+        SAM,
+        DANIEL,
+        CHARLOTTE,
+        LILY,
+        CALLUM,
+        CHARLIE,
+        GEORGE,
+        LIAM,
+        WILL,
+        JESSICA,
+        ERIC,
+        CHRIS,
+        BRIAN,
+    }
     DEFAULT = RACHEL
 
 
 class CartesiaVoices:
     """Cartesia voice IDs (UUID format)."""
+
     # English - Female
     BRITISH_LADY = "79a125e8-cd45-4c13-8a67-188112f4dd22"
     JACQUELINE = "9626c31c-bec5-4cca-baa8-f8ba9e84c8bc"
@@ -119,7 +143,7 @@ class CartesiaVoices:
     SOUTHERN_MAN = "638efaaa-4d0c-442e-b701-3fae16aad012"
     WISE_MAN = "fb26447f-308b-471e-8b00-8e9f04284eb5"
     BRITISH_NARRATOR = "2ee87190-8f84-4925-97da-e52547f9462c"
-    
+
     # Friendly Name Mapping
     NAME_MAP = {
         "british lady": BRITISH_LADY,
@@ -131,12 +155,13 @@ class CartesiaVoices:
         "commercial man": COMMERCIAL_MAN,
         "friendly sidekick": FRIENDLY_SIDEKICK,
     }
-    
+
     DEFAULT = BRITISH_LADY
 
 
 class DeepgramVoices:
     """Deepgram Aura voice IDs."""
+
     # Female
     ASTERIA = "asteria"
     LUNA = "luna"
@@ -151,26 +176,26 @@ class DeepgramVoices:
     ORPHEUS = "orpheus"
     HELIOS = "helios"
     ZEUS = "zeus"
-    
-    ALL = {ASTERIA, LUNA, STELLA, ATHENA, HERA, ORION, ARCAS, 
-           PERSEUS, ANGUS, ORPHEUS, HELIOS, ZEUS}
+
+    ALL = {ASTERIA, LUNA, STELLA, ATHENA, HERA, ORION, ARCAS, PERSEUS, ANGUS, ORPHEUS, HELIOS, ZEUS}
     DEFAULT = ASTERIA
 
 
 class GoogleVoices:
     """Google Cloud TTS voice IDs."""
-    STUDIO_O = "en-US-Studio-O"      # Female
-    STUDIO_Q = "en-US-Studio-Q"      # Male
-    NEURAL2_A = "en-US-Neural2-A"    # Male
-    NEURAL2_C = "en-US-Neural2-C"    # Female
-    NEURAL2_D = "en-US-Neural2-D"    # Male
-    NEURAL2_E = "en-US-Neural2-E"    # Female
-    NEURAL2_F = "en-US-Neural2-F"    # Female
-    NEURAL2_G = "en-US-Neural2-G"    # Female
-    NEURAL2_H = "en-US-Neural2-H"    # Female
-    NEURAL2_I = "en-US-Neural2-I"    # Male
-    NEURAL2_J = "en-US-Neural2-J"    # Male
-    
+
+    STUDIO_O = "en-US-Studio-O"  # Female
+    STUDIO_Q = "en-US-Studio-Q"  # Male
+    NEURAL2_A = "en-US-Neural2-A"  # Male
+    NEURAL2_C = "en-US-Neural2-C"  # Female
+    NEURAL2_D = "en-US-Neural2-D"  # Male
+    NEURAL2_E = "en-US-Neural2-E"  # Female
+    NEURAL2_F = "en-US-Neural2-F"  # Female
+    NEURAL2_G = "en-US-Neural2-G"  # Female
+    NEURAL2_H = "en-US-Neural2-H"  # Female
+    NEURAL2_I = "en-US-Neural2-I"  # Male
+    NEURAL2_J = "en-US-Neural2-J"  # Male
+
     DEFAULT = STUDIO_O
 
 
@@ -178,17 +203,18 @@ class GoogleVoices:
 # Models
 # =============================================================================
 
+
 class OpenAIModels:
     TTS_1 = "tts-1"
     TTS_1_HD = "tts-1-hd"
     GPT_4O_MINI_TTS = "gpt-4o-mini-tts"
-    
+
     WHISPER_1 = "whisper-1"
     WHISPER_LARGE_V3 = "whisper-large-v3"
-    
+
     GPT_4O = "gpt-4o"
     GPT_4O_MINI = "gpt-4o-mini"
-    
+
     ALL_TTS = {TTS_1, TTS_1_HD, GPT_4O_MINI_TTS}
 
 
@@ -198,13 +224,14 @@ class DeepgramModels:
     NOVA_2_CONVERSATIONAL = "nova-2-conversationalai"
     BASE = "base"
     ENHANCED = "enhanced"
-    
+
     DEFAULT_STT = NOVA_2
 
 
 # =============================================================================
 # Environment Variables
 # =============================================================================
+
 
 class EnvVars:
     OPENAI = ["OPENAI_API_KEY"]
@@ -218,6 +245,27 @@ class EnvVars:
 # =============================================================================
 # Misc Constants
 # =============================================================================
+
+
+class Timeouts:
+    """Wall-clock budgets for I/O that sits on the voice path.
+
+    Zep's SDK defaults to 60s per call and `get_user_name` alone can make four
+    graph calls, so an unresponsive Zep could stall the first utterance for
+    ~120s. The greeting must never wait on memory: if the budget is blown the
+    agent greets without context rather than sitting silent.
+    """
+
+    # Per-request budget handed to the Zep client.
+    ZEP_REQUEST = 8.0
+
+    # Total budget for the pre-greeting memory injection.
+    MEMORY_CONTEXT = 6.0
+
+    # Final billing call. The worker only grants ~10s for shutdown callbacks,
+    # and aiohttp's own default is 300s, so this has to be explicit.
+    USAGE_REPORT = 5.0
+
 
 LANGUAGE_GREETINGS = {
     "en": "Language changed to English. How can I help you?",

@@ -40,7 +40,6 @@ WORKDIR /app
 
 # Copy just the dependency files first, for more efficient layer caching
 COPY pyproject.toml uv.lock ./
-RUN mkdir -p src
 
 # Install Python dependencies using UV's lock file
 # --locked ensures we use exact versions from uv.lock for reproducible builds
