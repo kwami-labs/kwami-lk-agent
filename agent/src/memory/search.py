@@ -6,7 +6,7 @@ general graph querying capabilities.
 
 import re
 from collections import Counter
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .utils import logger
 
@@ -19,42 +19,49 @@ async def search_thread(
     session_id: str,
     query: str,
     limit: int = 5,
+    user_id: str = "",
 ) -> list[dict]:
-    """Search thread messages for relevant context.
+    """Search a user's memories for relevant context.
 
     Args:
         client: The async Zep client.
-        session_id: The thread/session ID to search in.
+        session_id: The thread/session ID, reported back on each result.
         query: Search query.
         limit: Maximum number of results.
+        user_id: The Zep user whose graph is searched. Required.
 
     Returns:
         List of search results with content and score.
     """
+    if not user_id:
+        logger.warning("search_thread called without a user_id; cannot search the graph")
+        return []
+
     try:
-        results = await client.thread.search(
-            thread_id=session_id,
+        # zep-cloud has no `thread.search`. Recall is served by the user's
+        # knowledge graph, which is where facts actually live -- the old call
+        # raised AttributeError every time, so `recall_memories` always
+        # answered "I don't have any memories about that yet".
+        results = await client.graph.search(
+            user_id=user_id,
             query=query,
+            scope="edges",
             limit=limit,
         )
 
+        edges = getattr(results, "edges", None) or []
         return [
             {
-                "content": (
-                    r.message.content
-                    if hasattr(r, "message") and r.message
-                    else (r.content if hasattr(r, "content") else "")
-                ),
-                "score": r.score if hasattr(r, "score") else 0,
+                "content": fact,
+                "score": getattr(edge, "score", 0) or 0,
                 "thread_id": session_id,
             }
-            for r in (
-                results.results if hasattr(results, "results") else results or []
-            )
+            for edge in edges
+            if (fact := getattr(edge, "fact", None))
         ]
 
     except Exception as e:
-        logger.error(f"Failed to search thread: {e}")
+        logger.error(f"Failed to search memories: {e}")
         return []
 
 
@@ -107,21 +114,14 @@ async def search_graph(
                     {
                         "name": getattr(node, "name", ""),
                         "type": (
-                            node.labels[0]
-                            if hasattr(node, "labels") and node.labels
-                            else "entity"
+                            node.labels[0] if hasattr(node, "labels") and node.labels else "entity"
                         ),
                         "labels": (
-                            list(node.labels)
-                            if hasattr(node, "labels") and node.labels
-                            else []
+                            list(node.labels) if hasattr(node, "labels") and node.labels else []
                         ),
                         "summary": getattr(node, "summary", ""),
                         "attributes": getattr(node, "attributes", {}),
-                        "uuid": (
-                            getattr(node, "uuid_", None)
-                            or getattr(node, "uuid", None)
-                        ),
+                        "uuid": (getattr(node, "uuid_", None) or getattr(node, "uuid", None)),
                         "score": getattr(node, "score", 0),
                     }
                 )
@@ -133,13 +133,8 @@ async def search_graph(
                         "type": getattr(edge, "type", ""),
                         "attributes": getattr(edge, "attributes", {}),
                         "valid_at": str(getattr(edge, "valid_at", "")),
-                        "invalid_at": str(
-                            getattr(edge, "invalid_at", "present")
-                        ),
-                        "uuid": (
-                            getattr(edge, "uuid_", None)
-                            or getattr(edge, "uuid", None)
-                        ),
+                        "invalid_at": str(getattr(edge, "invalid_at", "present")),
+                        "uuid": (getattr(edge, "uuid_", None) or getattr(edge, "uuid", None)),
                         "score": getattr(edge, "score", 0),
                     }
                 )
@@ -177,24 +172,15 @@ async def get_entities_by_type(
         entities = []
         if nodes_response:
             for node in nodes_response:
-                node_labels = (
-                    list(node.labels)
-                    if hasattr(node, "labels") and node.labels
-                    else []
-                )
-                if any(
-                    label.lower() == entity_type.lower() for label in node_labels
-                ):
+                node_labels = list(node.labels) if hasattr(node, "labels") and node.labels else []
+                if any(label.lower() == entity_type.lower() for label in node_labels):
                     entities.append(
                         {
                             "name": getattr(node, "name", ""),
                             "type": node_labels[0] if node_labels else "entity",
                             "labels": node_labels,
                             "summary": getattr(node, "summary", ""),
-                            "uuid": (
-                                getattr(node, "uuid_", None)
-                                or getattr(node, "uuid", None)
-                            ),
+                            "uuid": (getattr(node, "uuid_", None) or getattr(node, "uuid", None)),
                             "created_at": (
                                 str(node.created_at)
                                 if hasattr(node, "created_at") and node.created_at
@@ -218,9 +204,28 @@ async def get_entities_by_type(
 
 # Words that are definitely NOT user names
 _EXCLUDED_NAMES = {
-    "the", "a", "an", "user", "assistant", "system", "ai",
-    "today", "tomorrow", "yesterday", "now", "then", "this", "that",
-    "they", "their", "he", "she", "it", "we", "you", "i",
+    "the",
+    "a",
+    "an",
+    "user",
+    "assistant",
+    "system",
+    "ai",
+    "today",
+    "tomorrow",
+    "yesterday",
+    "now",
+    "then",
+    "this",
+    "that",
+    "they",
+    "their",
+    "he",
+    "she",
+    "it",
+    "we",
+    "you",
+    "i",
 }
 
 # Regex patterns for extracting names from facts (ordered by confidence)
@@ -254,9 +259,7 @@ def _is_valid_name(name: str, extra_excluded: set[str] | None = None) -> bool:
     return True
 
 
-def _extract_name_from_fact(
-    fact: str, extra_excluded: set[str] | None = None
-) -> Optional[str]:
+def _extract_name_from_fact(fact: str, extra_excluded: set[str] | None = None) -> str | None:
     """Extract a user name from a fact string using regex patterns."""
     if not fact:
         return None
@@ -275,7 +278,7 @@ async def get_user_name(
     client: "AsyncZep",
     user_id: str,
     kwami_name: str = "Kwami",
-) -> Optional[str]:
+) -> str | None:
     """Try to extract the user's name from the knowledge graph.
 
     Uses multiple strategies in order of confidence:
@@ -340,10 +343,7 @@ async def get_user_name(
             name_counts = Counter(potential_names)
             for name, count in name_counts.most_common():
                 if _is_valid_name(name, extra_excluded):
-                    logger.info(
-                        f"Found user name from patterns: {name} "
-                        f"(appeared {count} times)"
-                    )
+                    logger.info(f"Found user name from patterns: {name} (appeared {count} times)")
                     return name
     except Exception as e:
         logger.debug(f"Pattern-based name search failed: {e}")
@@ -353,21 +353,14 @@ async def get_user_name(
         nodes_result = await client.graph.node.get_by_user_id(user_id=user_id)
         if nodes_result:
             for node in nodes_result:
-                label = (
-                    getattr(node, "label", "")
-                    or getattr(node, "name", "")
-                    or ""
-                )
+                label = getattr(node, "label", "") or getattr(node, "name", "") or ""
                 summary = getattr(node, "summary", "") or ""
                 node_type = getattr(node, "type", "") or ""
 
                 # Check if this is a person/user node
                 if node_type.lower() in ("person", "user", "human"):
                     if _is_valid_name(label, extra_excluded):
-                        logger.info(
-                            f"Found user name from graph node "
-                            f"(type={node_type}): {label}"
-                        )
+                        logger.info(f"Found user name from graph node (type={node_type}): {label}")
                         return label
 
                 # Check summary for user identity indicators
@@ -377,9 +370,7 @@ async def get_user_name(
                     and ("name" in summary_lower or "called" in summary_lower)
                     and _is_valid_name(label, extra_excluded)
                 ):
-                    logger.info(
-                        f"Found user name from node summary: {label}"
-                    )
+                    logger.info(f"Found user name from node summary: {label}")
                     return label
     except Exception as e:
         logger.debug(f"Could not get graph nodes for name search: {e}")

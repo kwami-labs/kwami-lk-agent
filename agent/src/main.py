@@ -1,7 +1,6 @@
 """Kwami Agent - Entry point for LiveKit Cloud agent sessions."""
 
 import asyncio
-import json
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -18,26 +17,37 @@ from livekit.agents import (
     cli,
     room_io,
 )
-from livekit.plugins import silero
 
-from .agent import KwamiAgent
-from .config import KwamiConfig
-from .factories import create_llm, create_stt, create_tts, create_realtime_model
-from .handlers import handle_full_config, handle_config_update, handle_tool_result
-from .memory import create_memory
-from .room_context import set_current_room
+from .domain import KwamiConfig
+from .factories.vad import prewarm_vad
+from .runtime import (
+    AgentDeps,
+    DataMessageRouter,
+    apply_runtime_config,
+    decode_data_message,
+    resolve_identity_on_join,
+    route_metrics,
+)
+from .runtime.pipeline import create_agent_from_config
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
-from .session import SessionState, create_session_state
+from .session import create_session_state
+from .settings import Settings, get_settings, set_settings
 from .utils.logging import get_logger
+from .utils.room import resolve_user_identity
 
 logger = get_logger()
+
+# Resolve credentials once, here, after load_dotenv has run. Everything
+# downstream takes them from Settings rather than reading os.environ itself.
+set_settings(Settings.from_env())
+logger.info("Settings resolved: %s", get_settings().describe())
 
 server = AgentServer()
 
 
 def prewarm(proc: JobProcess) -> None:
     """Prewarm the VAD model for faster startup."""
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = prewarm_vad()
 
 
 server.setup_fnc = prewarm
@@ -46,30 +56,28 @@ server.setup_fnc = prewarm
 @server.rtc_session(agent_name="kwami-agent")
 async def entrypoint(ctx: JobContext) -> None:
     """Main entry point for Kwami agent sessions."""
-    set_current_room(ctx.room)
     logger.info(f"Kwami session starting in room: {ctx.room.name}")
 
-    # Log participants and extract user identity
-    logger.info(f"Room has {len(ctx.room.remote_participants)} remote participants")
+    # The room is NOT connected yet -- JobContext.room is populated by
+    # session.start() below, so participants are resolved after that point.
     user_identity = None
-    for pid, p in ctx.room.remote_participants.items():
-        logger.info(f"  - {p.identity} (connected: {p.is_connected})")
-        if not p.identity.startswith("agent"):
-            user_identity = p.identity
-            logger.info(f"User identity: {user_identity}")
 
     # Get prewarmed VAD
     vad = ctx.proc.userdata["vad"]
-    
+
     # Create initial agent with default configuration.
     # Skip greeting -- this is a placeholder agent until the frontend sends
     # the real config via the "config" data message. The configured agent
     # will greet properly with the correct persona, voice, and memory.
     config = KwamiConfig()
     initial_agent = create_agent_from_config(config, vad, skip_greeting=True)
-    
+
     # Create session and state
-    session = AgentSession()
+    # Dependencies live on the session's userdata, which the framework threads
+    # into every tool's RunContext. This is what replaces the ContextVar the
+    # tools used to hunt the room through.
+    deps = AgentDeps(settings=get_settings(), room=ctx.room)
+    session = AgentSession(userdata=deps)
     state = create_session_state(
         initial_agent=initial_agent,
         user_identity=user_identity,
@@ -83,65 +91,23 @@ async def entrypoint(ctx: JobContext) -> None:
     # Wire up metrics events for usage tracking
     @session.on("metrics_collected")
     def on_metrics(event):
-        metrics = event.metrics
-        metrics_type = getattr(metrics, "type", None)
-        if metrics_type == "llm_metrics":
-            state.usage_tracker.on_llm_metrics(metrics)
-        elif metrics_type == "stt_metrics":
-            state.usage_tracker.on_stt_metrics(metrics)
-        elif metrics_type == "tts_metrics":
-            state.usage_tracker.on_tts_metrics(metrics)
-        elif metrics_type == "realtime_model_metrics":
-            state.usage_tracker.on_realtime_metrics(metrics)
-    
-    # Setup data handler for config updates and tool results
-    def handle_data(data: rtc.DataPacket) -> None:
-        try:
-            payload = data.data.decode("utf-8")
-            message = json.loads(payload)
-            msg_type = message.get("type")
-            
-            logger.info(f"Received data message: {msg_type}")
-            
-            if msg_type == "config":
-                asyncio.create_task(
-                    handle_full_config(
-                        session, state, message, vad, create_agent_from_config
-                    )
-                )
-            elif msg_type == "config_update":
-                asyncio.create_task(
-                    handle_config_update(
-                        session, state, message, vad, create_agent_from_config
-                    )
-                )
-            elif msg_type == "tool_result":
-                handle_tool_result(
-                    state.current_agent,
-                    message.get("toolCallId"),
-                    message.get("result"),
-                    message.get("error"),
-                )
-            elif msg_type == "browser_close_request":
-                # Frontend user clicked the browser panel close button
-                if state.current_agent:
-                    browser_session = getattr(state.current_agent, "_browser_session", None)
-                    if browser_session and browser_session.is_active:
-                        asyncio.create_task(browser_session.close())
-                        logger.info("Closing cloud browser per user request")
+        route_metrics(state.usage_tracker, event.metrics)
 
-            elif msg_type == "search_similar":
-                # Client "Find similar" button: run a product search like the selected result
-                title = (message.get("title") or "").strip() or "similar products"
-                url = message.get("url") or ""
-                if state.current_agent and title:
-                    query = f"similar to {title[:80]} buy"
-                    logger.info("Running similar search from client: query=%s", query[:60])
-                    ctx_simple = type("Ctx", (), {"room": ctx.room})()
-                    asyncio.create_task(
-                        state.current_agent.web_search(ctx_simple, query, max_results=5, search_for_products=True)
-                    )
-                
+    # Routing lives in runtime.dispatch so each branch is reachable from a test.
+    router = DataMessageRouter(
+        session=session,
+        state=state,
+        vad=vad,
+        create_agent_fn=create_agent_from_config,
+        room=ctx.room,
+    )
+
+    def handle_data(data: rtc.DataPacket) -> None:
+        message = decode_data_message(data.data)
+        if message is None:
+            return
+        try:
+            router.handle(message)
         except Exception as e:
             logger.error(f"Error handling data message: {e}")
 
@@ -149,6 +115,19 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Register cleanup for when the session ends
     ctx.add_shutdown_callback(state.cleanup)
+
+    # Telephony sessions get their persona from the Kwami API. Neither the id
+    # resolution nor the fetch needs the session, so start the fetch NOW and
+    # await it after the room is up: sequencing it after session.start() left
+    # callers listening to a default-persona placeholder agent for as long as
+    # the HTTP call took, up to KWAMI_API_TIMEOUT (30s by default).
+    kwami_id = resolve_kwami_id(ctx)
+    runtime_config_task: asyncio.Task | None = None
+    if kwami_id:
+        logger.info("Resolved telephony kwami_id: %s", kwami_id)
+        runtime_config_task = state.spawn(
+            fetch_runtime_config(kwami_id), name="fetch_runtime_config"
+        )
 
     # Start the session
     await session.start(
@@ -160,73 +139,31 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    kwami_id = resolve_kwami_id(ctx)
-    if kwami_id:
-        logger.info("Resolved telephony kwami_id: %s", kwami_id)
-        runtime_config = await fetch_runtime_config(kwami_id)
-        if runtime_config:
-            await handle_full_config(
-                session,
-                state,
-                runtime_config,
-                vad,
-                create_agent_from_config,
-            )
-    
+    # Now that the room is connected, the participant list is real.
+    if not state.user_identity:
+        state.user_identity = resolve_user_identity(ctx.room)
+    logger.info(
+        "Room connected with %d remote participant(s); user identity: %s",
+        len(ctx.room.remote_participants),
+        state.user_identity or "<unresolved>",
+    )
+
+    @ctx.room.on("participant_connected")
+    def on_participant_connected(participant) -> None:
+        # A human can join after the agent; without this the session would
+        # finish with no user_identity and its usage would never be billed.
+        resolve_identity_on_join(state, participant)
+
+    await apply_runtime_config(
+        session,
+        state,
+        vad,
+        create_agent_from_config,
+        runtime_config_task,
+        kwami_id,
+    )
+
     logger.info(f"Kwami session started for room: {ctx.room.name}")
-
-
-def create_agent_from_config(
-    config: KwamiConfig,
-    vad,
-    memory=None,
-    skip_greeting: bool = False,
-) -> KwamiAgent:
-    """Create a KwamiAgent instance from a configuration object.
-    
-    Args:
-        config: The Kwami configuration.
-        vad: Voice Activity Detection instance.
-        memory: Optional memory instance.
-        skip_greeting: If True, skip the initial greeting (for reconfigurations).
-        
-    Returns:
-        Configured KwamiAgent instance.
-    """
-    voice_config = config.voice
-    
-    if voice_config.pipeline_type == "realtime":
-        logger.info(
-            f"Using realtime pipeline: "
-            f"{voice_config.realtime_provider}/{voice_config.realtime_model}"
-        )
-        realtime_model = create_realtime_model(voice_config)
-        return KwamiAgent(
-            config,
-            vad=vad,
-            memory=memory,
-            llm=realtime_model,
-            skip_greeting=skip_greeting,
-        )
-    else:
-        logger.info(
-            f"Using standard pipeline: "
-            f"STT={voice_config.stt_provider}/{voice_config.stt_model}, "
-            f"LLM={voice_config.llm_provider}/{voice_config.llm_model}, "
-            f"TTS={voice_config.tts_provider}/{voice_config.tts_model}"
-        )
-        stt = create_stt(voice_config)
-        llm = create_llm(voice_config)
-        tts = create_tts(voice_config)
-        return KwamiAgent(
-            config,
-            vad=vad,
-            memory=memory,
-            stt=stt,
-            llm=llm,
-            tts=tts,
-            skip_greeting=skip_greeting,
-        )
 
 
 if __name__ == "__main__":

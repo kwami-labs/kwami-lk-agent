@@ -1,6 +1,6 @@
 """Tool result handling for Kwami agent."""
 
-from typing import Any, Optional
+from typing import Any
 
 from ..utils.logging import get_logger
 
@@ -9,12 +9,12 @@ logger = get_logger("tool_handler")
 
 def handle_tool_result(
     agent: Any,
-    tool_call_id: Optional[str],
-    result: Optional[str],
-    error: Optional[str] = None,
+    tool_call_id: str | None,
+    result: str | None,
+    error: str | None = None,
 ) -> None:
     """Handle incoming tool result from client.
-    
+
     Args:
         agent: The current KwamiAgent instance.
         tool_call_id: The ID of the tool call.
@@ -24,11 +24,11 @@ def handle_tool_result(
     if not tool_call_id:
         logger.warning("Received tool result with no tool_call_id")
         return
-    
+
     if not agent:
         logger.warning(f"No agent available to handle tool result: {tool_call_id}")
         return
-    
+
     # Check if agent has client_tools manager
     if hasattr(agent, "client_tools") and agent.client_tools:
         agent.client_tools.handle_tool_result(tool_call_id, result, error)
