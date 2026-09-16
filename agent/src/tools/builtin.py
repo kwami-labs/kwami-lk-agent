@@ -1,7 +1,6 @@
 """Built-in function tools for KwamiAgent."""
 
 import asyncio
-import json
 import re
 from typing import Any
 
@@ -191,6 +190,19 @@ class AgentToolsMixin:
     - _memory: Optional KwamiMemory instance
     - session: AgentSession with tts and stt attributes
     """
+
+    def _publisher(self, context: Any = None):
+        """The room publisher for this call.
+
+        Built per call rather than cached because the room can change under an
+        agent swap. The publisher owns the data-channel size limit and the
+        trimming order -- there used to be three slightly different trimming
+        policies inline here, one of which re-serialised the whole message
+        three times just to measure it.
+        """
+        from ..adapters.publisher import LiveKitRoomPublisher
+
+        return LiveKitRoomPublisher(room_from_context(context, self.room))
 
     def _remember_in_background(self, facts: list[str]) -> None:
         """Write facts to memory without blocking the caller.
@@ -504,24 +516,16 @@ class AgentToolsMixin:
         answer = f"Found {len(ui_results)} products for '{query[:50]}'."
         # Fire and forget -- see the note in web_search.
         self._remember_in_background([f"User searched for products: {query}"])
-        room = room_from_context(context, self.room)
-        if room:
-            try:
-                msg = {
-                    "type": "search_results",
-                    "query": query,
-                    "results": ui_results,
-                    "answer": answer[:400],
-                }
-                payload = json.dumps(msg).encode("utf-8")
-                if len(payload) > 14 * 1024:
-                    for item in msg.get("results", []):
-                        item["content"] = (item.get("content") or "")[:80]
-                payload = json.dumps(msg).encode("utf-8")
-                await room.local_participant.publish_data(payload, reliable=True)
-                logger.info("Published product_search results: %s products", len(ui_results))
-            except Exception as e:
-                logger.warning("Failed to send product results to client: %s", e)
+        published = await self._publisher(context).publish(
+            {
+                "type": "search_results",
+                "query": query,
+                "results": ui_results,
+                "answer": answer[:400],
+            }
+        )
+        if published:
+            logger.info("Published product_search results: %s products", len(ui_results))
         return answer
 
     @function_tool()
@@ -677,48 +681,21 @@ class AgentToolsMixin:
         images_count = sum(1 for u in ui_results if u.get("image"))
         logger.info("Fetched %s images for %s results", images_count, len(ui_results))
 
-        room = room_from_context(context, self.room)
-        if room:
-            try:
-                max_answer = 400
-                ui_answer = (answer or "")[:max_answer]
-                msg = {
-                    "type": "search_results",
-                    "query": query,
-                    "results": ui_results,
-                    "answer": ui_answer,
-                }
-                payload = json.dumps(msg).encode("utf-8")
-                # Prefer keeping images: trim content/answer/features first, strip images only as last resort
-                if len(payload) > 14 * 1024:
-                    for item in msg.get("results", []):
-                        item["content"] = (item.get("content") or "")[:120]
-                        item["features"] = (item.get("features") or [])[:3]
-                    msg["answer"] = (ui_answer or "")[:150]
-                    payload = json.dumps(msg).encode("utf-8")
-                if len(payload) > 14 * 1024:
-                    for item in msg.get("results", []):
-                        item.pop("image", None)
-                    payload = json.dumps(msg).encode("utf-8")
-                logger.info(
-                    "Publishing search_results to room (query=%r, results=%s, with_images=%s)",
-                    query[:80] if query else "",
-                    len(ui_results),
-                    any(u.get("image") for u in msg.get("results", [])),
-                )
-                await room.local_participant.publish_data(
-                    payload,
-                    reliable=True,
-                )
-                logger.info("Published search_results to client")
-            except Exception as e:
-                logger.warning("Failed to send search_results to client: %s", e)
-        else:
-            logger.warning(
-                "Cannot send search_results to client: no room (self.room=%s, context.room=%s)",
-                self.room is not None,
-                getattr(context, "room", None) is not None if context else False,
-            )
+        published = await self._publisher(context).publish(
+            {
+                "type": "search_results",
+                "query": query,
+                "results": ui_results,
+                "answer": (answer or "")[:400],
+            }
+        )
+        logger.info(
+            "search_results %s (query=%r, results=%s, with_images=%s)",
+            "published" if published else "NOT published (no room)",
+            query[:80] if query else "",
+            len(ui_results),
+            any(u.get("image") for u in ui_results),
+        )
 
         if answer:
             return answer
@@ -984,15 +961,9 @@ class AgentToolsMixin:
         Args:
             index: 0-based index of the result to remove (0 = first card, 1 = second, etc.).
         """
-        room = room_from_context(context, self.room)
-        if room:
-            try:
-                msg = {"type": "remove_result", "index": max(0, int(index))}
-                await room.local_participant.publish_data(
-                    json.dumps(msg).encode("utf-8"),
-                    reliable=True,
-                )
-                return "Removed that result from the screen."
-            except Exception as e:
-                logger.warning("Failed to send remove_result to client: %s", e)
+        published = await self._publisher(context).publish(
+            {"type": "remove_result", "index": max(0, int(index))}
+        )
+        if published:
+            return "Removed that result from the screen."
         return "Could not remove the result."
