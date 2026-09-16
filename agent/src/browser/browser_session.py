@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import Any
 
 from ..utils.logging import get_logger
@@ -29,11 +30,12 @@ class CloudBrowserSession:
         3. close() — stop browser (persists profile), disconnect CDP
     """
 
-    def __init__(self, room: Any = None) -> None:
+    def __init__(self, room: Any = None, usage_tracker: Any = None) -> None:
         """Initialize the session manager.
 
         Args:
             room: LiveKit room for publishing data to the frontend.
+            usage_tracker: Records the billed minutes this session consumes.
         """
         self._client: BrowserUseClient | None = None
         self._cdp: CDPConnection | None = None
@@ -43,6 +45,11 @@ class CloudBrowserSession:
         self._room = room
         self._current_url: str = ""
         self._idle_timer: asyncio.Task | None = None
+        # Cloud browsers bill per minute, with a US proxy on top. This is the
+        # single most expensive resource the agent can hold, and it was the one
+        # resource never metered -- pure, invisible margin loss.
+        self._usage_tracker = usage_tracker
+        self._started_at: float | None = None
 
     @property
     def is_active(self) -> bool:
@@ -56,6 +63,32 @@ class CloudBrowserSession:
     def set_room(self, room: Any) -> None:
         """Update the LiveKit room reference."""
         self._room = room
+
+    def set_usage_tracker(self, usage_tracker: Any) -> None:
+        """Attach the tracker that bills this session's minutes."""
+        self._usage_tracker = usage_tracker
+
+    def _record_browser_minutes(self) -> None:
+        """Bill the wall-clock minutes this browser was held for.
+
+        Called from every path that releases a browser, so a session torn down
+        by the idle timer or by a failed CDP connect is metered the same as one
+        the user closed.
+        """
+        started, self._started_at = self._started_at, None
+        if started is None or self._usage_tracker is None:
+            return
+        minutes = max(0.0, (time.monotonic() - started)) / 60.0
+        if minutes <= 0:
+            return
+        try:
+            self._usage_tracker.record_external_usage(
+                "browser",
+                "browser_use/cloud",
+                units_used=round(minutes, 4),
+            )
+        except Exception as e:  # never let metering break teardown
+            logger.warning("Failed to record browser usage: %s", e)
 
     # -- Lifecycle -----------------------------------------------------------
 
@@ -138,6 +171,7 @@ class CloudBrowserSession:
         await self._publish_session_event("open", url=url)
 
         # Start idle timer
+        self._started_at = time.monotonic()
         self._reset_idle_timer()
 
         logger.info(
@@ -151,6 +185,7 @@ class CloudBrowserSession:
     async def close(self) -> None:
         """Stop the cloud browser and disconnect CDP. Profile state is persisted."""
         self._cancel_idle_timer()
+        self._record_browser_minutes()
 
         if self._cdp:
             await self._cdp.close()
@@ -391,6 +426,7 @@ class CloudBrowserSession:
 
     async def _release_unusable_browser(self) -> None:
         """Stop a cloud browser that was created but never became usable."""
+        self._record_browser_minutes()
         browser_id, self._browser_id = self._browser_id, None
         self._live_url = None
         cdp, self._cdp = self._cdp, None
