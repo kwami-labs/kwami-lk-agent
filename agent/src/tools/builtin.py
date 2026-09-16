@@ -715,13 +715,21 @@ class AgentToolsMixin:
         """Get or create the cloud browser session for this agent."""
         from ..browser import CloudBrowserSession
 
+        tracker = getattr(self, "usage_tracker", None)
         if not hasattr(self, "_browser_session") or self._browser_session is None:
             room = get_current_room() or self.room
-            self._browser_session = CloudBrowserSession(room=room)
-        elif self._browser_session._room is None:
-            room = get_current_room() or self.room
-            if room:
-                self._browser_session.set_room(room)
+            self._browser_session = CloudBrowserSession(room=room, usage_tracker=tracker)
+        else:
+            if self._browser_session._room is None:
+                room = get_current_room() or self.room
+                if room:
+                    self._browser_session.set_room(room)
+            # A session handed over from a swapped-out agent carries no tracker.
+            if (
+                tracker is not None
+                and getattr(self._browser_session, "_usage_tracker", None) is None
+            ):
+                self._browser_session.set_usage_tracker(tracker)
         return self._browser_session
 
     @function_tool()
