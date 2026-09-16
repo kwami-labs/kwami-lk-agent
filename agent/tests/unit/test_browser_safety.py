@@ -70,14 +70,14 @@ def test_short_output_is_untouched() -> None:
     assert truncate_for_llm("hello") == "hello"
 
 
-def test_javascript_execution_is_off_unless_opted_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KWAMI_ALLOW_BROWSER_JS", raising=False)
+def test_javascript_execution_is_off_unless_opted_in(env_setting) -> None:
+    env_setting("KWAMI_ALLOW_BROWSER_JS", None)
     assert javascript_execution_enabled() is False
 
-    monkeypatch.setenv("KWAMI_ALLOW_BROWSER_JS", "true")
+    env_setting("KWAMI_ALLOW_BROWSER_JS", "true")
     assert javascript_execution_enabled() is True
 
-    monkeypatch.setenv("KWAMI_ALLOW_BROWSER_JS", "no")
+    env_setting("KWAMI_ALLOW_BROWSER_JS", "no")
     assert javascript_execution_enabled() is False
 
 

@@ -120,10 +120,10 @@ async def test_js_execution_is_refused_by_default(
 
 async def test_js_execution_runs_when_explicitly_enabled(
     agent_with_browser: tuple[KwamiAgent, StubBrowserSession],
-    monkeypatch: pytest.MonkeyPatch,
+    env_setting,
 ) -> None:
     agent, stub = agent_with_browser
-    monkeypatch.setenv("KWAMI_ALLOW_BROWSER_JS", "1")
+    env_setting("KWAMI_ALLOW_BROWSER_JS", "1")
 
     result = await agent.run_js_in_navigation(None, "document.title")
 

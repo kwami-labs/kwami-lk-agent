@@ -87,6 +87,26 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
 
 
 @pytest.fixture
+def env_setting(monkeypatch: pytest.MonkeyPatch):
+    """Set an environment variable and make it take effect immediately.
+
+    Settings are memoised per process, so a bare `monkeypatch.setenv` is
+    invisible to anything that has already resolved them. This sets the
+    variable and drops the cache.
+    """
+    from src.settings import set_settings
+
+    def _set(name: str, value: str | None) -> None:
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
+        set_settings(None)
+
+    return _set
+
+
+@pytest.fixture
 def fake_key(monkeypatch: pytest.MonkeyPatch):
     """Set one provider credential to a syntactically valid dummy value."""
 
