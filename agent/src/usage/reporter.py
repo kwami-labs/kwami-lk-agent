@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 logger = get_logger("usage.reporter")
 
+# Kept below SessionState.USAGE_REPORT_TIMEOUT_SECONDS so the inner call
+# fails first and we log the HTTP cause rather than a bare cancellation.
+REPORT_TIMEOUT_SECONDS = 4.0
+
 # API configuration from environment
 API_BASE_URL = os.environ.get("KWAMI_API_URL", "http://localhost:8080")
 KWAMI_API_KEY = os.environ.get("KWAMI_API_KEY", "")
@@ -85,7 +89,11 @@ class UsageReporter:
                 "X-API-Key": self._api_key,
             }
 
-            async with aiohttp.ClientSession() as session:
+            # aiohttp defaults to a 300s total timeout. This call runs inside a
+            # shutdown callback with a ~10s worker budget, so an unbounded wait
+            # meant the process was killed and the session's revenue lost.
+            timeout = aiohttp.ClientTimeout(total=REPORT_TIMEOUT_SECONDS)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, json=payload, headers=headers) as resp:
                     if resp.status == 200:
                         result = await resp.json()
