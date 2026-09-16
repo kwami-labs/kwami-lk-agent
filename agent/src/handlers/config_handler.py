@@ -20,6 +20,32 @@ if TYPE_CHECKING:
 logger = get_logger("config_handler")
 
 
+def _reuse_existing_memory(state: SessionState, new_memory_config: Any) -> Any:
+    """Return the live memory instance when the new config targets the same Zep user.
+
+    `create_memory` builds a fresh `AsyncZep`, re-runs `set_ontology` (a
+    destructive project-level replace), re-upserts the context template and
+    mints a new `session_{user}_{uuid4}` thread. Doing that on every config
+    message churned one client per message -- none of which could be closed --
+    and scattered a single conversation across several threads, so recall found
+    nothing. Reuse instead, and carry the retrieval knobs over so live memory
+    updates still take effect.
+    """
+    agent = state.current_agent
+    memory = getattr(agent, "_memory", None) if agent is not None else None
+    if memory is None or not getattr(memory, "is_initialized", False):
+        return None
+    if getattr(memory.config, "user_id", None) != getattr(new_memory_config, "user_id", None):
+        return None
+
+    for knob in ("max_context_messages", "include_facts", "min_fact_relevance"):
+        if hasattr(new_memory_config, knob):
+            setattr(memory.config, knob, getattr(new_memory_config, knob))
+
+    logger.info("Reusing existing Zep memory for user %s", memory.config.user_id)
+    return memory
+
+
 def _value_from_keys(config: dict[str, Any], *keys: str) -> Any:
     """Return the first present key value (supports falsy values)."""
     for key in keys:
@@ -149,12 +175,14 @@ async def handle_full_config(
                 if not new_config.memory.user_id and new_config.kwami_id:
                     # Client sends full memory id (e.g. kwami_<auth>_<kwamiId>); use as-is so each kwami has its own memory
                     new_config.memory.user_id = new_config.kwami_id
-                memory = await create_memory(
-                    config=new_config.memory,
-                    kwami_id=new_config.kwami_id or "default",
-                    kwami_name=new_config.kwami_name,
-                    usage_tracker=state.usage_tracker,
-                )
+                memory = _reuse_existing_memory(state, new_config.memory)
+                if memory is None:
+                    memory = await create_memory(
+                        config=new_config.memory,
+                        kwami_id=new_config.kwami_id or "default",
+                        kwami_name=new_config.kwami_name,
+                        usage_tracker=state.usage_tracker,
+                    )
 
         # 3. Create NEW Agent with this config
         # Only skip greeting if one was already delivered in this session.
