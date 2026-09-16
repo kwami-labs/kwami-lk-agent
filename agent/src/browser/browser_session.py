@@ -378,9 +378,29 @@ class CloudBrowserSession:
         self._idle_timer = asyncio.create_task(self._idle_timeout())
 
     def _cancel_idle_timer(self) -> None:
-        if self._idle_timer and not self._idle_timer.done():
-            self._idle_timer.cancel()
+        """Cancel the pending idle timer, unless we are running inside it.
+
+        `_idle_timeout` calls `close()`, and `close()` starts by cancelling the
+        idle timer -- which is the very task executing it. The CancelledError
+        then lands somewhere inside close() and can skip `stop_browser`, so the
+        browser is never released and keeps billing.
+        """
+        timer = self._idle_timer
+        if timer is None or timer.done():
             self._idle_timer = None
+            return
+
+        try:
+            running = asyncio.current_task()
+        except RuntimeError:  # pragma: no cover - no running loop
+            running = None
+        if running is timer:
+            # Let the timer finish its own close(); just drop the reference.
+            self._idle_timer = None
+            return
+
+        timer.cancel()
+        self._idle_timer = None
 
     async def _idle_timeout(self) -> None:
         """Auto-close the browser after idle timeout."""
