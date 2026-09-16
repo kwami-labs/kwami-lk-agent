@@ -99,24 +99,3 @@ def normalize_config_keys(config: dict[str, Any]) -> dict[str, Any]:
         normalized[snake_key] = value
 
     return normalized
-
-
-def safe_get(
-    config: dict[str, Any],
-    *keys: str,
-    default: Any = None,
-) -> Any:
-    """Safely get a value from nested config, trying multiple key formats.
-
-    Args:
-        config: Configuration dictionary.
-        *keys: Keys to try (e.g., "tts_provider", "ttsProvider").
-        default: Default value if none found.
-
-    Returns:
-        Found value or default.
-    """
-    for key in keys:
-        if key in config:
-            return config[key]
-    return default

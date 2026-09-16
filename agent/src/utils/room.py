@@ -1,7 +1,7 @@
 """Room and participant utilities for Kwami agent."""
 
 import asyncio
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from .logging import get_logger
 
@@ -113,38 +113,5 @@ async def should_disconnect_as_duplicate(
             else:
                 logger.info(f"This agent ({my_identity}) has priority over {oldest_agent.identity}")
                 return False
-
-    return False
-
-
-async def check_duplicate_before_action(
-    room: Optional["Room"],
-    my_identity: str | None,
-) -> bool:
-    """Quick check for duplicate agents before performing an action.
-
-    Args:
-        room: The LiveKit room instance.
-        my_identity: This agent's identity string.
-
-    Returns:
-        True if this agent should abort the action, False if it's safe to proceed.
-    """
-    if not room:
-        return False
-
-    other_agents = await get_other_agents(room)
-
-    if not other_agents:
-        return False
-
-    if not my_identity:
-        my_identity = room.local_participant.identity if room.local_participant else ""
-
-    oldest = min(other_agents, key=lambda p: p.identity)
-
-    if my_identity > oldest.identity:
-        logger.warning(f"Aborting action - another agent ({oldest.identity}) has priority")
-        return True
 
     return False

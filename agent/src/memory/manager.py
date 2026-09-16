@@ -23,7 +23,6 @@ from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
     get_user_name,
-    search_graph,
     search_thread,
 )
 from .utils import get_zep_imports, logger
@@ -481,36 +480,6 @@ class KwamiMemory:
             self._record_usage("zep/graph_search")
         return results
 
-    async def search_by_entity_type(
-        self,
-        query: str,
-        entity_types: list[str],
-        limit: int = 10,
-    ) -> list[dict]:
-        """Search the knowledge graph filtered by entity types.
-
-        Args:
-            query: Search query.
-            entity_types: Entity type names to filter by.
-            limit: Maximum number of results.
-
-        Returns:
-            List of matching nodes.
-        """
-        if not self._initialized or not self._client:
-            return []
-        results = await search_graph(
-            self._client,
-            self._user_id,
-            query,
-            scope="nodes",
-            limit=limit,
-            node_labels=entity_types,
-        )
-        if results:
-            self._record_usage("zep/graph_search")
-        return results
-
     async def get_entities_by_type(
         self,
         entity_type: str,
@@ -528,14 +497,6 @@ class KwamiMemory:
         if not self._initialized or not self._client:
             return []
         return await get_entities_by_type(self._client, self._user_id, entity_type, limit)
-
-    async def get_preferences(self, limit: int = 20) -> list[dict]:
-        """Get user preferences from the knowledge graph."""
-        return await self.get_entities_by_type("Preference", limit)
-
-    # ========================================================================
-    # User Identity
-    # ========================================================================
 
     async def get_user_name(self) -> str | None:
         """Get the user's name from the knowledge graph.
@@ -574,17 +535,6 @@ class KwamiMemory:
     # ========================================================================
     # Session Management
     # ========================================================================
-
-    async def clear_session(self) -> None:
-        """Clear the current thread (session) memory."""
-        if not self._initialized or not self._client:
-            return
-
-        try:
-            await self._client.thread.delete(thread_id=self._session_id)
-            logger.info(f"Cleared thread memory: {self._session_id}")
-        except Exception as e:
-            logger.error(f"Failed to clear thread: {e}")
 
     async def _aclose_client(self) -> None:
         """Release the Zep client's underlying HTTP connection pool."""
@@ -626,31 +576,6 @@ class KwamiMemory:
             self._client = None
         self._initialized = False
         logger.debug("Memory client closed")
-
-    def build_memory_enhanced_prompt(self, base_prompt: str) -> str:
-        """Build system prompt with memory context injection placeholder.
-
-        Args:
-            base_prompt: The original system prompt.
-
-        Returns:
-            Enhanced prompt with memory context placeholder.
-        """
-        if not self.config.auto_inject_context:
-            return base_prompt
-
-        return (
-            f"{base_prompt}\n\n"
-            "## Memory Context\n"
-            "You have access to your persistent memory about past conversations. "
-            "Use this context to provide personalized, contextual responses.\n"
-            "{{MEMORY_CONTEXT}}"
-        )
-
-
-# ============================================================================
-# Factory
-# ============================================================================
 
 
 async def create_memory(
