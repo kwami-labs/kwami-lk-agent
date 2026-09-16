@@ -72,7 +72,7 @@ omit = []
 show_missing = true
 skip_covered = false
 # Ratcheted upward each phase; reaches 100 in Phase 6. See the plan.
-fail_under = 38
+fail_under = 43
 exclude_also = [
     "if TYPE_CHECKING:",
     "@overload",
