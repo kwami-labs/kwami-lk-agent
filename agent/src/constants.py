@@ -246,6 +246,26 @@ class EnvVars:
 # Misc Constants
 # =============================================================================
 
+class Timeouts:
+    """Wall-clock budgets for I/O that sits on the voice path.
+
+    Zep's SDK defaults to 60s per call and `get_user_name` alone can make four
+    graph calls, so an unresponsive Zep could stall the first utterance for
+    ~120s. The greeting must never wait on memory: if the budget is blown the
+    agent greets without context rather than sitting silent.
+    """
+
+    # Per-request budget handed to the Zep client.
+    ZEP_REQUEST = 8.0
+
+    # Total budget for the pre-greeting memory injection.
+    MEMORY_CONTEXT = 6.0
+
+    # Final billing call. The worker only grants ~10s for shutdown callbacks,
+    # and aiohttp's own default is 300s, so this has to be explicit.
+    USAGE_REPORT = 5.0
+
+
 LANGUAGE_GREETINGS = {
     "en": "Language changed to English. How can I help you?",
     "es": "Idioma cambiado a espanol. Como puedo ayudarte?",

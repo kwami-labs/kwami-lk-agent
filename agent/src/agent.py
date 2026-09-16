@@ -6,6 +6,7 @@ from typing import Any
 from livekit.agents import Agent
 
 from .config import KwamiConfig
+from .constants import Timeouts
 from .memory import KwamiMemory
 from .room_context import get_current_room
 from .tools import AgentToolsMixin, ClientToolManager
@@ -342,8 +343,23 @@ class KwamiAgent(Agent, AgentToolsMixin):
             f"({self.kwami_config.kwami_id}) entered room successfully"
         )
 
-        # Inject memory context into system prompt
-        await self._inject_memory_context()
+        # Inject memory context into system prompt.
+        # Hard-bounded: memory is an enhancement, but the greeting is the
+        # product. A slow or unreachable Zep used to hold the first utterance
+        # for as long as it took, so cap it and greet without context on
+        # timeout rather than leaving the caller listening to silence.
+        try:
+            await asyncio.wait_for(
+                self._inject_memory_context(),
+                timeout=Timeouts.MEMORY_CONTEXT,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Memory context timed out after %.1fs; greeting without it.",
+                Timeouts.MEMORY_CONTEXT,
+            )
+        except Exception as e:
+            logger.error("Memory context failed (%s); greeting without it.", e)
 
         # Greet the user - but only once per session
         if self._skip_greeting:

@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..config import KwamiMemoryConfig
+from ..constants import Timeouts
 from .context import MemoryContext, get_context, setup_context_template
 from .ontology import configure_ontology
 from .search import (
@@ -123,7 +124,12 @@ class KwamiMemory:
             return False
 
         try:
-            self._client = AsyncZep(api_key=self.config.api_key)
+            # Without an explicit timeout the SDK waits 60s per call, on the
+            # critical path before the greeting.
+            self._client = AsyncZep(
+                api_key=self.config.api_key,
+                timeout=Timeouts.ZEP_REQUEST,
+            )
             self._user_id = self.config.user_id or f"kwami_{self.kwami_id}"
 
             await self._ensure_user_exists()
