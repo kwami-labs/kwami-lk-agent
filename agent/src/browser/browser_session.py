@@ -93,16 +93,28 @@ class CloudBrowserSession:
             profile_id=self._profile_id,
             timeout_minutes=15,
         )
-        self._browser_id = browser["id"]
+        browser_id = browser.get("id") if isinstance(browser, dict) else None
+        if not browser_id:
+            raise RuntimeError("Browser Use Cloud did not return a browser id")
+        self._browser_id = browser_id
         self._live_url = browser.get("liveUrl")
         cdp_url = browser.get("cdpUrl")
 
-        if not cdp_url:
-            raise RuntimeError("Browser Use Cloud did not return a cdpUrl")
+        # From here on the cloud browser exists and is being billed by the
+        # minute. Anything that fails before the session is usable must release
+        # it: `is_active` stays False without a CDP connection, and every
+        # cleanup path is gated on `is_active`, so a failure here used to strand
+        # a paid browser until its own 15-minute server timeout.
+        try:
+            if not cdp_url:
+                raise RuntimeError("Browser Use Cloud did not return a cdpUrl")
 
-        # Connect CDP
-        self._cdp = CDPConnection()
-        await self._cdp.connect(cdp_url)
+            # Connect CDP
+            self._cdp = CDPConnection()
+            await self._cdp.connect(cdp_url)
+        except Exception:
+            await self._release_unusable_browser()
+            raise
 
         # Enable Page domain for navigation events
         try:
@@ -376,6 +388,23 @@ class CloudBrowserSession:
         """Reset the idle auto-close timer."""
         self._cancel_idle_timer()
         self._idle_timer = asyncio.create_task(self._idle_timeout())
+
+    async def _release_unusable_browser(self) -> None:
+        """Stop a cloud browser that was created but never became usable."""
+        browser_id, self._browser_id = self._browser_id, None
+        self._live_url = None
+        cdp, self._cdp = self._cdp, None
+        if cdp is not None:
+            try:
+                await cdp.close()
+            except Exception as e:
+                logger.debug("Failed to close half-open CDP connection: %s", e)
+        if browser_id and self._client:
+            try:
+                await self._client.stop_browser(browser_id)
+                logger.info("Released unusable cloud browser %s", browser_id[:8])
+            except Exception as e:
+                logger.warning("Failed to release cloud browser %s: %s", browser_id[:8], e)
 
     def _cancel_idle_timer(self) -> None:
         """Cancel the pending idle timer, unless we are running inside it.
