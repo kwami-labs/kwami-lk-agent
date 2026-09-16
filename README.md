@@ -161,6 +161,7 @@ lk agent deploy        # or: make deploy
 
 LiveKit Cloud handles scaling, lifecycle, and hosting. CI builds the image on
 every push so deploy breakage is caught before `lk agent deploy`.
+
 Details: [docs/deployment.md](./docs/deployment.md).
 
 ## Environment Variables
