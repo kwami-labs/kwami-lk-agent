@@ -80,6 +80,38 @@ async def handle_full_config(
         # "voice" key, which used to raise and drop the entire config message.
         voice_data = section(message, "voice")
 
+        # Pipeline selection. Without this the realtime branch in
+        # runtime/pipeline.py was unreachable from the frontend: `pipelineType`
+        # and every `realtime*` key were simply never read, so the entire
+        # realtime path existed only in a test-only preset.
+        pipeline_type_in = text(voice_data, "pipelineType", "pipeline_type")
+        if pipeline_type_in in ("standard", "realtime"):
+            new_config.voice.pipeline_type = pipeline_type_in
+        elif pipeline_type_in:
+            logger.warning(
+                "Ignoring unknown pipelineType %r; keeping %s",
+                pipeline_type_in,
+                new_config.voice.pipeline_type,
+            )
+
+        realtime_data = section(voice_data, "realtime")
+        realtime_provider_in = text(realtime_data, "provider") or text(
+            voice_data, "realtimeProvider", "realtime_provider"
+        )
+        if realtime_provider_in:
+            new_config.voice.realtime_provider = realtime_provider_in
+        realtime_model_in = text(realtime_data, "model") or text(
+            voice_data, "realtimeModel", "realtime_model"
+        )
+        if realtime_model_in:
+            provider = realtime_provider_in or new_config.voice.realtime_provider
+            new_config.voice.realtime_model = strip_model_prefix(realtime_model_in, provider)
+        realtime_voice_in = text(realtime_data, "voice") or text(
+            voice_data, "realtimeVoice", "realtime_voice"
+        )
+        if realtime_voice_in:
+            new_config.voice.realtime_voice = realtime_voice_in
+
         # TTS. Numeric fields go through `number`, so an explicit 0 is honoured
         # rather than being read as "not provided".
         tts_data = section(voice_data, "tts")
