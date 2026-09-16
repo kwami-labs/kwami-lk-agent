@@ -99,12 +99,19 @@ async def entrypoint(ctx: JobContext) -> None:
             logger.info(f"Received data message: {msg_type}")
 
             if msg_type == "config":
-                asyncio.create_task(
-                    handle_full_config(session, state, message, vad, create_agent_from_config)
+                # Serialized: concurrent config handling raced on update_agent.
+                state.spawn(
+                    state.run_serialized(
+                        handle_full_config(session, state, message, vad, create_agent_from_config)
+                    ),
+                    name="handle_full_config",
                 )
             elif msg_type == "config_update":
-                asyncio.create_task(
-                    handle_config_update(session, state, message, vad, create_agent_from_config)
+                state.spawn(
+                    state.run_serialized(
+                        handle_config_update(session, state, message, vad, create_agent_from_config)
+                    ),
+                    name="handle_config_update",
                 )
             elif msg_type == "tool_result":
                 handle_tool_result(
@@ -115,11 +122,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             elif msg_type == "browser_close_request":
                 # Frontend user clicked the browser panel close button
-                if state.current_agent:
-                    browser_session = getattr(state.current_agent, "_browser_session", None)
-                    if browser_session and browser_session.is_active:
-                        asyncio.create_task(browser_session.close())
-                        logger.info("Closing cloud browser per user request")
+                browser_session = state.active_browser_session
+                if browser_session is not None:
+                    state.spawn(browser_session.close(), name="browser_close_request")
+                    logger.info("Closing cloud browser per user request")
 
             elif msg_type == "search_similar":
                 # Client "Find similar" button: run a product search like the selected result
@@ -128,10 +134,11 @@ async def entrypoint(ctx: JobContext) -> None:
                     query = f"similar to {title[:80]} buy"
                     logger.info("Running similar search from client: query=%s", query[:60])
                     ctx_simple = type("Ctx", (), {"room": ctx.room})()
-                    asyncio.create_task(
+                    state.spawn(
                         state.current_agent.web_search(
                             ctx_simple, query, max_results=5, search_for_products=True
-                        )
+                        ),
+                        name="search_similar",
                     )
 
         except Exception as e:
@@ -141,6 +148,19 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Register cleanup for when the session ends
     ctx.add_shutdown_callback(state.cleanup)
+
+    # Telephony sessions get their persona from the Kwami API. Neither the id
+    # resolution nor the fetch needs the session, so start the fetch NOW and
+    # await it after the room is up: sequencing it after session.start() left
+    # callers listening to a default-persona placeholder agent for as long as
+    # the HTTP call took, up to KWAMI_API_TIMEOUT (30s by default).
+    kwami_id = resolve_kwami_id(ctx)
+    runtime_config_task: asyncio.Task | None = None
+    if kwami_id:
+        logger.info("Resolved telephony kwami_id: %s", kwami_id)
+        runtime_config_task = state.spawn(
+            fetch_runtime_config(kwami_id), name="fetch_runtime_config"
+        )
 
     # Start the session
     await session.start(
@@ -171,17 +191,25 @@ async def entrypoint(ctx: JobContext) -> None:
             state.user_identity = participant.identity
             logger.info("Resolved user identity on join: %s", state.user_identity)
 
-    kwami_id = resolve_kwami_id(ctx)
-    if kwami_id:
-        logger.info("Resolved telephony kwami_id: %s", kwami_id)
-        runtime_config = await fetch_runtime_config(kwami_id)
+    if runtime_config_task is not None:
+        try:
+            runtime_config = await runtime_config_task
+        except Exception as e:
+            logger.error("Failed to fetch runtime config for %s: %s", kwami_id, e)
+            runtime_config = None
         if runtime_config:
-            await handle_full_config(
-                session,
-                state,
-                runtime_config,
-                vad,
-                create_agent_from_config,
+            await state.run_serialized(
+                handle_full_config(
+                    session,
+                    state,
+                    runtime_config,
+                    vad,
+                    create_agent_from_config,
+                )
+            )
+        else:
+            logger.warning(
+                "No runtime config for kwami_id=%s; staying on the placeholder agent", kwami_id
             )
 
     logger.info(f"Kwami session started for room: {ctx.room.name}")

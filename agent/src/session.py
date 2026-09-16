@@ -45,6 +45,38 @@ class SessionState:
     usage_tracker: UsageTracker = field(default_factory=UsageTracker)
     usage_reporter: UsageReporter = field(default_factory=UsageReporter)
     _cleanup_tasks: list = field(default_factory=list, repr=False)
+    # Serializes config handling. Two config messages arriving close together
+    # used to be handled concurrently: both built a Zep client and both called
+    # update_agent, so state.current_agent and session._agent could end up
+    # disagreeing, with one client never closed.
+    config_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _background_tasks: set = field(default_factory=set, repr=False)
+
+    def spawn(self, coro: Any, *, name: str) -> asyncio.Task:
+        """Run a coroutine in the background, keeping a strong reference to it.
+
+        The event loop only holds a weak reference to a running task, so a bare
+        `asyncio.create_task(...)` whose handle is dropped can be garbage
+        collected mid-flight -- and any exception it raised is never retrieved,
+        so the failure is completely silent.
+        """
+        task = asyncio.create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+        return task
+
+    def _on_background_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Background task '%s' failed: %s", task.get_name(), exc)
+
+    async def run_serialized(self, coro: Any) -> None:
+        """Run a config-handling coroutine with no other config work in flight."""
+        async with self.config_lock:
+            await coro
 
     def update_agent(
         self,
@@ -177,9 +209,7 @@ class SessionState:
         # Close the cloud browser (persists profile cookies, stops per-minute billing).
         # Resolved from SessionState rather than the current agent, so a browser
         # opened before a reconfiguration is still found.
-        browser_session = self.browser_session or getattr(
-            self.current_agent, "_browser_session", None
-        )
+        browser_session = self.active_browser_session
         if browser_session is not None:
             try:
                 await browser_session.close()
@@ -251,6 +281,19 @@ class SessionState:
                 credits_user_id,
                 self.room_name,
             )
+
+    @property
+    def active_browser_session(self) -> Any:
+        """The live cloud browser, wherever it currently lives.
+
+        A browser opened before a reconfiguration is transferred to SessionState
+        by `update_agent`; one opened after sits on the current agent. Callers
+        must not guess which, or they close nothing and leak a paid browser.
+        """
+        session = self.browser_session or getattr(self.current_agent, "_browser_session", None)
+        if session is not None and getattr(session, "is_active", False):
+            return session
+        return None
 
     @property
     def has_agent(self) -> bool:
