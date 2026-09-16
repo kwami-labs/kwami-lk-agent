@@ -27,10 +27,16 @@ from .handlers import handle_config_update, handle_full_config, handle_tool_resu
 from .room_context import set_current_room
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
+from .settings import Settings, get_settings, set_settings
 from .utils.logging import get_logger
 from .utils.room import is_agent_participant, resolve_user_identity
 
 logger = get_logger()
+
+# Resolve credentials once, here, after load_dotenv has run. Everything
+# downstream takes them from Settings rather than reading os.environ itself.
+set_settings(Settings.from_env())
+logger.info("Settings resolved: %s", get_settings().describe())
 
 server = AgentServer()
 

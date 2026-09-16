@@ -9,9 +9,10 @@ Supports full configuration for voice AI pipelines including:
 - Memory: Zep Cloud for persistent agent memory
 """
 
-import os
 from dataclasses import dataclass, field
 from typing import Literal
+
+from .settings import get_settings
 
 
 @dataclass
@@ -27,10 +28,13 @@ class KwamiMemoryConfig:
     """
 
     # Enable/disable memory (auto-enabled if ZEP_API_KEY is set)
-    enabled: bool = field(default_factory=lambda: bool(os.getenv("ZEP_API_KEY")))
+    # Resolved through Settings rather than os.getenv directly, so a test can
+    # construct a KwamiConfig without its result depending on what the developer
+    # happens to have exported.
+    enabled: bool = field(default_factory=lambda: get_settings().memory_enabled)
 
     # Zep API key (defaults to ZEP_API_KEY env var)
-    api_key: str = field(default_factory=lambda: os.getenv("ZEP_API_KEY", ""))
+    api_key: str = field(default_factory=lambda: get_settings().zep_api_key)
 
     # Unique identifier for this Kwami's user in Zep
     # This should be the kwami_id for independent memory per Kwami

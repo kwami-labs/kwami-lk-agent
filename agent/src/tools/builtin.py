@@ -2,7 +2,6 @@
 
 import asyncio
 import json
-import os
 import re
 from typing import Any
 
@@ -21,6 +20,7 @@ from ..constants import (
     TTSProviders,
 )
 from ..room_context import get_current_room
+from ..settings import get_settings
 from ..utils.logging import get_logger
 
 logger = get_logger("tools")
@@ -444,7 +444,7 @@ class AgentToolsMixin:
             query: Product search query (e.g. "women's bags", "leather handbags", "gift for girlfriend").
             max_results: Number of products to return (1-10, default 5).
         """
-        api_key = os.environ.get("SERPAPI_KEY")
+        api_key = get_settings().serpapi_key
         if not api_key:
             logger.info(
                 "SERPAPI_KEY not set; product_search unavailable, use web_search with search_for_products"
@@ -543,7 +543,7 @@ class AgentToolsMixin:
             max_results: Maximum number of results to return (1-10, default 5).
             search_for_products: Set True when the user is looking for products and product_search is unavailable.
         """
-        api_key = os.environ.get("TAVILY_API_KEY")
+        api_key = get_settings().tavily_api_key
         if not api_key:
             logger.warning("TAVILY_API_KEY not set; web search disabled")
             return "Web search is not configured (missing TAVILY_API_KEY)."

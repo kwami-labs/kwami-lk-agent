@@ -18,11 +18,11 @@ unless an operator explicitly turns it on.
 from __future__ import annotations
 
 import ipaddress
-import os
 import re
 import socket
 from urllib.parse import urlparse
 
+from ..settings import get_settings
 from ..utils.logging import get_logger
 
 logger = get_logger("browser.safety")
@@ -58,7 +58,7 @@ def javascript_execution_enabled() -> bool:
     Defaults to off. Turn it on with KWAMI_ALLOW_BROWSER_JS=1 only where the
     prompt-injection risk described in this module's docstring is acceptable.
     """
-    return os.environ.get(JS_EXECUTION_ENV_VAR, "").strip().lower() in ("1", "true", "yes", "on")
+    return get_settings().allow_browser_js
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:

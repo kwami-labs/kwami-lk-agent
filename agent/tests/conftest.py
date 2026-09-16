@@ -59,6 +59,21 @@ PROVIDER_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
+def reset_settings():
+    """Drop the cached Settings around every test.
+
+    Settings are resolved once per process and memoised. Without this, the
+    first test to touch them would freeze that snapshot for the whole run, and
+    a test that sets an environment variable would have no effect.
+    """
+    from src.settings import set_settings
+
+    set_settings(None)
+    yield
+    set_settings(None)
+
+
+@pytest.fixture(autouse=True)
 def isolated_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Remove every provider credential from the environment.
 

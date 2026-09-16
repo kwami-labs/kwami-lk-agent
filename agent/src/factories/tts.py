@@ -8,8 +8,6 @@ Provides comprehensive TTS creation with:
 - Caching support
 """
 
-import os
-
 from livekit.agents import inference
 from livekit.plugins import cartesia, deepgram, openai
 
@@ -34,6 +32,7 @@ from ..constants import (
     OpenAIVoices,
     TTSProviders,
 )
+from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 
@@ -58,12 +57,9 @@ def _check_api_key(provider: str) -> bool:
     if not env_vars:
         return True  # Unknown provider, assume OK
 
-    # Check if any of the valid env vars are set
-    for env_var in env_vars:
-        if os.getenv(env_var):
-            return True
-
-    # Check for plural constants list just in case
+    settings = get_settings()
+    if any(settings.has_provider_key(env_var) for env_var in env_vars):
+        return True
 
     logger.warning(f"⚠️ {' or '.join(env_vars)} not set for {provider} TTS")
     return False

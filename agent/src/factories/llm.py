@@ -8,11 +8,10 @@ that as an agent that joins the room and never speaks, with nothing in the logs
 connecting the two.
 """
 
-import os
-
 from livekit.plugins import openai
 
 from ..config import KwamiVoiceConfig
+from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 
@@ -128,7 +127,7 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         # This used to go through `with_x_ai(base_url=...)`, which routed to
         # the right endpoint but read XAI_API_KEY -- so a deployment that
         # correctly set MISTRAL_API_KEY failed with "XAI API key is required".
-        api_key = os.environ.get("MISTRAL_API_KEY", "")
+        api_key = get_settings().mistral_api_key
         if not api_key:
             raise ValueError("MISTRAL_API_KEY is required for the Mistral provider")
         return _openai_llm(

@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 from typing import Any
 
 import httpx
 
+from ..settings import get_settings
 from ..utils.logging import get_logger
 
 logger = get_logger("browser.cloud")
@@ -30,7 +30,7 @@ class BrowserUseClient:
     """Async HTTP client for the Browser Use Cloud REST API v3."""
 
     def __init__(self, api_key: str | None = None) -> None:
-        self._api_key = api_key or os.environ.get("BROWSER_USE_API_KEY", "")
+        self._api_key = api_key or get_settings().browser_use_api_key
         if not self._api_key:
             raise ValueError(
                 "BROWSER_USE_API_KEY is not set. "
