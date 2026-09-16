@@ -3,25 +3,19 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
 
+from .settings import get_settings
 from .utils.logging import get_logger
 
 logger = get_logger("runtime_bootstrap")
 
-API_BASE_URL = os.environ.get("KWAMI_API_URL", "http://localhost:8080")
-KWAMI_API_KEY = os.environ.get("KWAMI_API_KEY", "")
-
 
 def _api_timeout_seconds() -> float:
-    raw = os.environ.get("KWAMI_API_TIMEOUT", "30.0")
-    try:
-        return max(1.0, float(raw))
-    except ValueError:
-        return 30.0
+    """Never below a second, however the environment is configured."""
+    return max(1.0, get_settings().kwami_api_timeout)
 
 
 def _parse_json_dict(value: str | None) -> dict[str, Any]:
@@ -53,15 +47,17 @@ def resolve_kwami_id(ctx) -> str | None:
 
 
 async def fetch_runtime_config(kwami_id: str) -> dict[str, Any] | None:
-    if not KWAMI_API_KEY:
-        logger.warning("KWAMI_API_KEY not set; telephony bootstrap is disabled")
+    if not get_settings().kwami_api_key:
+        logger.warning("get_settings().kwami_api_key not set; telephony bootstrap is disabled")
         return None
 
-    url = f"{API_BASE_URL.rstrip('/')}/internal/kwamis/{kwami_id}/runtime"
+    url = f"{get_settings().kwami_api_url.rstrip('/')}/internal/kwamis/{kwami_id}/runtime"
     timeout = _api_timeout_seconds()
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(url, headers={"X-Kwami-API-Key": KWAMI_API_KEY})
+            response = await client.get(
+                url, headers={"X-Kwami-API-Key": get_settings().kwami_api_key}
+            )
             response.raise_for_status()
             payload = response.json()
             return payload if isinstance(payload, dict) else None
@@ -80,6 +76,6 @@ async def fetch_runtime_config(kwami_id: str) -> dict[str, Any] | None:
             "use the host LAN IP, host.docker.internal, or a public/tunnel URL.",
             type(exc).__name__,
             exc,
-            API_BASE_URL,
+            get_settings().kwami_api_url,
         )
         return None

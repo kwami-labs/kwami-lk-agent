@@ -2,19 +2,18 @@
 
 import logging
 import traceback
-from typing import Optional
 
 # Single logger name for the entire agent
 LOGGER_NAME = "kwami-agent"
 
 
-def get_logger(name: Optional[str] = None) -> logging.Logger:
+def get_logger(name: str | None = None) -> logging.Logger:
     """Get a logger instance.
-    
+
     Args:
         name: Optional sub-logger name. If provided, creates "kwami-agent.{name}".
               If None, returns the main "kwami-agent" logger.
-    
+
     Returns:
         Logger instance.
     """
@@ -30,7 +29,7 @@ def log_error(
     include_traceback: bool = True,
 ) -> None:
     """Log an error with consistent formatting.
-    
+
     Args:
         logger: Logger instance to use.
         message: Error message prefix.

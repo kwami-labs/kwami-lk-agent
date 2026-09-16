@@ -8,11 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any
 
 from ..utils.logging import get_logger
 from .cloud_browser import BrowserUseClient, CDPConnection
+from .safety import validate_url
 
 logger = get_logger("browser.session")
 
@@ -29,20 +30,26 @@ class CloudBrowserSession:
         3. close() — stop browser (persists profile), disconnect CDP
     """
 
-    def __init__(self, room: Any = None) -> None:
+    def __init__(self, room: Any = None, usage_tracker: Any = None) -> None:
         """Initialize the session manager.
 
         Args:
             room: LiveKit room for publishing data to the frontend.
+            usage_tracker: Records the billed minutes this session consumes.
         """
-        self._client: Optional[BrowserUseClient] = None
-        self._cdp: Optional[CDPConnection] = None
-        self._browser_id: Optional[str] = None
-        self._live_url: Optional[str] = None
-        self._profile_id: Optional[str] = None
+        self._client: BrowserUseClient | None = None
+        self._cdp: CDPConnection | None = None
+        self._browser_id: str | None = None
+        self._live_url: str | None = None
+        self._profile_id: str | None = None
         self._room = room
         self._current_url: str = ""
-        self._idle_timer: Optional[asyncio.Task] = None
+        self._idle_timer: asyncio.Task | None = None
+        # Cloud browsers bill per minute, with a US proxy on top. This is the
+        # single most expensive resource the agent can hold, and it was the one
+        # resource never metered -- pure, invisible margin loss.
+        self._usage_tracker = usage_tracker
+        self._started_at: float | None = None
 
     @property
     def is_active(self) -> bool:
@@ -50,16 +57,42 @@ class CloudBrowserSession:
         return self._browser_id is not None and self._cdp is not None and self._cdp.is_connected
 
     @property
-    def live_url(self) -> Optional[str]:
+    def live_url(self) -> str | None:
         return self._live_url
 
     def set_room(self, room: Any) -> None:
         """Update the LiveKit room reference."""
         self._room = room
 
+    def set_usage_tracker(self, usage_tracker: Any) -> None:
+        """Attach the tracker that bills this session's minutes."""
+        self._usage_tracker = usage_tracker
+
+    def _record_browser_minutes(self) -> None:
+        """Bill the wall-clock minutes this browser was held for.
+
+        Called from every path that releases a browser, so a session torn down
+        by the idle timer or by a failed CDP connect is metered the same as one
+        the user closed.
+        """
+        started, self._started_at = self._started_at, None
+        if started is None or self._usage_tracker is None:
+            return
+        minutes = max(0.0, (time.monotonic() - started)) / 60.0
+        if minutes <= 0:
+            return
+        try:
+            self._usage_tracker.record_external_usage(
+                "browser",
+                "browser_use/cloud",
+                units_used=round(minutes, 4),
+            )
+        except Exception as e:  # never let metering break teardown
+            logger.warning("Failed to record browser usage: %s", e)
+
     # -- Lifecycle -----------------------------------------------------------
 
-    async def start(self, user_id: str, url: Optional[str] = None) -> str:
+    async def start(self, user_id: str, url: str | None = None) -> str:
         """Create a cloud browser with the user's profile and connect CDP.
 
         Args:
@@ -93,16 +126,28 @@ class CloudBrowserSession:
             profile_id=self._profile_id,
             timeout_minutes=15,
         )
-        self._browser_id = browser["id"]
+        browser_id = browser.get("id") if isinstance(browser, dict) else None
+        if not browser_id:
+            raise RuntimeError("Browser Use Cloud did not return a browser id")
+        self._browser_id = browser_id
         self._live_url = browser.get("liveUrl")
         cdp_url = browser.get("cdpUrl")
 
-        if not cdp_url:
-            raise RuntimeError("Browser Use Cloud did not return a cdpUrl")
+        # From here on the cloud browser exists and is being billed by the
+        # minute. Anything that fails before the session is usable must release
+        # it: `is_active` stays False without a CDP connection, and every
+        # cleanup path is gated on `is_active`, so a failure here used to strand
+        # a paid browser until its own 15-minute server timeout.
+        try:
+            if not cdp_url:
+                raise RuntimeError("Browser Use Cloud did not return a cdpUrl")
 
-        # Connect CDP
-        self._cdp = CDPConnection()
-        await self._cdp.connect(cdp_url)
+            # Connect CDP
+            self._cdp = CDPConnection()
+            await self._cdp.connect(cdp_url)
+        except Exception:
+            await self._release_unusable_browser()
+            raise
 
         # Enable Page domain for navigation events
         try:
@@ -126,6 +171,7 @@ class CloudBrowserSession:
         await self._publish_session_event("open", url=url)
 
         # Start idle timer
+        self._started_at = time.monotonic()
         self._reset_idle_timer()
 
         logger.info(
@@ -139,6 +185,7 @@ class CloudBrowserSession:
     async def close(self) -> None:
         """Stop the cloud browser and disconnect CDP. Profile state is persisted."""
         self._cancel_idle_timer()
+        self._record_browser_minutes()
 
         if self._cdp:
             await self._cdp.close()
@@ -163,8 +210,9 @@ class CloudBrowserSession:
     async def navigate(self, url: str) -> str:
         """Navigate to a URL in the cloud browser."""
         self._ensure_active()
-        if not url.startswith(("http://", "https://")):
-            url = f"https://{url}"
+        # Second gate: navigate() is also reachable from start() and from the
+        # session-event path, not just the navigate_to tool.
+        url = validate_url(url)
         await self._cdp.navigate(url)
         self._current_url = url
         self._reset_idle_timer()
@@ -213,7 +261,7 @@ class CloudBrowserSession:
             for el in elements[:30]:
                 vis = "✓" if el.get("visible") else "✗"
                 parts.append(
-                    f"  {el['id']} [{el['type']}] {vis} \"{el['label']}\" "
+                    f'  {el["id"]} [{el["type"]}] {vis} "{el["label"]}" '
                     f"(x={el.get('x', 0)}, y={el.get('y', 0)})"
                 )
         return "\n".join(parts)
@@ -270,7 +318,7 @@ class CloudBrowserSession:
         await self._cdp.click(float(x), float(y))
 
         label = (target.get("label") or "")[:60]
-        return f"Clicked on \"{label}\" ({target['id']}) at ({x}, {y})."
+        return f'Clicked on "{label}" ({target["id"]}) at ({x}, {y}).'
 
     async def type_text(
         self,
@@ -349,12 +397,12 @@ class CloudBrowserSession:
             )
 
     async def _publish_session_event(
-        self, action: str, url: Optional[str] = None, title: Optional[str] = None
+        self, action: str, url: str | None = None, title: str | None = None
     ) -> None:
         """Send a browser_session event to the frontend via LiveKit data channel."""
         if not self._room:
             return
-        msg: Dict[str, Any] = {"type": "browser_session", "action": action}
+        msg: dict[str, Any] = {"type": "browser_session", "action": action}
         if self._live_url and action == "open":
             # Append dark theme and hide BU UI chrome
             live = self._live_url
@@ -376,10 +424,48 @@ class CloudBrowserSession:
         self._cancel_idle_timer()
         self._idle_timer = asyncio.create_task(self._idle_timeout())
 
+    async def _release_unusable_browser(self) -> None:
+        """Stop a cloud browser that was created but never became usable."""
+        self._record_browser_minutes()
+        browser_id, self._browser_id = self._browser_id, None
+        self._live_url = None
+        cdp, self._cdp = self._cdp, None
+        if cdp is not None:
+            try:
+                await cdp.close()
+            except Exception as e:
+                logger.debug("Failed to close half-open CDP connection: %s", e)
+        if browser_id and self._client:
+            try:
+                await self._client.stop_browser(browser_id)
+                logger.info("Released unusable cloud browser %s", browser_id[:8])
+            except Exception as e:
+                logger.warning("Failed to release cloud browser %s: %s", browser_id[:8], e)
+
     def _cancel_idle_timer(self) -> None:
-        if self._idle_timer and not self._idle_timer.done():
-            self._idle_timer.cancel()
+        """Cancel the pending idle timer, unless we are running inside it.
+
+        `_idle_timeout` calls `close()`, and `close()` starts by cancelling the
+        idle timer -- which is the very task executing it. The CancelledError
+        then lands somewhere inside close() and can skip `stop_browser`, so the
+        browser is never released and keeps billing.
+        """
+        timer = self._idle_timer
+        if timer is None or timer.done():
             self._idle_timer = None
+            return
+
+        try:
+            running = asyncio.current_task()
+        except RuntimeError:  # pragma: no cover - no running loop
+            running = None
+        if running is timer:
+            # Let the timer finish its own close(); just drop the reference.
+            self._idle_timer = None
+            return
+
+        timer.cancel()
+        self._idle_timer = None
 
     async def _idle_timeout(self) -> None:
         """Auto-close the browser after idle timeout."""
@@ -395,4 +481,5 @@ class CloudBrowserSession:
 def _is_mac() -> bool:
     """Check if running on macOS (for Cmd vs Ctrl key modifier)."""
     import platform
+
     return platform.system() == "Darwin"

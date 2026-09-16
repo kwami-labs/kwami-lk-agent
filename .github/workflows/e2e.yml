@@ -1,0 +1,64 @@
+name: E2E (real providers)
+
+# Deliberately NOT a pull-request gate. These tests spend money and depend on
+# third-party availability, so they run on a schedule, on demand, and after a
+# merge to main -- where a failure is information, not a blocked PR.
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+concurrency:
+  group: e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: End-to-end against real providers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: agent/uv.lock
+
+      - name: Install dependencies
+        working-directory: agent
+        run: uv sync --extra dev
+
+      - name: Run live suite
+        working-directory: agent
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DEEPGRAM_API_KEY: ${{ secrets.DEEPGRAM_API_KEY }}
+          CARTESIA_API_KEY: ${{ secrets.CARTESIA_API_KEY }}
+          ELEVEN_API_KEY: ${{ secrets.ELEVEN_API_KEY }}
+          ZEP_API_KEY: ${{ secrets.ZEP_API_KEY }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SERPAPI_KEY: ${{ secrets.SERPAPI_KEY }}
+          BROWSER_USE_API_KEY: ${{ secrets.BROWSER_USE_API_KEY }}
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+          KWAMI_API_URL: ${{ secrets.KWAMI_API_URL }}
+          KWAMI_API_KEY: ${{ secrets.KWAMI_API_KEY }}
+        # An empty selection exits 5, which would fail the job for "nothing to
+        # run" rather than "something broke". Treat 5 as a warning and let any
+        # other non-zero code fail the build.
+        run: |
+          set +e
+          uv run python -m pytest tests/e2e/ -v -m live
+          status=$?
+          set -e
+          if [ "$status" -eq 5 ]; then
+            echo "::warning::No live e2e tests were collected."
+            exit 0
+          fi
+          exit "$status"

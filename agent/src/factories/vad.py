@@ -1,5 +1,6 @@
 from livekit.plugins import silero
-from ..config import KwamiVoiceConfig
+
+from ..domain import KwamiVoiceConfig
 
 
 def create_vad(config: KwamiVoiceConfig):
