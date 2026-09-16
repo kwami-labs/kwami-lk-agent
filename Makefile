@@ -63,7 +63,10 @@ test-cov:
 
 # `live` tests are deselected by default in pyproject; -m live opts back in.
 test-e2e:
-	cd agent && uv run python -m pytest tests/e2e/ -v -m live
+	@cd agent && uv run python -m pytest tests/e2e/ -v -m live; \
+	status=$$?; \
+	if [ $$status -eq 5 ]; then echo "No live e2e tests collected."; exit 0; fi; \
+	exit $$status
 
 # =============================================================================
 # Code Quality

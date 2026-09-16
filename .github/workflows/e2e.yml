@@ -49,4 +49,16 @@ jobs:
           LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
           KWAMI_API_URL: ${{ secrets.KWAMI_API_URL }}
           KWAMI_API_KEY: ${{ secrets.KWAMI_API_KEY }}
-        run: uv run python -m pytest tests/e2e/ -v -m live
+        # An empty selection exits 5, which would fail the job for "nothing to
+        # run" rather than "something broke". Treat 5 as a warning and let any
+        # other non-zero code fail the build.
+        run: |
+          set +e
+          uv run python -m pytest tests/e2e/ -v -m live
+          status=$?
+          set -e
+          if [ "$status" -eq 5 ]; then
+            echo "::warning::No live e2e tests were collected."
+            exit 0
+          fi
+          exit "$status"
