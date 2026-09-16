@@ -37,6 +37,25 @@ class ModelUsage:
     text_output_tokens: int = 0
     request_count: int = 0
 
+    @property
+    def is_billable(self) -> bool:
+        """True when this entry represents anything the API can charge for.
+
+        Filtering on `total_units` alone dropped two real cases: providers that
+        bill per request rather than per unit, and realtime turns that were
+        text-only, where no audio minutes accrue but tokens do.
+        """
+        return any(
+            (
+                self.total_units > 0,
+                self.request_count > 0,
+                self.text_input_tokens > 0,
+                self.text_output_tokens > 0,
+                self.prompt_tokens > 0,
+                self.completion_tokens > 0,
+            )
+        )
+
 
 def _get_model_id(metrics: Any) -> str:
     """Extract a model identifier from metrics metadata or label."""
@@ -278,7 +297,7 @@ class UsageTracker:
         with self._lock:
             items = []
             for entry in self._usage.values():
-                if entry.total_units > 0:
+                if entry.is_billable:
                     item = {
                         "model_type": entry.model_type,
                         "model_id": entry.model_id,
@@ -313,4 +332,4 @@ class UsageTracker:
     def has_usage(self) -> bool:
         """Check if any usage has been recorded."""
         with self._lock:
-            return any(e.total_units > 0 for e in self._usage.values())
+            return any(e.is_billable for e in self._usage.values())
