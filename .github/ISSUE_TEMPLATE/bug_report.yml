@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in the agent is wrong or surprising.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. For vulnerabilities use
+        [private reporting](https://github.com/kwami-labs/kwami-lk-agent/security/advisories/new),
+        not this form.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. make dev
+        2. send a config message with …
+        3. …
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Voice pipeline (STT / LLM / TTS / realtime)
+        - Config / reconfiguration
+        - Memory (Zep)
+        - Tools / data channel
+        - Browser
+        - Billing / usage
+        - Telephony
+        - CI / tests
+        - Docs
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or version
+      placeholder: SHA or 0.1.0
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Redact API keys. `Settings resolved:` is safe to paste.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I ran `make check` (or the relevant subset) and this is not a local env issue.
+          required: false
+        - label: This is not a security report (those go through SECURITY.md).
+          required: true
