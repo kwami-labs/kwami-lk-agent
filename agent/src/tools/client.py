@@ -17,6 +17,18 @@ if TYPE_CHECKING:
 logger = get_logger("client_tools")
 
 
+# A client tool result goes verbatim into the LLM context.
+MAX_CLIENT_TOOL_RESULT_CHARS = 4000
+
+
+def _cap(text: str) -> str:
+    """Bound a client-supplied string before it reaches the LLM."""
+    if len(text) <= MAX_CLIENT_TOOL_RESULT_CHARS:
+        return text
+    dropped = len(text) - MAX_CLIENT_TOOL_RESULT_CHARS
+    return f"{text[:MAX_CLIENT_TOOL_RESULT_CHARS]}\n... [truncated, {dropped} more characters]"
+
+
 class ClientToolManager:
     """Manages dynamic tools that are executed on the client side.
 
@@ -172,10 +184,13 @@ class ClientToolManager:
             logger.warning(f"Tool call already completed: {tool_call_id}")
             return
 
+        # Everything here lands straight in the LLM context. The frontend is
+        # not a trusted size bound, so cap both branches rather than letting a
+        # buggy or hostile client blow the prompt budget -- or the bill.
         if error:
-            future.set_result(f"Error from client: {error}")
+            future.set_result(_cap(f"Error from client: {error}"))
         else:
-            future.set_result(result or "")
+            future.set_result(_cap(result or ""))
 
     def create_client_tools(self) -> list[Any]:
         """Return the list of registered client tools.
