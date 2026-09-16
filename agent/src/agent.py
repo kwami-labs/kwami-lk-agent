@@ -8,7 +8,7 @@ from livekit.agents import Agent
 from .constants import Timeouts
 from .domain import KwamiConfig, build_system_prompt
 from .memory import KwamiMemory
-from .room_context import get_current_room
+from .runtime.container import room_from_context
 from .tools import AgentToolsMixin, ClientToolManager
 from .utils.logging import get_logger
 from .utils.room import should_disconnect_as_duplicate
@@ -140,7 +140,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
         """
         # main.py / session.py set self.room; the ContextVar is the fallback
         # for agents constructed before the room was wired up.
-        room = self.room or get_current_room()
+        room = self.room or room_from_context(None)
         my_identity = ""
         if room:
             self.room = room

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from livekit.agents import RunContext, function_tool
 
-from ..room_context import get_current_room
+from ..runtime.container import room_from_context
 from ..utils.logging import get_logger
 from ..utils.validation import validate_tool_definition
 
@@ -114,7 +114,7 @@ class ClientToolManager:
             )
 
             room = (
-                get_current_room()
+                room_from_context(None, getattr(self.agent, "room", None))
                 or (getattr(context, "room", None) if context else None)
                 or getattr(self.agent, "room", None)
             )
@@ -124,7 +124,7 @@ class ClientToolManager:
                 logger.error(
                     "Cannot call client tool: No room connection "
                     "(current_room=%s, context_room=%s, agent_room=%s)",
-                    get_current_room() is not None,
+                    room_from_context(None, getattr(self.agent, "room", None)) is not None,
                     getattr(context, "room", None) is not None if context else False,
                     getattr(self.agent, "room", None) is not None,
                 )

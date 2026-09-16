@@ -20,15 +20,20 @@ from livekit.agents import (
 from livekit.plugins import silero
 
 from .domain import KwamiConfig
-from .handlers import handle_full_config
-from .room_context import set_current_room
-from .runtime import DataMessageRouter, decode_data_message, route_metrics
+from .runtime import (
+    AgentDeps,
+    DataMessageRouter,
+    apply_runtime_config,
+    decode_data_message,
+    resolve_identity_on_join,
+    route_metrics,
+)
 from .runtime.pipeline import create_agent_from_config
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
 from .utils.logging import get_logger
-from .utils.room import is_agent_participant, resolve_user_identity
+from .utils.room import resolve_user_identity
 
 logger = get_logger()
 
@@ -51,7 +56,6 @@ server.setup_fnc = prewarm
 @server.rtc_session(agent_name="kwami-agent")
 async def entrypoint(ctx: JobContext) -> None:
     """Main entry point for Kwami agent sessions."""
-    set_current_room(ctx.room)
     logger.info(f"Kwami session starting in room: {ctx.room.name}")
 
     # The room is NOT connected yet -- JobContext.room is populated by
@@ -69,7 +73,11 @@ async def entrypoint(ctx: JobContext) -> None:
     initial_agent = create_agent_from_config(config, vad, skip_greeting=True)
 
     # Create session and state
-    session = AgentSession()
+    # Dependencies live on the session's userdata, which the framework threads
+    # into every tool's RunContext. This is what replaces the ContextVar the
+    # tools used to hunt the room through.
+    deps = AgentDeps(settings=get_settings(), room=ctx.room)
+    session = AgentSession(userdata=deps)
     state = create_session_state(
         initial_agent=initial_agent,
         user_identity=user_identity,
@@ -144,32 +152,16 @@ async def entrypoint(ctx: JobContext) -> None:
     def on_participant_connected(participant) -> None:
         # A human can join after the agent; without this the session would
         # finish with no user_identity and its usage would never be billed.
-        if state.user_identity or is_agent_participant(participant):
-            return
-        if participant.identity:
-            state.user_identity = participant.identity
-            logger.info("Resolved user identity on join: %s", state.user_identity)
+        resolve_identity_on_join(state, participant)
 
-    if runtime_config_task is not None:
-        try:
-            runtime_config = await runtime_config_task
-        except Exception as e:
-            logger.error("Failed to fetch runtime config for %s: %s", kwami_id, e)
-            runtime_config = None
-        if runtime_config:
-            await state.run_serialized(
-                handle_full_config(
-                    session,
-                    state,
-                    runtime_config,
-                    vad,
-                    create_agent_from_config,
-                )
-            )
-        else:
-            logger.warning(
-                "No runtime config for kwami_id=%s; staying on the placeholder agent", kwami_id
-            )
+    await apply_runtime_config(
+        session,
+        state,
+        vad,
+        create_agent_from_config,
+        runtime_config_task,
+        kwami_id,
+    )
 
     logger.info(f"Kwami session started for room: {ctx.room.name}")
 

@@ -19,7 +19,7 @@ from ..constants import (
     CartesiaVoices,
     TTSProviders,
 )
-from ..room_context import get_current_room
+from ..runtime.container import room_from_context
 from ..settings import get_settings
 from ..utils.logging import get_logger
 
@@ -504,9 +504,7 @@ class AgentToolsMixin:
         answer = f"Found {len(ui_results)} products for '{query[:50]}'."
         # Fire and forget -- see the note in web_search.
         self._remember_in_background([f"User searched for products: {query}"])
-        room = (
-            get_current_room() or (getattr(context, "room", None) if context else None) or self.room
-        )
+        room = room_from_context(context, self.room)
         if room:
             try:
                 msg = {
@@ -679,9 +677,7 @@ class AgentToolsMixin:
         images_count = sum(1 for u in ui_results if u.get("image"))
         logger.info("Fetched %s images for %s results", images_count, len(ui_results))
 
-        room = (
-            get_current_room() or (getattr(context, "room", None) if context else None) or self.room
-        )
+        room = room_from_context(context, self.room)
         if room:
             try:
                 max_answer = 400
@@ -740,11 +736,11 @@ class AgentToolsMixin:
 
         tracker = getattr(self, "usage_tracker", None)
         if not hasattr(self, "_browser_session") or self._browser_session is None:
-            room = get_current_room() or self.room
+            room = room_from_context(None, self.room)
             self._browser_session = CloudBrowserSession(room=room, usage_tracker=tracker)
         else:
             if self._browser_session._room is None:
-                room = get_current_room() or self.room
+                room = room_from_context(None, self.room)
                 if room:
                     self._browser_session.set_room(room)
             # A session handed over from a swapped-out agent carries no tracker.
@@ -988,9 +984,7 @@ class AgentToolsMixin:
         Args:
             index: 0-based index of the result to remove (0 = first card, 1 = second, etc.).
         """
-        room = (
-            get_current_room() or (getattr(context, "room", None) if context else None) or self.room
-        )
+        room = room_from_context(context, self.room)
         if room:
             try:
                 msg = {"type": "remove_result", "index": max(0, int(index))}

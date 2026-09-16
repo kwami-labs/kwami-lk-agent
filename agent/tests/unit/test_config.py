@@ -2,8 +2,8 @@
 
 import unittest
 
-from src.domain import KwamiConfig, get_preset_config
 from src.constants import LLMProviders, OpenAIModels, STTProviders, TTSProviders
+from src.domain import KwamiConfig, get_preset_config
 
 
 class TestKwamiConfig(unittest.TestCase):
