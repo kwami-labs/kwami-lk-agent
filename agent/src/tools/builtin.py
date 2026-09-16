@@ -192,6 +192,32 @@ class AgentToolsMixin:
     - session: AgentSession with tts and stt attributes
     """
 
+    def _remember_in_background(self, facts: list[str]) -> None:
+        """Write facts to memory without blocking the caller.
+
+        Used on paths where the write is a side effect and the user is waiting:
+        a Zep round-trip in the middle of a voice turn is dead air. Task
+        references are retained so the work cannot be garbage collected
+        mid-flight and its failures are logged rather than swallowed.
+        """
+        if not (self._memory and self._memory.is_initialized and facts):
+            return
+
+        async def _write() -> None:
+            for fact in facts:
+                try:
+                    await self._memory.add_fact(fact)
+                except Exception as e:
+                    logger.debug("Could not store fact in memory: %s", e)
+
+        task = asyncio.create_task(_write())
+        tasks = getattr(self, "_background_tasks", None)
+        if tasks is None:
+            tasks = set()
+            self._background_tasks = tasks
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+
     @function_tool()
     async def get_kwami_info(self, context: RunContext) -> dict[str, Any]:
         """Get information about this Kwami instance."""
@@ -476,11 +502,8 @@ class AgentToolsMixin:
                 }
             )
         answer = f"Found {len(ui_results)} products for '{query[:50]}'."
-        if self._memory and self._memory.is_initialized:
-            try:
-                await self._memory.add_fact(f"User searched for products: {query}")
-            except Exception:
-                pass
+        # Fire and forget -- see the note in web_search.
+        self._remember_in_background([f"User searched for products: {query}"])
         room = (
             get_current_room() or (getattr(context, "room", None) if context else None) or self.room
         )
@@ -600,14 +623,14 @@ class AgentToolsMixin:
         ]
         answer = data.get("answer") or ""
 
-        # Store search query in memory for future context
-        if self._memory and self._memory.is_initialized:
-            try:
-                await self._memory.add_fact(f"User searched for: {query}")
-                if search_for_products:
-                    await self._memory.add_fact(f"User is shopping / looking for products: {query}")
-            except Exception as e:
-                logger.debug("Could not store search in memory: %s", e)
+        # Store search query in memory for future context. Fire and forget: this
+        # is a side effect nothing below depends on, and awaiting it added one
+        # or two Zep round-trips to the middle of a pipeline the user is already
+        # waiting through in silence.
+        facts = [f"User searched for: {query}"]
+        if search_for_products:
+            facts.append(f"User is shopping / looking for products: {query}")
+        self._remember_in_background(facts)
 
         # Enrich results: extract features, fetch image per result (for UI)
         max_results = 5
