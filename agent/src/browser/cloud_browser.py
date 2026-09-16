@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import httpx
 
@@ -29,7 +29,7 @@ BU_API_BASE = "https://api.browser-use.com/api/v3"
 class BrowserUseClient:
     """Async HTTP client for the Browser Use Cloud REST API v3."""
 
-    def __init__(self, api_key: Optional[str] = None) -> None:
+    def __init__(self, api_key: str | None = None) -> None:
         self._api_key = api_key or os.environ.get("BROWSER_USE_API_KEY", "")
         if not self._api_key:
             raise ValueError(
@@ -37,7 +37,7 @@ class BrowserUseClient:
                 "Get one at https://cloud.browser-use.com/settings?tab=api-keys"
             )
 
-    def _headers(self) -> Dict[str, str]:
+    def _headers(self) -> dict[str, str]:
         return {
             "X-Browser-Use-API-Key": self._api_key,
             "Content-Type": "application/json",
@@ -47,15 +47,15 @@ class BrowserUseClient:
 
     async def create_browser(
         self,
-        profile_id: Optional[str] = None,
+        profile_id: str | None = None,
         timeout_minutes: int = 15,
-        proxy_country: Optional[str] = "us",
-    ) -> Dict[str, Any]:
+        proxy_country: str | None = "us",
+    ) -> dict[str, Any]:
         """Create a cloud browser session.
 
         Returns dict with keys: id, status, liveUrl, cdpUrl, timeoutAt, startedAt.
         """
-        payload: Dict[str, Any] = {"timeout": timeout_minutes}
+        payload: dict[str, Any] = {"timeout": timeout_minutes}
         if profile_id:
             payload["profileId"] = profile_id
         if proxy_country:
@@ -78,7 +78,7 @@ class BrowserUseClient:
             )
             return data
 
-    async def stop_browser(self, browser_id: str) -> Dict[str, Any]:
+    async def stop_browser(self, browser_id: str) -> dict[str, Any]:
         """Stop a cloud browser session (persists profile state)."""
         async with httpx.AsyncClient(timeout=15.0) as client:
             r = await client.patch(
@@ -90,7 +90,7 @@ class BrowserUseClient:
             logger.info("Stopped cloud browser: %s", browser_id[:8])
             return r.json()
 
-    async def get_browser(self, browser_id: str) -> Dict[str, Any]:
+    async def get_browser(self, browser_id: str) -> dict[str, Any]:
         """Get browser session details."""
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.get(
@@ -102,7 +102,7 @@ class BrowserUseClient:
 
     # -- Profiles ------------------------------------------------------------
 
-    async def create_profile(self, name: str) -> Dict[str, Any]:
+    async def create_profile(self, name: str) -> dict[str, Any]:
         """Create a browser profile for persistent auth state."""
         async with httpx.AsyncClient(timeout=10.0) as client:
             r = await client.post(
@@ -115,9 +115,9 @@ class BrowserUseClient:
             logger.info("Created profile: id=%s name=%s", data.get("id", "?")[:8], name)
             return data
 
-    async def list_profiles(self, query: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def list_profiles(self, query: str | None = None) -> list[dict[str, Any]]:
         """List profiles, optionally filtered by name query."""
-        params: Dict[str, Any] = {"pageSize": 20}
+        params: dict[str, Any] = {"pageSize": 20}
         if query:
             params["query"] = query
         async with httpx.AsyncClient(timeout=10.0) as client:
@@ -157,8 +157,8 @@ class CDPConnection:
     def __init__(self) -> None:
         self._ws: Any = None
         self._msg_id: int = 0
-        self._pending: Dict[int, asyncio.Future] = {}
-        self._reader_task: Optional[asyncio.Task] = None
+        self._pending: dict[int, asyncio.Future] = {}
+        self._reader_task: asyncio.Task | None = None
 
     async def connect(self, cdp_url: str) -> None:
         """Connect to the CDP endpoint.
@@ -208,16 +208,19 @@ class CDPConnection:
             data = r.json()
             browser_ws = data.get("webSocketDebuggerUrl", "")
             if not browser_ws:
-                raise ValueError(f"No webSocketDebuggerUrl in /json/version response")
+                raise ValueError("No webSocketDebuggerUrl in /json/version response")
 
             # Connect to browser target temporarily to create a page
             import websockets
+
             async with websockets.connect(browser_ws, close_timeout=5) as browser_conn:
-                create_msg = json.dumps({
-                    "id": 1,
-                    "method": "Target.createTarget",
-                    "params": {"url": "about:blank"},
-                })
+                create_msg = json.dumps(
+                    {
+                        "id": 1,
+                        "method": "Target.createTarget",
+                        "params": {"url": "about:blank"},
+                    }
+                )
                 await browser_conn.send(create_msg)
                 resp = json.loads(await asyncio.wait_for(browser_conn.recv(), timeout=10))
                 target_id = resp.get("result", {}).get("targetId", "")
@@ -251,7 +254,7 @@ class CDPConnection:
                 if not fut.done():
                     fut.set_exception(ConnectionError(f"CDP connection lost: {e}"))
 
-    async def send(self, method: str, **params: Any) -> Dict[str, Any]:
+    async def send(self, method: str, **params: Any) -> dict[str, Any]:
         """Send a CDP command and wait for the response."""
         if not self._ws:
             raise ConnectionError("CDP WebSocket not connected")
@@ -299,6 +302,7 @@ class CDPConnection:
         try:
             # websockets >= 13: ClientConnection uses .state (State enum)
             from websockets.protocol import State
+
             return self._ws.state is State.OPEN
         except (ImportError, AttributeError):
             # websockets < 13 fallback
@@ -306,7 +310,7 @@ class CDPConnection:
 
     # -- High-level CDP operations -------------------------------------------
 
-    async def navigate(self, url: str) -> Dict[str, Any]:
+    async def navigate(self, url: str) -> dict[str, Any]:
         """Navigate to a URL."""
         return await self.send("Page.navigate", url=url)
 
@@ -376,7 +380,9 @@ class CDPConnection:
             "ArrowUp": {"key": "ArrowUp", "code": "ArrowUp", "windowsVirtualKeyCode": 38},
             "Space": {"key": " ", "code": "Space", "windowsVirtualKeyCode": 32},
         }
-        kdef = key_map.get(key, {"key": key, "code": key, "windowsVirtualKeyCode": ord(key[0]) if key else 0})
+        kdef = key_map.get(
+            key, {"key": key, "code": key, "windowsVirtualKeyCode": ord(key[0]) if key else 0}
+        )
 
         for event_type in ("keyDown", "keyUp"):
             await self.send("Input.dispatchKeyEvent", type=event_type, **kdef)
@@ -392,7 +398,7 @@ class CDPConnection:
             deltaY=delta_y,
         )
 
-    async def page_info(self) -> Dict[str, Any]:
+    async def page_info(self) -> dict[str, Any]:
         """Extract page title, text content, and interactive elements via JS evaluation."""
         js = """
         (() => {
