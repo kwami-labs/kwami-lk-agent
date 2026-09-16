@@ -14,6 +14,7 @@ from typing import Any
 from ..agent import KwamiAgent
 from ..domain import KwamiConfig
 from ..factories import create_llm, create_realtime_model, create_stt, create_tts
+from ..factories.vad import create_vad
 from ..utils.logging import get_logger
 
 logger = get_logger("pipeline")
@@ -40,6 +41,10 @@ def create_agent_from_config(
     """
     voice_config = config.voice
 
+    # Reuses the prewarmed model unless this session actually asks for
+    # different turn-taking; the VAD settings were previously ignored entirely.
+    session_vad = create_vad(voice_config, prewarmed=vad)
+
     if voice_config.pipeline_type == REALTIME_PIPELINE:
         logger.info(
             "Using realtime pipeline: %s/%s",
@@ -48,7 +53,7 @@ def create_agent_from_config(
         )
         return KwamiAgent(
             config,
-            vad=vad,
+            vad=session_vad,
             memory=memory,
             llm=create_realtime_model(voice_config),
             skip_greeting=skip_greeting,
@@ -65,7 +70,7 @@ def create_agent_from_config(
     )
     return KwamiAgent(
         config,
-        vad=vad,
+        vad=session_vad,
         memory=memory,
         stt=create_stt(voice_config),
         llm=create_llm(voice_config),

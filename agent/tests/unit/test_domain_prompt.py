@@ -151,9 +151,41 @@ def test_static_guidance_is_built_once() -> None:
 
 
 def test_tool_guidance_survives_extraction() -> None:
+    """Guidance for tools this repo actually defines is always present."""
     prompt = build_system_prompt(soul())
-    for expected in ("navigate_to", "product_search", "dismiss_search_result", "set_ui_control"):
+    for expected in ("navigate_to", "product_search", "dismiss_search_result"):
         assert expected in prompt
+
+
+def test_ui_control_guidance_is_withheld_when_the_tools_are_not_registered() -> None:
+    """set_ui_control and list_ui_controls are client-side tools.
+
+    Nothing in this repo defines them; they arrive only if the frontend
+    registers them. Naming them unconditionally told the model to call tools
+    that did not exist on any deployment that never sent them.
+    """
+    prompt = build_system_prompt(soul())
+
+    assert "set_ui_control" not in prompt
+    assert "list_ui_controls" not in prompt
+
+
+def test_ui_control_guidance_appears_once_the_client_registers_them() -> None:
+    prompt = build_system_prompt(soul(), client_tool_names={"set_ui_control", "list_ui_controls"})
+
+    assert "set_ui_control" in prompt
+    assert "list_ui_controls" in prompt
+    assert "domain='theme'" in prompt
+
+
+def test_one_registered_ui_tool_is_enough_to_emit_the_guidance() -> None:
+    assert "set_ui_control" in build_system_prompt(soul(), client_tool_names=["set_ui_control"])
+
+
+def test_unrelated_client_tools_do_not_trigger_ui_guidance() -> None:
+    prompt = build_system_prompt(soul(), client_tool_names=["send_email", "book_flight"])
+
+    assert "set_ui_control" not in prompt
 
 
 # -- memory context ---------------------------------------------------------

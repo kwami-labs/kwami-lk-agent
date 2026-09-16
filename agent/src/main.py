@@ -17,9 +17,9 @@ from livekit.agents import (
     cli,
     room_io,
 )
-from livekit.plugins import silero
 
 from .domain import KwamiConfig
+from .factories.vad import prewarm_vad
 from .runtime import (
     AgentDeps,
     DataMessageRouter,
@@ -47,7 +47,7 @@ server = AgentServer()
 
 def prewarm(proc: JobProcess) -> None:
     """Prewarm the VAD model for faster startup."""
-    proc.userdata["vad"] = silero.VAD.load()
+    proc.userdata["vad"] = prewarm_vad()
 
 
 server.setup_fnc = prewarm

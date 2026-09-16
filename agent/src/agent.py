@@ -94,7 +94,28 @@ class KwamiAgent(Agent, AgentToolsMixin):
         Returns:
             Complete system prompt string.
         """
-        return build_system_prompt(self.kwami_config.soul, memory_context)
+        # Pass the client tools the frontend actually registered, so guidance
+        # naming set_ui_control / list_ui_controls is only emitted when those
+        # tools exist. Otherwise the model is invited to hallucinate calls.
+        return build_system_prompt(
+            self.kwami_config.soul,
+            memory_context,
+            client_tool_names=self._registered_client_tool_names(),
+        )
+
+    def _registered_client_tool_names(self) -> set[str]:
+        """Names of the client-side tools currently registered on this agent."""
+        manager = getattr(self, "client_tools", None)
+        registered = getattr(manager, "registered_tools", None) or []
+        names: set[str] = set()
+        for entry in registered:
+            if isinstance(entry, dict):
+                name = entry.get("name")
+            else:
+                name = getattr(entry, "name", None)
+            if isinstance(name, str) and name:
+                names.add(name)
+        return names
 
     async def _inject_memory_context(self) -> None:
         """Fetch memory context, cache user name, and update system prompt.
