@@ -1,6 +1,6 @@
 """Usage tracking and reporting for the credit system."""
 
+from ..domain import UsageTracker
 from .reporter import UsageReporter
-from .tracker import UsageTracker
 
 __all__ = ["UsageTracker", "UsageReporter"]

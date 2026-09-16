@@ -16,8 +16,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from ..config import KwamiMemoryConfig
 from ..constants import Timeouts
+from ..domain import KwamiMemoryConfig
 from .context import MemoryContext, get_context, setup_context_template
 from .ontology import configure_ontology
 from .search import (

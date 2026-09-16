@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
-from src.config import KwamiConfig
+from src.domain import KwamiConfig
 from src.domain.cloning import clone_config
 
 

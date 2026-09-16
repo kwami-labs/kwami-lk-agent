@@ -10,7 +10,7 @@ connecting the two.
 
 from livekit.plugins import openai
 
-from ..config import KwamiVoiceConfig
+from ..domain import KwamiVoiceConfig
 from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix

@@ -22,7 +22,7 @@ except ImportError:  # pragma: no cover - openai SDK is a hard dependency
 
 from typing import Any, cast
 
-from ..config import KwamiVoiceConfig
+from ..domain import KwamiVoiceConfig
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 

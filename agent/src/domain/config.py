@@ -12,7 +12,7 @@ Supports full configuration for voice AI pipelines including:
 from dataclasses import dataclass, field
 from typing import Literal
 
-from .settings import get_settings
+from ..settings import get_settings
 
 
 @dataclass

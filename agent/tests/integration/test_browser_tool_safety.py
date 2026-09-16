@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 
 from src.agent import KwamiAgent
-from src.config import KwamiConfig
+from src.domain import KwamiConfig
 
 
 class StubBrowserSession:

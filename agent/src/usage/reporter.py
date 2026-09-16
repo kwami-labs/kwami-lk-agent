@@ -14,7 +14,7 @@ from ..settings import get_settings
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
-    from .tracker import UsageTracker
+    from ..domain import UsageTracker
 
 logger = get_logger("usage.reporter")
 

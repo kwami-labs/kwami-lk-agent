@@ -40,7 +40,7 @@ def test_config_no_longer_depends_on_the_developer_environment(env_setting) -> N
     `test_default_config` failed on any machine that happened to have the key
     exported, and its own comment admitted the fragility instead of fixing it.
     """
-    from src.config import KwamiConfig
+    from src.domain import KwamiConfig
 
     env_setting("ZEP_API_KEY", None)
     assert KwamiConfig().memory.enabled is False

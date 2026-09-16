@@ -13,7 +13,7 @@ import inspect
 import pytest
 from livekit.plugins import openai
 
-from src.config import KwamiVoiceConfig
+from src.domain import KwamiVoiceConfig
 from src.constants import LLMProviders
 from src.factories.llm import create_llm
 

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.config import KwamiSoulConfig
+from src.domain import KwamiSoulConfig
 from src.domain.prompt import (
     MAX_SYSTEM_MEMORY_CONTEXT_CHARS,
     MEMORY_HEADER,

@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 # Note: livekit mocking is done in conftest.py
-from src.config import KwamiVoiceConfig
+from src.domain import KwamiVoiceConfig
 from src.constants import OpenAIModels, OpenAIVoices, STTProviders, TTSProviders
 from src.factories.stt import create_stt
 from src.factories.tts import create_tts

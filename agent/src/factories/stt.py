@@ -21,12 +21,12 @@ try:
 except ImportError:
     cartesia = None  # type: ignore
 
-from ..config import KwamiVoiceConfig
 from ..constants import (
     DeepgramModels,
     OpenAIModels,
     STTProviders,
 )
+from ..domain import KwamiVoiceConfig
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 

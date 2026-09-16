@@ -6,7 +6,8 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-from .usage import UsageReporter, UsageTracker
+from .domain import UsageTracker
+from .usage import UsageReporter
 from .utils.logging import get_logger
 
 if TYPE_CHECKING:

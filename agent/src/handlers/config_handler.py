@@ -7,8 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from livekit.agents.voice.agent import find_function_tools
 
-from ..config import KwamiConfig
-from ..domain import clone_config, integer, number, section, text
+from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..memory import create_memory
 from ..utils.logging import get_logger, log_error
 from ..utils.provider import detect_provider_change, strip_model_prefix

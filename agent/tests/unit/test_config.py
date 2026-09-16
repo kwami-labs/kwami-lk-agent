@@ -2,7 +2,7 @@
 
 import unittest
 
-from src.config import KwamiConfig, get_preset_config
+from src.domain import KwamiConfig, get_preset_config
 from src.constants import LLMProviders, OpenAIModels, STTProviders, TTSProviders
 
 

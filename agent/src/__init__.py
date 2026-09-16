@@ -1,7 +1,7 @@
 """Kwami AI Agent - LiveKit voice agent with dynamic configuration."""
 
 from .agent import KwamiAgent
-from .config import (
+from .domain import (
     KwamiConfig,
     KwamiMemoryConfig,
     KwamiPersonaConfig,

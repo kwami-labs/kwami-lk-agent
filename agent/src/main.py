@@ -19,12 +19,11 @@ from livekit.agents import (
 )
 from livekit.plugins import silero
 
-from .agent import KwamiAgent
-from .config import KwamiConfig
-from .factories import create_llm, create_realtime_model, create_stt, create_tts
+from .domain import KwamiConfig
 from .handlers import handle_full_config
 from .room_context import set_current_room
 from .runtime import DataMessageRouter, decode_data_message, route_metrics
+from .runtime.pipeline import create_agent_from_config
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
@@ -173,59 +172,6 @@ async def entrypoint(ctx: JobContext) -> None:
             )
 
     logger.info(f"Kwami session started for room: {ctx.room.name}")
-
-
-def create_agent_from_config(
-    config: KwamiConfig,
-    vad,
-    memory=None,
-    skip_greeting: bool = False,
-) -> KwamiAgent:
-    """Create a KwamiAgent instance from a configuration object.
-
-    Args:
-        config: The Kwami configuration.
-        vad: Voice Activity Detection instance.
-        memory: Optional memory instance.
-        skip_greeting: If True, skip the initial greeting (for reconfigurations).
-
-    Returns:
-        Configured KwamiAgent instance.
-    """
-    voice_config = config.voice
-
-    if voice_config.pipeline_type == "realtime":
-        logger.info(
-            f"Using realtime pipeline: "
-            f"{voice_config.realtime_provider}/{voice_config.realtime_model}"
-        )
-        realtime_model = create_realtime_model(voice_config)
-        return KwamiAgent(
-            config,
-            vad=vad,
-            memory=memory,
-            llm=realtime_model,
-            skip_greeting=skip_greeting,
-        )
-    else:
-        logger.info(
-            f"Using standard pipeline: "
-            f"STT={voice_config.stt_provider}/{voice_config.stt_model}, "
-            f"LLM={voice_config.llm_provider}/{voice_config.llm_model}, "
-            f"TTS={voice_config.tts_provider}/{voice_config.tts_model}"
-        )
-        stt = create_stt(voice_config)
-        llm = create_llm(voice_config)
-        tts = create_tts(voice_config)
-        return KwamiAgent(
-            config,
-            vad=vad,
-            memory=memory,
-            stt=stt,
-            llm=llm,
-            tts=tts,
-            skip_greeting=skip_greeting,
-        )
 
 
 if __name__ == "__main__":

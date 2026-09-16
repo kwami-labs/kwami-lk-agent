@@ -21,7 +21,6 @@ try:
 except ImportError:
     google = None  # type: ignore
 
-from ..config import KwamiVoiceConfig
 from ..constants import (
     CartesiaVoices,
     DeepgramVoices,
@@ -32,6 +31,7 @@ from ..constants import (
     OpenAIVoices,
     TTSProviders,
 )
+from ..domain import KwamiVoiceConfig
 from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix

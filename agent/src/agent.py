@@ -5,9 +5,8 @@ from typing import Any
 
 from livekit.agents import Agent
 
-from .config import KwamiConfig
 from .constants import Timeouts
-from .domain import build_system_prompt
+from .domain import KwamiConfig, build_system_prompt
 from .memory import KwamiMemory
 from .room_context import get_current_room
 from .tools import AgentToolsMixin, ClientToolManager
