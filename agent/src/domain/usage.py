@@ -39,15 +39,6 @@ class ModelUsage:
 
     @property
     def is_billable(self) -> bool:
-        """True when this entry should be reported to credits.
-
-        Some providers bill per request rather than per unit. Filtering on
-        units alone dropped that revenue.
-        """
-        return self.total_units > 0 or self.request_count > 0
-
-    @property
-    def is_billable(self) -> bool:
         """True when this entry represents anything the API can charge for.
 
         Filtering on `total_units` alone dropped two real cases: providers that
