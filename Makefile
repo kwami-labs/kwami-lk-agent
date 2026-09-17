@@ -1,4 +1,4 @@
-.PHONY: help install dev create deploy test test-unit test-contract test-integration test-cov test-e2e lint format typecheck check clean
+.PHONY: help install dev create deploy deploy-cf deploy-cf-staging test test-unit test-contract test-integration test-cov test-e2e lint format typecheck check clean
 
 help:
 	@echo "Kwami LiveKit Agent - Development Commands"
@@ -7,6 +7,8 @@ help:
 	@echo "  make install          - Install agent dependencies (incl. dev tools)"
 	@echo "  make dev              - Run agent locally (dev mode)"
 	@echo "  make deploy           - Deploy agent to LiveKit Cloud"
+	@echo "  make deploy-cf          - Deploy agent on Cloudflare Workers + Containers"
+	@echo "  make deploy-cf-staging  - Deploy Cloudflare staging environment"
 	@echo ""
 	@echo "Testing:"
 	@echo "  make test             - Run the offline suite (unit + contract + integration)"
@@ -31,6 +33,7 @@ help:
 
 install:
 	cd agent && uv sync --extra dev
+	cd infra && pnpm install
 
 # The package is `src` (see agent/Dockerfile), not `agent`.
 dev:
@@ -41,6 +44,12 @@ create:
 
 deploy:
 	cd agent && lk agent deploy
+
+deploy-cf:
+	cd infra && pnpm deploy
+
+deploy-cf-staging:
+	cd infra && pnpm deploy:staging
 
 # =============================================================================
 # Testing

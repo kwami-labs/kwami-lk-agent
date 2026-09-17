@@ -1,0 +1,79 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "kwami-lk-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "preview_urls": true,
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  "vars": {
+    "ENVIRONMENT": "production",
+    "LIVEKIT_URL": "wss://kwami-uslb42tw.livekit.cloud",
+    // Public kwami-lk-api origin. Must not be localhost on Cloudflare.
+    "KWAMI_API_URL": "https://api.kwami.io",
+    "KWAMI_API_TIMEOUT": "30.0",
+    "KWAMI_ALLOW_BROWSER_JS": "false",
+  },
+  "triggers": {
+    "crons": ["*/2 * * * *"],
+  },
+  "containers": [
+    {
+      "class_name": "KwamiAgentContainer",
+      "image": "./container/Dockerfile",
+      "image_build_context": "..",
+      "instance_type": "standard-2",
+      "max_instances": 3,
+    },
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "KWAMI_AGENT",
+        "class_name": "KwamiAgentContainer",
+      },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["KwamiAgentContainer"],
+    },
+  ],
+  "env": {
+    "staging": {
+      "name": "kwami-lk-agent-staging",
+      "vars": {
+        "ENVIRONMENT": "staging",
+        "LIVEKIT_URL": "wss://kwami-uslb42tw.livekit.cloud",
+        "KWAMI_API_URL": "https://api.kwami.io",
+        "KWAMI_API_TIMEOUT": "30.0",
+        "KWAMI_ALLOW_BROWSER_JS": "false",
+      },
+      "triggers": {
+        "crons": ["*/2 * * * *"],
+      },
+      "containers": [
+        {
+          "class_name": "KwamiAgentContainer",
+          "image": "./container/Dockerfile",
+          "image_build_context": "..",
+          "instance_type": "standard-2",
+          "max_instances": 1,
+        },
+      ],
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "KWAMI_AGENT",
+            "class_name": "KwamiAgentContainer",
+          },
+        ],
+      },
+    },
+  },
+}
