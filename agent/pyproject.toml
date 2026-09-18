@@ -71,8 +71,11 @@ omit = []
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-# Ratcheted upward each phase; reaches 100 in Phase 6. See the plan.
-fail_under = 75
+# Reached 100 in Phase 6 and is now blocking: a line that is not exercised
+# does not merge. This only ever moves by adding tests -- see the exclusion
+# rules below for the two things that may be left out, and docs/testing.md
+# for why lowering it to meet the tree is the wrong move.
+fail_under = 100
 # Categorical exclusions live here so they are auditable in one place.
 exclude_also = [
     "if TYPE_CHECKING:",
