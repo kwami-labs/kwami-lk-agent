@@ -9,16 +9,14 @@ Provides comprehensive TTS creation with:
 """
 
 from livekit.agents import inference
-from livekit.plugins import cartesia, deepgram, openai
 
-try:
-    from livekit.plugins import elevenlabs
-except ImportError:
-    elevenlabs = None  # type: ignore
+# elevenlabs is a mandatory dependency (see pyproject [project.dependencies]),
+# so guarding its import would be dead code. google is a genuine extra.
+from livekit.plugins import cartesia, deepgram, elevenlabs, openai
 
 try:
     from livekit.plugins import google
-except ImportError:
+except ImportError:  # pragma: no cover - depends on an optional extra
     google = None  # type: ignore
 
 from ..constants import (

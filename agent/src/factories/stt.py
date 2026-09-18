@@ -1,25 +1,19 @@
 from livekit.agents import inference
-from livekit.plugins import deepgram, openai
+
+# cartesia, deepgram, elevenlabs and openai are mandatory dependencies (see
+# pyproject [project.dependencies]), so guarding their import would be dead
+# code. assemblyai and google are genuinely optional and are guarded.
+from livekit.plugins import cartesia, deepgram, openai
 
 try:
     from livekit.plugins import assemblyai
-except ImportError:
+except ImportError:  # pragma: no cover - depends on an optional extra
     assemblyai = None  # type: ignore
 
 try:
     from livekit.plugins import google
-except ImportError:
+except ImportError:  # pragma: no cover - depends on an optional extra
     google = None  # type: ignore
-
-try:
-    from livekit.plugins import elevenlabs
-except ImportError:
-    elevenlabs = None  # type: ignore
-
-try:
-    from livekit.plugins import cartesia
-except ImportError:
-    cartesia = None  # type: ignore
 
 from ..constants import (
     DeepgramModels,
