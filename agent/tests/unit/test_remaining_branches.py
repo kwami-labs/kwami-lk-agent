@@ -461,3 +461,39 @@ def test_publishing_no_research_sources_does_nothing(agent: KwamiAgent) -> None:
     agent._publish_research(Ctx(), "a topic", [])
 
     assert published == []
+
+
+# -- the mixins composed differently ----------------------------------------
+#
+# `MediaToolsMixin` and `TradingToolsMixin` both reach for `navigate_to`, which
+# `AgentToolsMixin` supplies. These guards were carrying `# pragma: no cover`
+# with the reason "the mixin is always combined" — true today, and the wrong
+# use of a pragma. The composition is our own code, not the environment, so the
+# branch is reachable from a test and the pragma was excluding a real path from
+# the report rather than acknowledging an unreachable one.
+
+
+async def test_playing_media_without_the_navigation_mixin() -> None:
+    """A refusal, not an AttributeError, if the mixins are ever composed apart."""
+    agent = KwamiAgent(config=KwamiConfig())
+    agent.navigate_to = None  # type: ignore[assignment]
+
+    result = await agent.play_media(None, "a song", kind="music")
+
+    assert "can't open the browser panel" in result
+
+
+async def test_opening_a_trade_ticket_without_the_navigation_mixin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def quote(context: Any, symbol: str) -> dict[str, Any]:
+        return {"price": 100.0}
+
+    agent = KwamiAgent(config=KwamiConfig())
+    monkeypatch.setattr(agent, "get_market_quote", quote)
+    await agent.prepare_trade(None, "TSLA", "buy", 10)
+    agent.navigate_to = None  # type: ignore[assignment]
+
+    result = await agent.open_trade_ticket(None, broker="trading212")
+
+    assert "can't open the browser panel" in result

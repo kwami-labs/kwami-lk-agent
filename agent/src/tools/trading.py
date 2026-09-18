@@ -263,7 +263,7 @@ class TradingToolsMixin:
             return "Which broker? Name one, or give me their web address."
 
         opener = getattr(self, "navigate_to", None)
-        if opener is None:  # pragma: no cover - the mixin is always combined
+        if opener is None:
             return "I can't open the browser panel in this session."
 
         # navigate_to validates the URL (scheme, private ranges, DNS rebinding).

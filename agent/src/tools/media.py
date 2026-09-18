@@ -209,7 +209,7 @@ class MediaToolsMixin:
         service_key, entry = resolved
 
         opener = getattr(self, "navigate_to", None)
-        if opener is None:  # pragma: no cover - the mixin is always combined
+        if opener is None:
             return "I can't open the browser panel in this session."
 
         url = search_url(service_key, wanted)
