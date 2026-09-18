@@ -172,7 +172,7 @@ class KwamiMemory:
                     metadata={
                         "kwami_id": self.kwami_id,
                         "assistant_name": self.kwami_name,
-                        "created_at": datetime.utcnow().isoformat(),
+                        "created_at": datetime.now(UTC).isoformat(),
                     },
                 )
                 self._record_usage("zep/create_user")
