@@ -85,10 +85,20 @@ be audited in one place: `if TYPE_CHECKING:` and `@overload`.
 A `# pragma: no cover` at a call site is allowed for two cases only, and only
 with the reason written on the same line:
 
-1. **An optional-extra import guard.** `livekit-plugins-google` and friends are
-   extras, so a locked environment always resolves the import the same way and
-   a test that forces the other branch is testing its own monkeypatch.
+1. **An import guard whose branch the environment decides**, not our code: an
+   optional extra that is absent, or a symbol that may move between versions of
+   a dependency we do ship. A locked environment resolves those one way, so a
+   test that forces the other branch is testing its own monkeypatch.
 2. **The process entry point** (`if __name__ == "__main__":`).
+
+Check before adding one. If the package is genuinely absent here, the `except`
+branch *runs* and is already covered — a pragma there excludes a covered line
+and only misleads. Three in `factories/` were doing exactly that and were
+removed.
+
+**Not allowed:** a branch our own composition happens not to take. A mixin that
+is always combined, or a guard around a mandatory dependency, is either
+reachable from a test or dead code to delete — both have happened here.
 
 Anything else that cannot be covered is a design problem, not an exclusion.
 

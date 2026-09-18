@@ -7,12 +7,12 @@ from livekit.plugins import cartesia, deepgram, openai
 
 try:
     from livekit.plugins import assemblyai
-except ImportError:  # pragma: no cover - depends on an optional extra
+except ImportError:
     assemblyai = None  # type: ignore
 
 try:
     from livekit.plugins import google
-except ImportError:  # pragma: no cover - depends on an optional extra
+except ImportError:
     google = None  # type: ignore
 
 from ..constants import (
