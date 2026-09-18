@@ -176,5 +176,5 @@ async def entrypoint(ctx: JobContext) -> None:
     logger.info(f"Kwami session started for room: {ctx.room.name}")
 
 
-if __name__ == "__main__":
+if __name__ == "__main__":  # pragma: no cover - process entry point
     cli.run_app(server)
