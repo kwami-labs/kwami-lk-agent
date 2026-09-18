@@ -199,6 +199,64 @@ class GoogleVoices:
     DEFAULT = STUDIO_O
 
 
+class RealtimeVoices:
+    """Voices exposed by the speech-to-speech (realtime) models.
+
+    Kept apart from ``OpenAIVoices`` because the two sets only overlap: the
+    realtime models add ``marin`` and ``cedar`` and drop ``fable``/``nova``,
+    and a realtime session handed a TTS-only voice name fails at connect --
+    which, on the realtime pipeline, means silence rather than a fallback.
+    """
+
+    OPENAI = {
+        "alloy",
+        "ash",
+        "ballad",
+        "cedar",
+        "coral",
+        "echo",
+        "marin",
+        "sage",
+        "shimmer",
+        "verse",
+    }
+    # Gemini Live voice names are capitalised and are matched case-insensitively
+    # by `resolve_realtime_voice`.
+    GOOGLE = {
+        "Aoede",
+        "Charon",
+        "Fenrir",
+        "Kore",
+        "Leda",
+        "Orus",
+        "Puck",
+        "Zephyr",
+    }
+
+    BY_PROVIDER = {"openai": OPENAI, "google": GOOGLE}
+
+    DEFAULTS = {"openai": "marin", "google": "Puck"}
+
+
+def resolve_realtime_voice(provider: str, voice: str) -> str | None:
+    """Canonical spelling of `voice` for `provider`, or None if unknown.
+
+    Voice names reach us from speech ("switch to Cedar") and from the settings
+    UI, so matching is case-insensitive and returns the provider's own
+    capitalisation -- Gemini Live rejects ``puck`` for ``Puck``.
+    """
+    candidates = RealtimeVoices.BY_PROVIDER.get((provider or "").lower())
+    if not candidates:
+        return None
+    wanted = (voice or "").strip().lower()
+    if not wanted:
+        return None
+    for candidate in candidates:
+        if candidate.lower() == wanted:
+            return candidate
+    return None
+
+
 # =============================================================================
 # Models
 # =============================================================================
