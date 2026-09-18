@@ -176,11 +176,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="theme",
-        requires=frozenset({"set_theme_control"}),
+        requires=frozenset({"set_theme_control", "export_theme", "import_theme"}),
         guidance=(
             "You restyle the app: theme and accent presets, dark/light/system mode, sidebar "
             "position, compact mode, hex accent colors, glass blur and opacity, saturation, "
-            "glow, borders, radius, high contrast, focus indicators, cursor flashlight."
+            "glow, borders, radius, high contrast, focus indicators, cursor flashlight. "
+            "export_theme hands back the whole theme as JSON -- long, so offer it rather than "
+            "reading it out -- and import_theme applies one. Read import_theme's applied "
+            "flag: malformed JSON is rejected and the screen stays exactly as it was, so "
+            "reporting off the request would claim a change the user cannot see."
         ),
     ),
     Capability(
@@ -201,6 +205,51 @@ CAPABILITIES: tuple[Capability, ...] = (
             "You tune how you listen: turn detection, interruptions, noise cancellation, VAD "
             "thresholds, echo cancellation, auto gain control, preemptive generation. Reach "
             "for these when you interrupt too much, cut them off, or the room is noisy."
+        ),
+    ),
+    Capability(
+        name="recall",
+        requires=frozenset({"list_memories", "forget_memory", "forget_everything"}),
+        guidance=(
+            "list_memories shows the user what you have stored so they can correct it; "
+            "recall_memories is the better tool for actually answering a question. "
+            "forget_memory removes one thing, found by a search word, and refuses rather "
+            "than choosing when several match -- ask which. forget_everything is the wipe "
+            "button: only for 'erase everything', never for 'forget that'. Both confirm in "
+            "the app, so wait for the result and read the forgotten flag rather than saying "
+            "it is gone over an open dialog."
+        ),
+    ),
+    Capability(
+        name="conversations",
+        requires=frozenset(
+            {
+                "list_conversations",
+                "open_conversation",
+                "return_to_live_conversation",
+                "delete_conversation",
+                "clear_transcript",
+            }
+        ),
+        guidance=(
+            "list_conversations numbers past conversations from 1; call it before opening or "
+            "deleting one so the numbers mean something. While open_conversation is showing "
+            "history the panel is not showing what is being said now -- say so, and call "
+            "return_to_live_conversation when they are done, or the next thing you say looks "
+            "like it went missing. delete_conversation and clear_transcript both confirm "
+            "first. clear_transcript only clears the view; it does not affect what you "
+            "remember, which is forget_memory."
+        ),
+    ),
+    Capability(
+        name="metrics",
+        requires=frozenset({"get_performance_metrics", "reset_performance_metrics"}),
+        guidance=(
+            "get_performance_metrics reads how fast the pipeline is running -- recognition, "
+            "end of turn, model, synthesis, and the last turn overall. Check hasData first: "
+            "before any turn completes the panel shows a dash, and reading that out as a "
+            "number would be nonsense. reset_performance_metrics zeroes the counters and "
+            "touches nothing about the conversation."
         ),
     ),
     Capability(
@@ -268,12 +317,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="wallet",
-        requires=frozenset({"get_wallet_summary"}),
+        requires=frozenset({"get_wallet_summary", "create_wallet"}),
         guidance=(
-            "get_wallet_summary reads the wallet and cannot move, send or spend anything. "
-            "Asked to transfer or add funds, say that has to be done by hand in the wallet "
-            "panel. It is also not how a trade is paid for -- prepare_trade and submit_trade "
-            "go through the user's own broker, not this wallet."
+            "get_wallet_summary reads the wallet and create_wallet makes an empty one; "
+            "neither moves, sends or spends anything, and canSpend is always false. Asked to "
+            "add funds or transfer, say that has to be done by hand in the wallet panel -- it "
+            "is deliberately not possible by voice. It is also not how a trade is paid for: "
+            "prepare_trade and submit_trade go through the user's own broker."
         ),
     ),
     Capability(
@@ -330,6 +380,39 @@ CAPABILITIES: tuple[Capability, ...] = (
             "and apply_soul_preset overwrites name, personality, prompt, traits, style, "
             "length and tone together, including anything the user tuned by hand. "
             "list_soul_presets shows what exists."
+        ),
+    ),
+    Capability(
+        name="kwami_admin",
+        requires=frozenset({"create_kwami", "rename_kwami", "delete_kwami"}),
+        guidance=(
+            "You manage the user's Kwamis themselves. create_kwami makes a new one and "
+            "switches to it, with a randomised look unless told otherwise -- it is "
+            "reversible, so it does not ask first. rename_kwami changes only the name. "
+            "delete_kwami is permanent, asks the user to confirm, refuses to remove the last "
+            "one, and returns a deleted flag you must read because the server can refuse. To "
+            "move between Kwamis that already exist use switch_kwami_profile, not create."
+        ),
+    ),
+    Capability(
+        name="account",
+        requires=frozenset({"get_credit_balance", "sign_out"}),
+        guidance=(
+            "get_credit_balance reads the user's remaining energy. It cannot buy more and "
+            "canPurchase is always false, so point them at the energy panel to top up. "
+            "sign_out ends the conversation, so only do it when clearly asked; it confirms "
+            "first, and you wait for the result rather than saying goodbye over an open "
+            "dialog."
+        ),
+    ),
+    Capability(
+        name="randomize",
+        requires=frozenset({"randomize_appearance"}),
+        guidance=(
+            "For 'surprise me', randomize_appearance rerolls the avatar, the scene, or both. "
+            "The scene picks at random from the backgrounds that ship with the app rather "
+            "than generating one -- say so if they sound like they expect something new. "
+            "reset_ui_domain puts any of it back."
         ),
     ),
     Capability(

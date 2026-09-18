@@ -40,10 +40,12 @@ def _extract_price(text: str) -> str | None:
     if not m:
         return None
     prefix = (m.group(1) or "").strip()
-    num = (m.group(2) or "").replace(",", ".")
+    # Group 2 is not optional and both of its alternatives require at least one
+    # digit, so a match always carries a number. There used to be a `if not num:
+    # return None` guard here; it could not run, and an unreachable guard is a
+    # claim about the pattern that nothing checks.
+    num = m.group(2).replace(",", ".")
     suffix = (m.group(3) or "").strip()
-    if not num:
-        return None
     currency = prefix or suffix or ""
     if currency.upper() in ("USD", "EUR", "GBP"):
         currency = {"USD": "$", "EUR": "€", "GBP": "£"}.get(currency.upper(), currency)

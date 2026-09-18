@@ -96,6 +96,28 @@ APP_TOOL_NAMES = frozenset(
         # The interface language, which is not the same thing as change_language.
         "get_app_language",
         "set_app_language",
+        # Managing the Kwamis themselves, the account, and "surprise me".
+        "create_kwami",
+        "rename_kwami",
+        "delete_kwami",
+        "get_credit_balance",
+        "sign_out",
+        "randomize_appearance",
+        # Showing and editing what is remembered, and the transcript history.
+        "list_memories",
+        "forget_memory",
+        "forget_everything",
+        "list_conversations",
+        "open_conversation",
+        "return_to_live_conversation",
+        "delete_conversation",
+        "clear_transcript",
+        # Theme round-tripping, the metrics panel, and an empty wallet.
+        "export_theme",
+        "import_theme",
+        "get_performance_metrics",
+        "reset_performance_metrics",
+        "create_wallet",
     }
 )
 
