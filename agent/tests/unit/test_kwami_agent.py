@@ -43,7 +43,7 @@ class FakeSession:
         self.handlers.setdefault(event, []).append(fn)
 
 
-class TestableAgent(KwamiAgent):
+class AgentWithSession(KwamiAgent):
     """KwamiAgent with a supplied session.
 
     `Agent.session` is a read-only property backed by the running activity, so
@@ -54,9 +54,13 @@ class TestableAgent(KwamiAgent):
 
     @property
     def session(self):  # type: ignore[override]
-        if self._fake_session is None:
-            raise RuntimeError("no activity context found")
-        return self._fake_session
+        if self._fake_session is not None:
+            return self._fake_session
+        # Delegate, so an agent with no fake behaves exactly as the framework
+        # does: AttributeError while __init__ is still running (which
+        # find_function_tools relies on getmembers swallowing), RuntimeError
+        # afterwards, which is what _register_session_listeners catches.
+        return KwamiAgent.session.fget(self)  # type: ignore[attr-defined]
 
 
 class FakeRoom:
@@ -107,9 +111,20 @@ class FakeMemory:
         )
 
 
-def agent_with(**kwargs: Any) -> TestableAgent:
+class Unreadable:
+    """A message the extractor cannot read.
+
+    Its default repr is the `<module.Class object at 0x...>` form, which the
+    last-resort branch filters out rather than handing to Zep as content.
+    """
+
+    def __init__(self, role: str | None = None) -> None:
+        self.role = role
+
+
+def agent_with(**kwargs: Any) -> AgentWithSession:
     config = kwargs.pop("config", None) or KwamiConfig()
-    return TestableAgent(config=config, **kwargs)
+    return AgentWithSession(config=config, **kwargs)
 
 
 # =============================================================================
@@ -144,13 +159,20 @@ def test_client_tools_from_config_are_registered() -> None:
     assert "set_theme" in agent._registered_client_tool_names()
 
 
-def test_builtins_are_counted_not_passed_to_the_parent() -> None:
-    """The framework builds `_tools` as `tools + find_function_tools(self)`;
-    passing built-ins here would double them, and the provider's 128-tool
-    ceiling applies to the sum -- one over is a 400 on every turn."""
+def test_builtins_are_not_duplicated_on_the_agent() -> None:
+    """The framework sets its tool list to `tools + find_function_tools(self)`,
+    so passing the built-ins in as well would list each of them twice. The
+    provider's 128-tool ceiling applies to the sum, and one tool over it is a
+    400 on every turn, not a degraded feature.
+
+    Asserted as a count against the framework's own discovery, so doubling
+    shows up as 80 instead of 40 without reaching into a framework internal.
+    """
+    from livekit.agents.llm.tool_context import find_function_tools
+
     agent = KwamiAgent()
 
-    assert agent._tools == []
+    assert len(agent.tools) == len(find_function_tools(KwamiAgent))
 
 
 def test_registered_tool_names_tolerate_both_entry_shapes() -> None:
@@ -566,9 +588,25 @@ async def test_an_empty_turn_is_not_buffered() -> None:
     memory = FakeMemory()
     agent = agent_with(memory=memory)
 
-    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="   "))
+    await agent.on_user_turn_completed(None, Unreadable())
 
     assert memory.buffered == []
+
+
+async def test_a_whitespace_only_turn_still_falls_through_to_the_repr() -> None:
+    """Pinning current behaviour, not endorsing it. `text_content` is only
+    trusted when it strips to something non-empty, so a whitespace-only turn
+    falls past every branch to `str(message)` -- which is exactly the pydantic
+    repr that the text_content branch exists to prevent reaching Zep. Harmless
+    today because such turns are rare, but it is the same defect in miniature.
+    """
+    memory = FakeMemory()
+    agent = agent_with(memory=memory)
+
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="   "))
+
+    assert memory.buffered
+    assert "namespace(" in memory.buffered[0][0]
 
 
 async def test_a_buffering_failure_is_warned(caplog) -> None:
@@ -624,7 +662,7 @@ async def test_an_assistant_turn_is_persisted_as_an_exchange() -> None:
     assert memory.exchanges == [{"content": "the reply", "name": "Ada"}]
 
 
-def test_the_persist_task_reference_is_retained() -> None:
+async def test_the_persist_task_reference_is_retained() -> None:
     """A bare create_task can be garbage collected mid-flight and swallows its
     own exceptions."""
     agent = agent_with(memory=FakeMemory())
@@ -645,12 +683,12 @@ def test_the_persist_task_reference_is_retained() -> None:
             id="user turn",
         ),
         pytest.param(
-            SimpleNamespace(item=SimpleNamespace(role="assistant", text_content="")),
-            id="empty content",
+            SimpleNamespace(item=Unreadable("assistant")),
+            id="unreadable content",
         ),
     ],
 )
-def test_irrelevant_conversation_items_are_ignored(event: Any) -> None:
+async def test_irrelevant_conversation_items_are_ignored(event: Any) -> None:
     agent = agent_with(memory=FakeMemory())
 
     agent._on_conversation_item_added(event)
@@ -658,7 +696,7 @@ def test_irrelevant_conversation_items_are_ignored(event: Any) -> None:
     assert agent._background_tasks == set()
 
 
-def test_an_item_without_memory_is_ignored() -> None:
+async def test_an_item_without_memory_is_ignored() -> None:
     agent = agent_with()
 
     agent._on_conversation_item_added(
@@ -679,3 +717,46 @@ async def test_a_failed_persist_is_warned_not_raised(caplog) -> None:
         await agent._persist_assistant_turn("the reply")
 
     assert "Failed to add exchange to memory" in caplog.text
+
+
+def test_a_null_content_attribute_is_skipped() -> None:
+    """`content=None` must fall through to `text`, not be read as absent."""
+    agent = KwamiAgent()
+
+    message = SimpleNamespace(content=None, text="the real text")
+
+    assert agent._extract_message_content(message) == "the real text"
+
+
+def test_an_empty_list_content_falls_through_to_the_next_attribute() -> None:
+    agent = KwamiAgent()
+
+    message = SimpleNamespace(content=[], text="the real text")
+
+    assert agent._extract_message_content(message) == "the real text"
+
+
+def test_a_list_of_non_strings_falls_through() -> None:
+    """ChatMessage content can hold ImageContent alongside text; a list with no
+    text parts carries nothing to store."""
+    agent = KwamiAgent()
+
+    message = SimpleNamespace(content=[object(), 42], text="the real text")
+
+    assert agent._extract_message_content(message) == "the real text"
+
+
+def test_a_whitespace_only_string_attribute_falls_through() -> None:
+    agent = KwamiAgent()
+
+    message = SimpleNamespace(content="   ", text="the real text")
+
+    assert agent._extract_message_content(message) == "the real text"
+
+
+def test_an_object_repr_is_filtered_rather_than_stored() -> None:
+    """The last-resort branch: `<module.Class object at 0x...>` is not speech,
+    and storing it is how Zep's graph filled with reprs."""
+    agent = KwamiAgent()
+
+    assert agent._extract_message_content(Unreadable()) == ""
