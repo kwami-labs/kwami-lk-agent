@@ -5,6 +5,7 @@ That is the point: this is the code most likely to hold a bug, and it should be
 testable without a mock, a network, or an event loop.
 """
 
+from .capabilities import available_capability_names, build_capability_guidance
 from .cloning import clone_config
 from .config import (
     KwamiConfig,
@@ -20,6 +21,7 @@ from .errors import (
     ResourceNotFoundError,
     VoiceProviderError,
 )
+from .models import ModelChoice, resolve_model
 from .parsing import boolean, integer, number, section, text, value_from_keys
 from .prompt import MAX_SYSTEM_MEMORY_CONTEXT_CHARS, build_system_prompt
 from .usage import UsageTracker
@@ -43,6 +45,11 @@ __all__ = [
     # prompt
     "build_system_prompt",
     "MAX_SYSTEM_MEMORY_CONTEXT_CHARS",
+    "build_capability_guidance",
+    "available_capability_names",
+    # model resolution
+    "ModelChoice",
+    "resolve_model",
     # usage
     "UsageTracker",
     # errors

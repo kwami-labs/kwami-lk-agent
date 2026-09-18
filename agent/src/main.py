@@ -23,6 +23,7 @@ from .factories.vad import prewarm_vad
 from .runtime import (
     AgentDeps,
     DataMessageRouter,
+    Reconfigurator,
     apply_runtime_config,
     decode_data_message,
     resolve_identity_on_join,
@@ -87,6 +88,15 @@ async def entrypoint(ctx: JobContext) -> None:
     state.room = ctx.room
     initial_agent.room = ctx.room
     initial_agent.usage_tracker = state.usage_tracker
+
+    # Lets the agent rebuild its own pipeline from inside a tool call, which is
+    # what makes "switch to Claude" or "use the Cedar voice" answerable by doing
+    # rather than by describing which panel to open.
+    deps.reconfigure = Reconfigurator(
+        state=state,
+        vad=vad,
+        create_agent_fn=create_agent_from_config,
+    )
 
     # Wire up metrics events for usage tracking
     @session.on("metrics_collected")

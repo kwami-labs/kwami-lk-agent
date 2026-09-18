@@ -9,14 +9,28 @@ from .constants import Timeouts
 from .domain import KwamiConfig, build_system_prompt
 from .memory import KwamiMemory
 from .runtime.container import room_from_context
-from .tools import AgentToolsMixin, ClientToolManager
+from .tools import (
+    AgentToolsMixin,
+    ClientToolManager,
+    KnowledgeToolsMixin,
+    MediaToolsMixin,
+    PipelineControlMixin,
+    TradingToolsMixin,
+)
 from .utils.logging import get_logger
 from .utils.room import should_disconnect_as_duplicate
 
 logger = get_logger("agent")
 
 
-class KwamiAgent(Agent, AgentToolsMixin):
+class KwamiAgent(
+    Agent,
+    AgentToolsMixin,
+    PipelineControlMixin,
+    KnowledgeToolsMixin,
+    MediaToolsMixin,
+    TradingToolsMixin,
+):
     """Dynamic AI agent configured by the Kwami frontend library.
 
     This agent supports:
@@ -24,6 +38,10 @@ class KwamiAgent(Agent, AgentToolsMixin):
     - Persistent memory via Zep Cloud
     - Client-side tools executed via data channel
     - Built-in tools for voice/language control
+    - Self-service model, voice and pipeline switching (PipelineControlMixin)
+    - Multi-angle research and market data (KnowledgeToolsMixin)
+    - Music and video playback in the browser panel (MediaToolsMixin)
+    - Confirmation-gated order placement (TradingToolsMixin)
     - Dynamic reconfiguration without disconnection
     """
 

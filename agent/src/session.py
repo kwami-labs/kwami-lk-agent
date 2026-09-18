@@ -20,6 +20,12 @@ logger = get_logger("session")
 # Shutdown callbacks share a ~10s worker budget; stay well inside it.
 USAGE_REPORT_TIMEOUT_SECONDS = 5.0
 
+# How long to wait for the framework to let go of a replaced agent before
+# closing its providers anyway. Generous: the cost of waiting is a few idle
+# sockets, the cost of not waiting is audio cut off mid-drain.
+AGENT_RELEASE_TIMEOUT_SECONDS = 10.0
+AGENT_RELEASE_POLL_SECONDS = 0.05
+
 
 @dataclass
 class SessionState:
@@ -95,9 +101,33 @@ class SessionState:
             session: The LiveKit agent session.
             new_agent: The new agent to switch to.
         """
+        self.prepare_handoff(new_agent)
+        session.update_agent(new_agent)
+        logger.debug("Agent updated, cleanup tasks pending: %d", len(self._cleanup_tasks))
+
+    def prepare_handoff(self, new_agent: KwamiAgent) -> KwamiAgent:
+        """Carry session-owned resources onto an incoming agent, without swapping it in.
+
+        Split out of `update_agent` because there are two ways an agent is
+        replaced and only one of them is ours. When a *function tool* returns an
+        Agent, the framework itself calls `AgentSession.update_agent` after the
+        tool output is collected -- that is the handoff path that keeps the
+        tool's result in the conversation instead of interrupting the turn that
+        produced it. A tool that called `update_agent` here as well would swap
+        twice; one that skipped this bookkeeping entirely would strand the paid
+        cloud browser, orphan in-flight client tool futures, and leave
+        `state.current_agent` pointing at an agent the session no longer runs.
+
+        Returns the same agent, so a tool can `return state.prepare_handoff(a), "..."`.
+        """
         old_agent = self.current_agent
+        if old_agent is new_agent:
+            return new_agent
         if old_agent:
-            # Close old agent's voice pipeline (STT/LLM/TTS) to avoid unclosed inference connections
+            # Close the old agent's STT/LLM/TTS so the provider connections are
+            # not leaked -- but only once the framework has let go of it. The
+            # task waits for the old activity to be released before touching
+            # anything; see `_cleanup_agent_voice_pipeline`.
             cleanup_task = asyncio.create_task(self._cleanup_agent_voice_pipeline(old_agent))
             self._cleanup_tasks.append(cleanup_task)
             if old_agent._memory:
@@ -119,8 +149,8 @@ class SessionState:
             # already came back.
             self._transfer_pending_tool_calls(old_agent, new_agent)
 
-        # Update the session with the new agent
-        session.update_agent(new_agent)
+            self._carry_conversation(old_agent, new_agent)
+
         self.current_agent = new_agent
         if self.browser_session is not None:
             new_agent._browser_session = self.browser_session
@@ -130,8 +160,42 @@ class SessionState:
         # Ensure the new agent has the room so server-side tools (e.g. web_search) can publish
         if self.room is not None:
             new_agent.room = self.room
+        return new_agent
 
-        logger.debug(f"Agent updated, cleanup tasks pending: {len(self._cleanup_tasks)}")
+    @staticmethod
+    def _carry_conversation(old_agent: Any, new_agent: Any) -> None:
+        """Move the conversation so far onto the incoming agent.
+
+        Generation reads `Agent._chat_ctx`, not the session's, and a freshly
+        constructed Agent starts with an empty one. Nothing in the framework
+        copies it across a swap -- `AgentSession._update_activity` only inserts
+        an `AgentHandoff` marker into its own context. So every reconfiguration
+        this class performs (a TTS provider switch, an LLM switch, a realtime
+        rebuild, a pipeline change) silently erased the conversation: the user
+        asks for a different voice mid-sentence and the agent comes back with no
+        idea who they are or what was just said.
+
+        `copy(tools=...)` is the framework's own no-activity path, and the
+        `tools` argument is load-bearing: it drops function calls whose tool the
+        incoming agent does not have, which is exactly the case when the client
+        re-registers a different tool set alongside the swap. Left in, those
+        orphaned calls are a malformed context that some providers reject
+        outright.
+        """
+        old_ctx = getattr(old_agent, "_chat_ctx", None)
+        if old_ctx is None or not getattr(old_ctx, "items", None):
+            return
+        if getattr(new_agent, "_activity", None) is not None:
+            # The framework owns the context of a running activity; writing to
+            # it behind its back would race the turn in flight.
+            logger.debug("Incoming agent already has an activity; leaving its context alone")
+            return
+        try:
+            new_agent._chat_ctx = old_ctx.copy(tools=getattr(new_agent, "_tools", None) or [])
+        except Exception as e:
+            logger.warning("Could not carry the conversation onto the new agent: %s", e)
+            return
+        logger.info("Carried %d conversation item(s) across the agent swap", len(old_ctx.items))
 
     @staticmethod
     def _transfer_pending_tool_calls(old_agent: Any, new_agent: Any) -> None:
@@ -150,12 +214,51 @@ class SessionState:
         pending.clear()
         logger.debug("Transferred %d pending client tool call(s) to the new agent", len(target))
 
-    async def _cleanup_agent_voice_pipeline(self, agent: Any) -> None:
+    @staticmethod
+    async def _await_agent_release(agent: Any) -> bool:
+        """Wait until the framework has finished with `agent`, or time out.
+
+        `AgentActivity.aclose` sets `agent._activity = None` as its last act, so
+        that is the only observable "the session is done with this agent". There
+        is no event to await, hence the poll; it is bounded and normally
+        resolves within a tick or two.
+
+        Returns True when the agent was released.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + AGENT_RELEASE_TIMEOUT_SECONDS
+        while getattr(agent, "_activity", None) is not None:
+            if loop.time() >= deadline:
+                logger.warning(
+                    "Old agent still active after %.0fs; closing its pipeline anyway",
+                    AGENT_RELEASE_TIMEOUT_SECONDS,
+                )
+                return False
+            await asyncio.sleep(AGENT_RELEASE_POLL_SECONDS)
+        return True
+
+    async def _cleanup_agent_voice_pipeline(
+        self, agent: Any, *, wait_for_release: bool = True
+    ) -> None:
         """Close STT/LLM/TTS connections to avoid unclosed inference connections.
 
+        Waits for the framework to release the agent first. Closing a provider
+        out from under a running activity is a race in both replacement paths:
+        the framework drains and closes the old activity inside its own task, so
+        `aclose()`-ing that agent's TTS the moment a replacement is prepared can
+        land mid-drain. It is worse on the tool-handoff path, where the session
+        does not swap until *after* the calling tool's output has been
+        collected, so the old agent is still the live one for a while.
+
         Args:
-            agent: The agent whose pipeline to close (e.g. previous agent after reconfigure).
+            agent: The agent whose pipeline to close.
+            wait_for_release: False at session teardown, where the activity is
+                being torn down by the same shutdown and the ~10s worker budget
+                will not stretch to waiting for it.
         """
+        if wait_for_release:
+            await self._await_agent_release(agent)
+
         seen: set = set()
         for name in ("stt", "llm", "tts", "_stt", "_llm", "_tts"):
             obj = getattr(agent, name, None)
@@ -221,7 +324,7 @@ class SessionState:
 
         # Close current agent's voice pipeline and memory
         if self.current_agent:
-            await self._cleanup_agent_voice_pipeline(self.current_agent)
+            await self._cleanup_agent_voice_pipeline(self.current_agent, wait_for_release=False)
             if self.current_agent._memory:
                 await self._cleanup_memory(self.current_agent._memory)
 

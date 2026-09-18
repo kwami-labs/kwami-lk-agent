@@ -9,6 +9,7 @@ module path instead: `from .runtime.pipeline import create_agent_from_config`.
 from .container import AgentDeps, deps_from_context, room_from_context
 from .dispatch import DataMessageRouter, decode_data_message, route_metrics
 from .lifecycle import apply_runtime_config, resolve_identity_on_join
+from .reconfigure import Reconfigurator, reconfigurator_from_context
 
 __all__ = [
     "AgentDeps",
@@ -16,6 +17,8 @@ __all__ = [
     "DataMessageRouter",
     "deps_from_context",
     "decode_data_message",
+    "Reconfigurator",
+    "reconfigurator_from_context",
     "room_from_context",
     "resolve_identity_on_join",
     "route_metrics",

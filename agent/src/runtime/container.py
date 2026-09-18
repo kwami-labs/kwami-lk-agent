@@ -40,6 +40,11 @@ class AgentDeps:
     usage_tracker: Any = None
     usage_reporter: UsageReporterPort | None = None
     http: Any = None
+    # The handle a tool uses to rebuild its own pipeline. Optional because a
+    # bare `AgentDeps()` (tests, telephony bootstrap before the session exists)
+    # is still a valid container; tools degrade to "not available here" rather
+    # than raising.
+    reconfigure: Any = None
 
 
 def deps_from_context(context: Any) -> AgentDeps | None:

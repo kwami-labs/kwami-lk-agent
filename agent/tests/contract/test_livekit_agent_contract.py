@@ -95,15 +95,51 @@ def test_extract_message_content_returns_the_utterance() -> None:
     )
 
 
+def _declared_tool_names() -> set[str]:
+    """Every `@function_tool` method declared on the agent's own mixins.
+
+    Derived rather than hard-coded. The count used to be written into the
+    assertion as `22`, which made adding a tool -- the whole point of the
+    mixins -- look like a contract violation, and told the next person to bump
+    a number rather than to check that discovery still worked. What this test
+    is actually defending is that nothing *drops out* of discovery, so the
+    expectation is computed from the source of truth.
+    """
+    from livekit.agents import function_tool as _function_tool  # noqa: F401
+
+    names: set[str] = set()
+    for klass in KwamiAgent.__mro__:
+        if klass.__module__.split(".")[0] != "src":
+            continue
+        for attr_name, attr in vars(klass).items():
+            if hasattr(attr, "__livekit_tool_info") or hasattr(attr, "info"):
+                names.add(attr_name)
+    return names
+
+
 def test_builtin_tools_are_discovered_by_the_framework() -> None:
-    """All 22 `@function_tool` methods on the mixin must reach the LLM."""
+    """Every `@function_tool` method on the agent's mixins must reach the LLM."""
     # Discover on the class: on an instance, inspect.getmembers evaluates
     # `realtime_llm_session`, which raises outside a running activity.
     discovered = {tool.info.name for tool in find_function_tools(KwamiAgent)}
 
-    assert len(discovered) == 22, f"expected 22 built-in tools, found {len(discovered)}"
-    # Spot-check the ones a `tools` config update was silently deleting.
-    for expected in ("web_search", "product_search", "navigate_to", "remember_fact"):
+    declared = _declared_tool_names()
+    assert declared, "no @function_tool methods found; the detection above is stale"
+    missing = declared - discovered
+    assert not missing, f"declared but not discoverable: {sorted(missing)}"
+
+    # Spot-check the ones a `tools` config update was silently deleting, plus
+    # the self-service switches that make a mid-conversation model change
+    # possible at all.
+    for expected in (
+        "web_search",
+        "product_search",
+        "navigate_to",
+        "remember_fact",
+        "change_ai_model",
+        "switch_pipeline_mode",
+        "change_realtime_voice",
+    ):
         assert expected in discovered, f"{expected} is no longer discoverable"
 
 

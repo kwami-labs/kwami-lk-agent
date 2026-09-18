@@ -175,7 +175,9 @@ def test_ui_control_guidance_appears_once_the_client_registers_them() -> None:
 
     assert "set_ui_control" in prompt
     assert "list_ui_controls" in prompt
-    assert "domain='theme'" in prompt
+    # A worked example is the point of the block: the model has to see how a
+    # spoken request maps onto domain/control/value, not just be told it can.
+    assert "theme/mode/dark" in prompt
 
 
 def test_one_registered_ui_tool_is_enough_to_emit_the_guidance() -> None:
@@ -183,9 +185,24 @@ def test_one_registered_ui_tool_is_enough_to_emit_the_guidance() -> None:
 
 
 def test_unrelated_client_tools_do_not_trigger_ui_guidance() -> None:
-    prompt = build_system_prompt(soul(), client_tool_names=["send_email", "book_flight"])
+    """A client with only its own custom tools gets no app guidance at all.
+
+    `send_email` used to stand in for "unrelated" here. It is not unrelated any
+    more -- it is one of the app's own email tools -- so this now uses names
+    that really are outside every capability block.
+    """
+    prompt = build_system_prompt(soul(), client_tool_names=["book_flight", "order_taxi"])
 
     assert "set_ui_control" not in prompt
+    assert "Controlling the app" not in prompt
+
+
+def test_registering_only_the_email_tools_describes_only_email() -> None:
+    """Guidance follows the registration, not an all-or-nothing switch."""
+    prompt = build_system_prompt(soul(), client_tool_names=["read_emails", "send_email"])
+
+    assert "read_emails" in prompt
+    assert "set_ui_control" not in prompt, "described a UI router the client never registered"
 
 
 # -- memory context ---------------------------------------------------------

@@ -11,6 +11,13 @@ from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..memory import create_memory
 from ..utils.logging import get_logger, log_error
 from ..utils.provider import detect_provider_change, strip_model_prefix
+from .realtime import (
+    REALTIME_PIPELINE,
+    has_realtime_keys,
+    requested_pipeline,
+    switch_pipeline,
+    update_realtime,
+)
 
 if TYPE_CHECKING:
     from livekit.agents import AgentSession
@@ -80,19 +87,16 @@ async def handle_full_config(
         # "voice" key, which used to raise and drop the entire config message.
         voice_data = section(message, "voice")
 
-        # Pipeline selection. Without this the realtime branch in
-        # runtime/pipeline.py was unreachable from the frontend: `pipelineType`
-        # and every `realtime*` key were simply never read, so the entire
-        # realtime path existed only in a test-only preset.
-        pipeline_type_in = text(voice_data, "pipelineType", "pipeline_type")
-        if pipeline_type_in in ("standard", "realtime"):
+        # Pipeline selection. Reading only `pipelineType` with the values
+        # `standard`/`realtime` meant reading a spelling no client sends: the
+        # SDK's wire field is `voice.type`, with `stt-llm-tts`/`realtime`. So
+        # choosing the realtime pipeline in the app left `pipeline_type` at its
+        # default and built an STT+LLM+TTS agent, while the realtime settings
+        # below were parsed into fields nothing would go on to read.
+        # `requested_pipeline` accepts every spelling either side uses.
+        pipeline_type_in = requested_pipeline(voice_data)
+        if pipeline_type_in is not None:
             new_config.voice.pipeline_type = pipeline_type_in
-        elif pipeline_type_in:
-            logger.warning(
-                "Ignoring unknown pipelineType %r; keeping %s",
-                pipeline_type_in,
-                new_config.voice.pipeline_type,
-            )
 
         realtime_data = section(voice_data, "realtime")
         realtime_provider_in = text(realtime_data, "provider") or text(
@@ -280,6 +284,18 @@ async def handle_config_update(
     try:
         if update_type == "voice":
             await update_voice(session, state, current_agent, config_payload, vad, create_agent_fn)
+        elif update_type == "pipeline":
+            target = requested_pipeline(config_payload) or requested_pipeline(message)
+            if target is None:
+                logger.warning("pipeline update carried no usable pipeline type")
+            elif target != current_agent.kwami_config.voice.pipeline_type:
+                await switch_pipeline(
+                    session, state, current_agent, config_payload, vad, create_agent_fn, target
+                )
+            else:
+                await update_voice(
+                    session, state, current_agent, config_payload, vad, create_agent_fn
+                )
         elif update_type == "llm":
             await update_llm(session, state, current_agent, config_payload, vad, create_agent_fn)
         elif update_type == "memory":
@@ -301,7 +317,13 @@ async def update_voice(
     vad: Any,
     create_agent_fn: Any,
 ) -> None:
-    """Update voice/TTS configuration, switching providers if needed.
+    """Update voice configuration, switching pipeline or provider if needed.
+
+    One `updateType: "voice"` message carries three different kinds of change,
+    because that is what the frontend SDK sends: a pipeline switch, a realtime
+    voice/model change, and a TTS/STT change. They are dispatched here in that
+    order of specificity. Before this, only the last of the three was read, so
+    `updateRealtimeLive()` was a no-op on the wire.
 
     Args:
         session: The LiveKit agent session.
@@ -311,6 +333,23 @@ async def update_voice(
         vad: Voice Activity Detection instance.
         create_agent_fn: Function to create a new agent from config.
     """
+    current_pipeline = agent.kwami_config.voice.pipeline_type
+    target_pipeline = requested_pipeline(config)
+
+    if target_pipeline is not None and target_pipeline != current_pipeline:
+        await switch_pipeline(session, state, agent, config, vad, create_agent_fn, target_pipeline)
+        return
+
+    # Realtime keys are meaningless to the standard pipeline; routing on the
+    # live pipeline type (not on key presence alone) keeps a stale realtime_*
+    # field in a mixed payload from hijacking a TTS update.
+    if current_pipeline == REALTIME_PIPELINE:
+        if has_realtime_keys(config):
+            await update_realtime(session, state, agent, config, vad, create_agent_fn)
+        else:
+            logger.debug("Ignoring TTS/STT voice update while on the realtime pipeline")
+        return
+
     current_provider = agent.kwami_config.voice.tts_provider
     new_model = config.get("tts_model")
     new_voice = config.get("tts_voice")
@@ -515,6 +554,25 @@ async def update_llm(
         vad: Voice Activity Detection instance.
         create_agent_fn: Function to create a new agent from config.
     """
+    # On the realtime pipeline there is no separate LLM: "the model" IS the
+    # realtime model. The models panel sends provider/model under updateType
+    # "llm" regardless of pipeline, so translate rather than rebuild a standard
+    # pipeline underneath a realtime session.
+    if agent.kwami_config.voice.pipeline_type == REALTIME_PIPELINE:
+        await update_realtime(
+            session,
+            state,
+            agent,
+            {
+                "realtime_provider": text(config, "provider"),
+                "realtime_model": text(config, "model"),
+                "temperature": number(config, "temperature"),
+            },
+            vad,
+            create_agent_fn,
+        )
+        return
+
     new_config = clone_config(agent.kwami_config)
     new_voice = replace(new_config.voice)
 
