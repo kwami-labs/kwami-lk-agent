@@ -180,3 +180,53 @@ async def test_the_apps_pipeline_mode_control_switches_live(create_agent_fn, cap
 
     assert captured["config"].voice.pipeline_type == "realtime"
     assert captured["skip_greeting"] is True, "a mid-session switch must not re-greet"
+
+
+# -- the memory block's own branches ----------------------------------------
+
+
+async def test_a_memory_block_without_an_enabled_flag_tunes_the_live_client(
+    env_setting, create_agent_fn, captured
+) -> None:
+    """The app sends retrieval knobs without restating `enabled`.
+
+    Two branches meet here and both are easy to get wrong. `enabled` absent must
+    leave the setting alone rather than reading as False, and a config that
+    names no kwami must not overwrite the user id of the memory it is about to
+    reuse -- doing so scatters one conversation across several Zep threads, so
+    recall finds nothing.
+    """
+    from src.agent import KwamiAgent
+
+    env_setting("ZEP_API_KEY", "zep-test-key")
+
+    class LiveMemory:
+        """Stands in for an initialised `KwamiMemory`.
+
+        Only the surface `_reuse_existing_memory` reads: reuse is what keeps
+        this test off the network, and it is also the production path -- a fresh
+        client per config message churned one unclosable client each time.
+        """
+
+        is_initialized = True
+
+        def __init__(self) -> None:
+            self.config = KwamiConfig().memory
+            self.config.user_id = ""
+
+        def set_usage_tracker(self, tracker: Any) -> None: ...
+
+    memory = LiveMemory()
+    state = SessionState(current_agent=KwamiAgent(config=KwamiConfig(), memory=memory))
+
+    await handle_full_config(
+        FakeSession(),
+        state,
+        {"voice": {"type": "stt-llm-tts"}, "memory": {"maxContextMessages": 20}},
+        vad=None,
+        create_agent_fn=create_agent_fn,
+    )
+
+    assert captured["config"].memory.enabled is True, "an absent `enabled` read as False"
+    assert captured["config"].memory.max_context_messages == 20
+    assert memory.config.max_context_messages == 20, "the knob never reached the live client"
