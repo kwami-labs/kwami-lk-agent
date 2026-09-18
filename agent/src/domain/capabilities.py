@@ -56,7 +56,7 @@ CAPABILITIES: tuple[Capability, ...] = (
         guidance=(
             "set_ui_control is the default path for interface requests: domain, control, "
             "value, over workspace, theme, avatar, scene, voice, enhancements, memory, "
-            "browser and search. 'Darker' is theme/mode/dark; 'sidebar right' is "
+            "browser, soul and search. 'Darker' is theme/mode/dark; 'sidebar right' is "
             "theme/sidebarPosition/right; 'open my memory' is workspace/openPanel/memory; "
             "'spikier blob' is avatar/blobSpikes nudged up on x, y and z; 'talk faster' is "
             "voice/ttsSpeed just above the current value."
@@ -236,6 +236,26 @@ CAPABILITIES: tuple[Capability, ...] = (
             "You manage the user's calendar. Times are ISO; resolve 'tomorrow' or 'next "
             "Tuesday' against get_current_time before calling. Create, update and delete all "
             "need confirm=true, so state what you are about to do and wait for agreement."
+        ),
+    ),
+    Capability(
+        name="soul",
+        requires=frozenset(
+            {"set_soul_control", "get_soul_profile", "list_soul_presets", "apply_soul_preset"}
+        ),
+        guidance=(
+            "You can change who you are: set_soul_control takes name, personality, "
+            "systemPrompt, conversationStyle, language, traits (a list), emotionalTraits, "
+            "emotionalTone and responseLength. Call get_soul_profile FIRST for any partial "
+            "change -- emotionalTraits is sent as a whole object, so 'be a bit warmer' "
+            "written blind overwrites the nine traits nobody asked about. The ten traits are "
+            "happiness, energy, confidence, calmness, optimism, socialness, patience, "
+            "empathy, curiosity and creativity, each from -100 to 100 where 0 is neutral and "
+            "negative is the opposite pole -- not a 0-to-1 scale. Two of these need "
+            "confirmation and say why: systemPrompt replaces your entire instruction set, "
+            "and apply_soul_preset overwrites name, personality, prompt, traits, style, "
+            "length and tone together, including anything the user tuned by hand. "
+            "list_soul_presets shows what exists."
         ),
     ),
     Capability(

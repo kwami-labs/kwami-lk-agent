@@ -69,6 +69,12 @@ APP_TOOL_NAMES = frozenset(
         "apply_scene_preset",
         "list_kwami_profiles",
         "switch_kwami_profile",
+        # SoulPanel writes six fields; until these landed only emotionalTone
+        # could be set by voice, in an app whose premise is speaking to it.
+        "set_soul_control",
+        "get_soul_profile",
+        "list_soul_presets",
+        "apply_soul_preset",
     }
 )
 
