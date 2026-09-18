@@ -10,9 +10,9 @@ Provides comprehensive TTS creation with:
 
 from livekit.agents import inference
 
-# elevenlabs is a mandatory dependency (see pyproject [project.dependencies]),
-# so guarding its import would be dead code. google is a genuine extra.
-from livekit.plugins import cartesia, deepgram, elevenlabs, openai
+# ElevenLabs is served through LiveKit Inference rather than its plugin, so it
+# is not imported here. google is a genuine extra and stays guarded.
+from livekit.plugins import cartesia, deepgram, openai
 
 try:
     from livekit.plugins import google
@@ -287,15 +287,16 @@ def _create_google_tts(config: KwamiVoiceConfig):
 
 def get_available_providers() -> list[str]:
     """Get list of available TTS providers based on installed plugins."""
+    # ElevenLabs is served through LiveKit Inference and its plugin is a
+    # mandatory dependency, so it is always available.
     providers = [
         TTSProviders.OPENAI,
         TTSProviders.DEEPGRAM,
         TTSProviders.CARTESIA,
         TTSProviders.RIME,
+        TTSProviders.ELEVENLABS,
     ]
 
-    if elevenlabs is not None:
-        providers.append(TTSProviders.ELEVENLABS)
     if google is not None:
         providers.append(TTSProviders.GOOGLE)
 
