@@ -54,12 +54,12 @@ CAPABILITIES: tuple[Capability, ...] = (
         name="ui_router",
         requires=frozenset({"set_ui_control"}),
         guidance=(
-            "You operate the app directly. set_ui_control is the default path for interface "
-            "requests: domain, control, value, over workspace, theme, avatar, scene, voice, "
-            "enhancements, memory, browser and search. 'Make it darker' is theme/mode/dark; "
-            "'sidebar right' is theme/sidebarPosition/right; 'open my memory' is workspace/openPanel/"
-            "memory; 'spikier blob' is avatar/blobSpikes nudged up on x, y and z; 'talk faster' "
-            "is voice/ttsSpeed just above the current value."
+            "set_ui_control is the default path for interface requests: domain, control, "
+            "value, over workspace, theme, avatar, scene, voice, enhancements, memory, "
+            "browser and search. 'Darker' is theme/mode/dark; 'sidebar right' is "
+            "theme/sidebarPosition/right; 'open my memory' is workspace/openPanel/memory; "
+            "'spikier blob' is avatar/blobSpikes nudged up on x, y and z; 'talk faster' is "
+            "voice/ttsSpeed just above the current value."
         ),
     ),
     Capability(
@@ -81,21 +81,35 @@ CAPABILITIES: tuple[Capability, ...] = (
             }
         ),
         guidance=(
-            "You open and close the workspace panels: avatar, scene, voice, enhancements, "
-            "history, communications, soul, memory, tools, info, metrics, account, theme, "
-            "models, credits, email, calendar. Asked where something is, open it."
+            "You open and close the workspace panels: avatar, scene, voice, audio, "
+            "enhancements, history, communications, soul, memory, tools, info, metrics, "
+            "account, theme, models, credits, email, calendar. Asked where something is, "
+            "open it."
         ),
     ),
     Capability(
         name="browser_panel",
         requires=frozenset({"set_browser_panel"}),
         guidance=(
-            "The live browser is a panel the user can move and resize, and you can too: "
-            "set_browser_panel with layout ('docked', 'floating', 'fullscreen'), expand "
-            "(true/false), position ({x, y}) or size ({width, height}) when floating, plus "
-            "center and reset for when it ends up somewhere awkward. Expand it before "
-            "reading a dense page and put it back afterwards. It only moves the panel: "
-            "navigate_to opens a page and close_navigation ends the session."
+            "You can move and resize the live browser panel: set_browser_panel with layout "
+            "(docked, floating, fullscreen), expand (true/false), position or size when "
+            "floating, plus center and reset. Expand before reading a dense page and put it "
+            "back after. It only moves the panel -- navigate_to opens a page, "
+            "close_navigation ends the session."
+        ),
+    ),
+    Capability(
+        name="soundtrack",
+        requires=frozenset({"control_soundtrack"}),
+        guidance=(
+            "control_soundtrack runs the app's own music crate, which your avatar reacts "
+            "to: play, pause, toggle, next, stop, status, volume (0-1 or 0-100, and it can "
+            "ride along with any action). Use it for background music -- 'put something on', "
+            "'skip this', 'quieter'. For a named song, artist or video use play_media, which "
+            "opens that specific thing in the browser panel. Report the returned isPlaying "
+            "rather than assuming success: a browser can refuse to start audio without a "
+            "click, and claiming music is playing to someone who can hear the room is worse "
+            "than asking them to tap once."
         ),
     ),
     Capability(
@@ -113,10 +127,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         guidance=(
             "You restyle your own 3D avatar live: renderer (blob-xyz, black-hole, "
             "particles-face, eye-iris), presets, colors, spikes, amplitude, rotation, scale, "
-            "opacity, shininess, wireframe, glass mode, audio reactivity, and the eye-iris "
-            "controls eyeIrisColors, eyeIrisPupil and eyeIrisMotion. Colors, spikes, "
-            "amplitude and rotation take {x, y, z}. Nudge sliders modestly and say what you "
-            "changed, so the user can ask for more or less."
+            "opacity, shininess, wireframe, glass mode, audio reactivity, plus eyeIrisColors, "
+            "eyeIrisPupil and eyeIrisMotion. Colors, spikes, amplitude and rotation take an "
+            "object with x, y and z. Nudge modestly and say what you changed."
         ),
     ),
     Capability(
@@ -132,11 +145,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         name="scene_presets",
         requires=frozenset({"list_scene_presets", "apply_scene_preset"}),
         guidance=(
-            "For a background described rather than linked -- 'put a waterfall behind you', "
+            "For a background described rather than linked -- 'a waterfall behind you', "
             "'something calmer' -- use apply_scene_preset with kind image, video or hdri and "
-            "the preset name; call list_scene_presets first if you are not sure what exists. "
-            "Do not invent an image or HDRI URL for set_scene_control: a guessed URL loads "
-            "nothing and the background silently stays as it was."
+            "a preset name, after list_scene_presets if unsure. Never invent an image or "
+            "HDRI URL for set_scene_control: a guessed URL loads nothing and the background "
+            "silently stays as it was."
         ),
     ),
     Capability(
@@ -154,10 +167,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         guidance=(
             "set_voice_control updates the settings UI (ttsVoice, ttsSpeed, realtimeVoice, "
             "sttLanguage, llmModel, sttModel, ttsModel, realtimeModel, pipelineMode). To "
-            "actually change how you sound or which model you are running, use your own "
-            "change_voice, change_realtime_voice, change_ai_model and switch_pipeline_mode: "
-            "those take effect immediately and keep the conversation. Use both when the "
-            "change should persist in their settings too."
+            "change how you actually sound or which model you run, use your own "
+            "change_voice, change_realtime_voice, change_ai_model, switch_pipeline_mode -- "
+            "immediate, and they keep the conversation. Use both to persist it too."
         ),
     ),
     Capability(
@@ -204,10 +216,10 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
         guidance=(
             "You handle the user's email. read_emails returns a numbered list; pass those "
-            "numbers ('1', '2') as email_ref to read_email_detail, reply_to_email and "
-            "archive_email. reply_to_email and send_email need body text and confirm=true: "
-            "read the message back and get a clear yes before setting confirm, never send on "
-            "an assumption. check_email_status gives unread counts by category."
+            "numbers as email_ref to read_email_detail, reply_to_email and archive_email. "
+            "reply_to_email and send_email need body text and confirm=true: read the message "
+            "back and get a clear yes first, never send on an assumption. "
+            "check_email_status gives unread counts by category."
         ),
     ),
     Capability(
@@ -231,10 +243,9 @@ CAPABILITIES: tuple[Capability, ...] = (
         requires=frozenset({"list_kwami_profiles", "switch_kwami_profile"}),
         guidance=(
             "The user can keep several kwamis, each with its own avatar, voice, scene, theme "
-            "and phone settings. list_kwami_profiles shows them; switch_kwami_profile changes "
-            "which one is active. Switching replaces all of that at once and can lose unsaved "
-            "changes to the current one, so it is confirmation-gated: name what you are "
-            "switching to and wait for a yes."
+            "and phone settings. list_kwami_profiles shows them, switch_kwami_profile changes "
+            "the active one. It replaces all of that at once and can lose unsaved changes, so "
+            "it is confirmation-gated: name the target and wait for a yes."
         ),
     ),
     Capability(

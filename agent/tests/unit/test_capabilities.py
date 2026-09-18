@@ -63,6 +63,8 @@ APP_TOOL_NAMES = frozenset(
         # The draggable/expandable live browser panel, the scene presets that
         # make a *described* background reachable, and multi-kwami switching.
         "set_browser_panel",
+        # The app's own music crate, which is not the same thing as play_media.
+        "control_soundtrack",
         "list_scene_presets",
         "apply_scene_preset",
         "list_kwami_profiles",
@@ -157,6 +159,36 @@ def test_manifest_matches_the_app() -> None:
     )
 
 
+def test_the_two_music_tools_are_told_apart() -> None:
+    """`control_soundtrack` and `play_media` are not substitutes.
+
+    One is the app's own crate, which the avatar reacts to; the other opens a
+    named song or video in the browser panel. Both are reasonable answers to
+    "put some music on", and only one is right for "play me Bohemian Rhapsody".
+    Without the contrast spelled out, the model picks by coin-flip -- so this
+    pins that the guidance actually draws the line, and names the other tool
+    while doing it.
+    """
+    text = guidance(["control_soundtrack"])
+
+    assert "play_media" in text, "the soundtrack block never mentions the alternative"
+    assert "background" in text.lower()
+    assert "specific" in text.lower()
+
+
+def test_the_soundtrack_block_warns_about_autoplay() -> None:
+    """`play()` resumes an AudioContext, which browsers gate on a user gesture.
+
+    The call succeeds and nothing is audible. A model that reports "playing"
+    over silence is contradicting someone who can hear the room, so the
+    guidance has to point at the returned flag rather than at success.
+    """
+    text = guidance(["control_soundtrack"])
+
+    assert "isPlaying" in text
+    assert "click" in text.lower() or "tap" in text.lower()
+
+
 # -- integration with the prompt --------------------------------------------
 
 
@@ -176,17 +208,29 @@ def test_prompt_omits_guidance_without_tools() -> None:
     assert "set_ui_control" not in prompt
 
 
-def test_prompt_growth_is_bounded() -> None:
+def test_guidance_stays_dense() -> None:
     """Guidance rides in every request; it must not become the prompt.
 
-    Not a style rule: this text is re-sent on every turn of every session, so
-    its size is a recurring cost on every token bill the product generates.
+    Budgeted per described tool rather than as a flat ceiling. A flat number
+    has to be raised every time the app gains a tool, which trains whoever hits
+    it to bump the constant -- so it stops catching the thing worth catching,
+    which is guidance turning verbose. Per-tool density does not move when a
+    capability is added and does move when one is padded.
+
+    The block this replaced was ~1800 characters for 4 domains: about 450 per
+    domain, and it named no individual tools at all.
     """
     soul = KwamiSoulConfig(name="Kwami", personality="helpful")
     full = build_system_prompt(soul, client_tool_names=sorted(APP_TOOL_NAMES))
     bare = build_system_prompt(soul, client_tool_names=())
 
     added = len(full) - len(bare)
-    # ~4.6k for 32 tools. The block this replaced was ~1.8k and described 4
-    # domains. Raise this only alongside a reason, not to make a build pass.
-    assert added < 5200, f"capability guidance added {added} characters to every request"
+    per_tool = added / len(APP_TOOL_NAMES)
+    assert per_tool < 200, (
+        f"capability guidance is {per_tool:.0f} characters per described tool "
+        f"({added} total for {len(APP_TOOL_NAMES)} tools); tighten the prose rather "
+        "than raising this"
+    )
+    # A second, absolute limit, because per-tool density alone would let the
+    # guidance grow without bound as tools are added.
+    assert added < 12_000, f"capability guidance added {added} characters to every request"
