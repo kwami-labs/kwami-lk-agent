@@ -52,6 +52,14 @@ Do not add `Co-authored-by` trailers for coding agents.
 User-facing changes belong under `## [Unreleased]` in [CHANGELOG.md](./CHANGELOG.md):
 Added / Changed / Deprecated / Removed / Fixed / Security.
 
+### Releases
+
+A release is a `v*` tag on `main`. The tag must match `version` in
+`agent/pyproject.toml`, and that version must have its own changelog section --
+`.github/workflows/release.yml` checks both, re-runs the full gate, and publishes
+the GitHub Release from the changelog. Steps are in
+[docs/deployment.md](./docs/deployment.md#versioning).
+
 ## What a good change looks like
 
 - New I/O has a `ports/` protocol and a test fake, not a `MagicMock` of LiveKit or Zep.

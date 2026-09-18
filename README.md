@@ -56,6 +56,10 @@ kwami-lk-agent/
 │   ├── livekit.toml            # LiveKit Cloud config
 │   ├── pyproject.toml
 │   └── Dockerfile
+├── infra/                      # Cloudflare Workers + Containers deploy target
+│   ├── src/                    # Worker: container lifecycle, health, keep-alive
+│   ├── container/              # Container image and health probe
+│   └── wrangler.jsonc
 ├── docs/                       # Architecture, protocol, security, …
 ├── .github/                    # CI, issue and PR templates
 ├── CHANGELOG.md
@@ -79,6 +83,8 @@ in place.
 | `make install`          | Install agent dependencies (including dev tools)        |
 | `make dev`              | Run agent locally for testing                           |
 | `make deploy`           | Deploy agent to LiveKit Cloud                           |
+| `make deploy-cf`        | Deploy on Cloudflare Workers + Containers               |
+| `make deploy-cf-staging`| Deploy the Cloudflare staging environment               |
 | `make test`             | Run the offline suite (unit + contract + integration)   |
 | `make test-cov`         | Offline suite with a coverage report                    |
 | `make test-e2e`         | End-to-end tests against real providers (needs keys)    |
@@ -153,14 +159,28 @@ Details: [docs/security.md](./docs/security.md).
 
 ## Deployment
 
+Two supported targets, same image and same entrypoint.
+
+**LiveKit Cloud** (default) — LiveKit owns scaling, placement and restarts:
+
 ```bash
 cd agent
 lk agent create .      # first time only
 lk agent deploy        # or: make deploy
 ```
 
-LiveKit Cloud handles scaling, lifecycle, and hosting. CI builds the image on
-every push so deploy breakage is caught before `lk agent deploy`.
+**Cloudflare Workers + Containers** — the agent runs in a Cloudflare Container
+behind a Worker that exposes `/health` and keeps the container registered:
+
+```bash
+make deploy-cf           # production
+make deploy-cf-staging   # staging
+```
+
+Cloudflare Containers requires the Workers Paid plan; without it the Worker's
+`/health` route answers `degraded` and says so. CI builds the agent image and
+type-checks the Worker on every push, so deploy breakage is caught before either
+command runs.
 
 Details: [docs/deployment.md](./docs/deployment.md).
 
