@@ -500,7 +500,7 @@ class CloudBrowserSession:
 
         try:
             running = asyncio.current_task()
-        except RuntimeError:  # pragma: no cover - no running loop
+        except RuntimeError:
             running = None
         if running is timer:
             # Let the timer finish its own close(); just drop the reference.

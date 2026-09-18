@@ -135,7 +135,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config and usage types live in `domain/`; pipeline construction lives in `runtime/pipeline.py`.
 - Data-channel routing extracted from the entrypoint into `DataMessageRouter`.
 - Search results publish through `LiveKitRoomPublisher` with a single 14 KB trim policy.
-- Coverage floor ratcheted; branch coverage is on and the exclusion policy is written down in `pyproject.toml` and [docs/testing.md](./docs/testing.md).
+- **100% statement and branch coverage**, enforced: `fail_under = 100` is blocking, so a
+  line that is not exercised does not merge. The only exclusions are `if TYPE_CHECKING:`
+  and `@overload`, plus two narrowly-scoped pragmas (an import guard the installed
+  environment decides, and the process entry point); the rules are in `pyproject.toml`
+  and [docs/testing.md](./docs/testing.md).
 
 ### Fixed
 
