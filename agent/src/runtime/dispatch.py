@@ -94,6 +94,7 @@ class DataMessageRouter:
             "config_update": self._on_config_update,
             "tool_result": self._on_tool_result,
             "browser_close_request": self._on_browser_close,
+            "browser_open_request": self._on_browser_open,
             "search_similar": self._on_search_similar,
         }.get(msg_type)
 
@@ -139,6 +140,58 @@ class DataMessageRouter:
         if browser_session is not None:
             self.state.spawn(browser_session.close(), name="browser_close_request")
             logger.info("Closing cloud browser per user request")
+
+    def _on_browser_open(self, message: dict[str, Any]) -> None:
+        """Open a URL the frontend asked for, through the agent's own gate.
+
+        The app publishes this when the user picks a search result. It had no
+        route at all: the message was decoded, matched nothing, and was dropped
+        at the `debug` line above -- so clicking a result did nothing, silently.
+
+        Deliberately goes through `navigate_to` rather than reaching for the
+        browser session directly. That is the only path with the two checks
+        this needs, and duplicating them here would mean two gates to keep in
+        step:
+
+        * `validate_url_async` rejects loopback, RFC1918, link-local metadata
+          and anything that resolves to them. Necessary even though the app
+          sent it: the same envelope carries a URL the model was reading on a
+          page a moment earlier, and "the frontend published it" is not the
+          same as "a human asked for it".
+        * The blank-`kwami_id` refusal. A browser profile holds the user's
+          cookies and logins, so one started outside that check could hand one
+          user's authenticated sessions to the next. This message can arrive
+          before any browser exists, which is exactly when that matters.
+        """
+        agent = self.state.current_agent
+        if agent is None:
+            logger.warning("Ignoring browser_open_request: no agent yet")
+            return
+
+        url = message.get("url")
+        if not isinstance(url, str) or not url.strip():
+            logger.warning("Ignoring browser_open_request with no usable url")
+            return
+
+        logger.info("Opening %s in the browser panel per user request", url[:80])
+        run_context = type("Ctx", (), {"room": self.room})()
+        self.state.spawn(
+            self._open_and_report(agent, run_context, url.strip()),
+            name="browser_open_request",
+        )
+
+    @staticmethod
+    async def _open_and_report(agent: Any, run_context: Any, url: str) -> None:
+        """Navigate, and make a refusal visible rather than silent.
+
+        `navigate_to` answers a rejected URL with a sentence for the model. On
+        this path there is no model turn to return it to, so a refusal would
+        otherwise look identical to success from outside -- which is the failure
+        this whole handler exists to stop happening again.
+        """
+        result = await agent.navigate_to(run_context, url)
+        if isinstance(result, str) and result.startswith(("I can't", "Cannot", "Failed")):
+            logger.warning("browser_open_request refused for %s: %s", url[:80], result)
 
     def _on_search_similar(self, message: dict[str, Any]) -> None:
         agent = self.state.current_agent
