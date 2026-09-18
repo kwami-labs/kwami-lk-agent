@@ -26,6 +26,12 @@ from dataclasses import dataclass, field, fields
 DEFAULT_KWAMI_API_URL = "http://localhost:8080"
 DEFAULT_KWAMI_API_TIMEOUT = 30.0
 
+#: Which cloud-browser vendor backs the navigation panel. Browserbase is the
+#: default because its Contexts persist the user's logins across sessions,
+#: which is what makes "carry on where I left off" work; "browser_use" keeps
+#: the original Browser Use Cloud path available unchanged.
+DEFAULT_BROWSER_PROVIDER = "browserbase"
+
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
 
 
@@ -72,7 +78,10 @@ class Settings:
     serpapi_key: str = ""
 
     # Cloud browsing
+    browser_provider: str = DEFAULT_BROWSER_PROVIDER
     browser_use_api_key: str = ""
+    browserbase_api_key: str = ""
+    browserbase_project_id: str = ""
     allow_browser_js: bool = False
 
     # LLM providers reached through an OpenAI-compatible endpoint, which need
@@ -96,7 +105,12 @@ class Settings:
             zep_api_key=_env_str("ZEP_API_KEY"),
             tavily_api_key=_env_str("TAVILY_API_KEY"),
             serpapi_key=_env_str("SERPAPI_KEY"),
+            browser_provider=_env_str("KWAMI_BROWSER_PROVIDER", DEFAULT_BROWSER_PROVIDER)
+            .strip()
+            .lower(),
             browser_use_api_key=_env_str("BROWSER_USE_API_KEY"),
+            browserbase_api_key=_env_str("BROWSERBASE_API_KEY"),
+            browserbase_project_id=_env_str("BROWSERBASE_PROJECT_ID"),
             allow_browser_js=_env_bool("KWAMI_ALLOW_BROWSER_JS"),
             mistral_api_key=_env_str("MISTRAL_API_KEY"),
             provider_keys={
