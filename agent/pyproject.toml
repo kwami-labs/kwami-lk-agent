@@ -1,6 +1,6 @@
 [project]
 name = "kwami-lk-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "LiveKit Cloud agent for Kwami AI"
 requires-python = ">=3.11"
 dependencies = [

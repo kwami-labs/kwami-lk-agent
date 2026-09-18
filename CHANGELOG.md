@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-18
+
 ### Added
 
 - Project documentation under `docs/` (architecture, protocol, memory, security, billing, configuration, development, testing, deployment) with mermaid diagrams.
@@ -16,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI: Ruff + mypy, pytest with coverage on Python 3.11 and 3.13, Docker image build, nightly live e2e.
 - Cloud-browser minute metering on every release path (idle, failed connect, user close, session cleanup).
 - Live conversation, memory, and reconfiguration e2e suites.
+- Second deployment target: Cloudflare Workers + Containers (`infra/`), with a
+  staging environment, cron keep-alive, and `make deploy-cf` / `make deploy-cf-staging`.
+- `GET /health` (and its `/status` alias) on the Worker reports `degraded` rather
+  than `error` when the Worker is up but the container is unreachable, and names
+  the Workers Paid plan requirement when that is the cause.
+- CI type-checks the Worker: `wrangler types` + `tsc --noEmit` on every push and PR.
 
 ### Changed
 
@@ -40,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Usage tracker treats request-count-only entries and token-only realtime turns as billable.
 - OpenAI TTS fallback is recorded so later voice updates validate against the live provider.
 - Builtin `TimeoutError` is caught on memory injection (not only `asyncio.TimeoutError` aliases).
+- `ELEVENLABS_API_KEY` now resolves. It was advertised as an alias by
+  `EnvVars.ELEVENLABS` but never collected into `Settings.provider_keys`, so
+  setting only that spelling warned and silently fell back to OpenAI TTS.
+- Google TTS accepts `GOOGLE_API_KEY` as well as `GOOGLE_APPLICATION_CREDENTIALS`.
+  `.env.sample` documented the former while the check only looked for the
+  latter, so following the sample warned on every Google TTS request.
+- Cloudflare install settings are honoured again. pnpm 11 reads only auth and
+  registry keys from `.npmrc`, so `only-built-dependencies` and
+  `minimum-release-age-exclude` were silently inert: `esbuild` and `workerd`
+  postinstall scripts never ran (leaving `wrangler deploy` without a runtime),
+  and the pinned Cloudflare toolchain was subject to pnpm 11's new 24h
+  `minimumReleaseAge` default. Both now live in `infra/pnpm-workspace.yaml`.
 
 ### Security
 
@@ -59,5 +79,6 @@ Initial LiveKit Cloud agent for Kwami AI.
 - Telephony bootstrap from `GET /internal/kwamis/{id}/runtime`.
 - Docker image and LiveKit Cloud deploy via `lk agent deploy`.
 
-[Unreleased]: https://github.com/kwami-labs/kwami-lk-agent/commits/dev
+[Unreleased]: https://github.com/kwami-labs/kwami-lk-agent/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/kwami-labs/kwami-lk-agent/releases/tag/v1.0.0
 [0.1.0]: https://github.com/kwami-labs/kwami-lk-agent/blob/dev/agent/pyproject.toml
