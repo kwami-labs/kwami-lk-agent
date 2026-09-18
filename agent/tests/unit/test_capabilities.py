@@ -75,12 +75,36 @@ APP_TOOL_NAMES = frozenset(
         "get_soul_profile",
         "list_soul_presets",
         "apply_soul_preset",
+        # The search panel, registered in its own composable.
+        "set_search_panel",
+        "focus_search_result",
+        "open_search_result",
+        # Communications, contacts and the wallet: complete UI panels that had
+        # no agent tools at all, so by voice the user could open the SMS panel
+        # and then not send an SMS.
+        "list_phone_channels",
+        "search_phone_numbers",
+        "send_sms",
+        "send_whatsapp_message",
+        "place_call",
+        "list_contacts",
+        "find_contact",
+        "create_contact",
+        "update_contact",
+        "delete_contact",
+        "get_wallet_summary",
     }
 )
 
-APP_TOOLS_SOURCE = (
-    Path(__file__).resolve().parents[4] / "kwami-app/src/composables/useWorkspaceAgentTools.ts"
-)
+#: Where the app registers client tools. Deliberately a *directory* scan rather
+#: than one file: the registrations started in `useWorkspaceAgentTools.ts` and
+#: then a second composable appeared, `useSearchPanelAgentTools.ts`, which this
+#: test pointed at nothing and so missed three live tools entirely. A drift test
+#: that only looks where tools used to live stops being a drift test.
+APP_COMPOSABLES_DIR = Path(__file__).resolve().parents[4] / "kwami-app/src/composables"
+
+#: Kept as a name because several tests reference the primary file directly.
+APP_TOOLS_SOURCE = APP_COMPOSABLES_DIR / "useWorkspaceAgentTools.ts"
 
 
 # -- gating -----------------------------------------------------------------
@@ -138,8 +162,17 @@ def test_capabilities_do_not_invent_tools() -> None:
     assert not invented, f"guidance gated on tools the app never registers: {sorted(invented)}"
 
 
+def _app_registered_tools() -> set[str]:
+    """Every `registerTool` name across all of the app's composables."""
+    names: set[str] = set()
+    for path in sorted(APP_COMPOSABLES_DIR.glob("*.ts")):
+        source = path.read_text(encoding="utf-8")
+        names.update(re.findall(r"registerTool\(\{\s*name:\s*'([a-z_]+)'", source))
+    return names
+
+
 @pytest.mark.skipif(
-    not APP_TOOLS_SOURCE.exists(),
+    not APP_COMPOSABLES_DIR.exists(),
     reason="kwami-app is not checked out beside this repo",
 )
 def test_manifest_matches_the_app() -> None:
@@ -149,8 +182,7 @@ def test_manifest_matches_the_app() -> None:
     developer has both, a tool added to the app without guidance fails here
     rather than shipping as a feature that only works by clicking.
     """
-    source = APP_TOOLS_SOURCE.read_text(encoding="utf-8")
-    registered = set(re.findall(r"registerTool\(\{\s*name:\s*'([a-z_]+)'", source))
+    registered = _app_registered_tools()
     assert registered, "could not parse any registerTool calls; this test has gone stale"
 
     # Only one direction is a defect. A tool the app registers and the agent
