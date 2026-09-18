@@ -165,3 +165,12 @@ async def test_the_memory_store_keeps_users_and_vendors_apart() -> None:
     assert await store.get("user-2", "browserbase") == "ctx-2"
     assert await store.get("user-1", "browser_use") == "profile-1"
     assert await store.get("user-3", "browserbase") is None
+
+
+async def test_a_rejected_save_is_logged_rather_than_raised() -> None:
+    """The browser is already open; losing the handle costs the next session."""
+    http = FakeHttp(post_result=FakeResponse(500, "server error"))
+
+    await _store(http).put("user-1", VENDOR, "ctx-7")  # must not raise
+
+    assert len(http.posts) == 1
