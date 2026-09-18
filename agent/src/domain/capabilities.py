@@ -88,14 +88,25 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
-        name="browser_panel",
-        requires=frozenset({"set_browser_panel"}),
+        name="panel_layout",
+        requires=frozenset({"set_browser_panel", "set_search_panel"}),
         guidance=(
-            "You can move and resize the live browser panel: set_browser_panel with layout "
-            "(docked, floating, fullscreen), expand (true/false), position or size when "
-            "floating, plus center and reset. Expand before reading a dense page and put it "
-            "back after. It only moves the panel -- navigate_to opens a page, "
-            "close_navigation ends the session."
+            "The browser panel and the search panel move the same way: set_browser_panel and "
+            "set_search_panel both take layout (docked, floating, fullscreen), expand, "
+            "position and size when floating, plus center and reset. For search, docked means "
+            "the cards orbiting you. Expand before reading something dense and put it back "
+            "after. These only move a panel -- navigate_to opens a page and close_navigation "
+            "ends the browsing session."
+        ),
+    ),
+    Capability(
+        name="search_results",
+        requires=frozenset({"focus_search_result", "open_search_result"}),
+        guidance=(
+            "Search results are numbered from 1 in the order they appear. focus_search_result "
+            "only points at one so the user can see which you mean -- it opens nothing -- so "
+            "follow it with open_search_result when they want to read the page. Use focus for "
+            "'which one?', open for 'that one'."
         ),
     ),
     Capability(
@@ -200,6 +211,52 @@ CAPABILITIES: tuple[Capability, ...] = (
         guidance=(
             "set_response_length is a lasting preference and needs confirmation; use it only "
             "for a persistent change, not to shorten one answer."
+        ),
+    ),
+    Capability(
+        name="communications",
+        requires=frozenset(
+            {
+                "send_sms",
+                "send_whatsapp_message",
+                "place_call",
+                "list_phone_channels",
+                "search_phone_numbers",
+            }
+        ),
+        guidance=(
+            "You can text, message and call for the user. Check list_phone_channels first if "
+            "you do not already know a channel exists -- sending without one just fails. When "
+            "the user names a person rather than a number, resolve it with find_contact and "
+            "say the name and the last digits together before you send, because a wrong "
+            "contact match is the failure that actually happens. A call is heavier than a "
+            "text: it rings someone immediately and cannot be recalled. All three ask the "
+            "user to confirm in the app, so wait for the result and never say it is sent "
+            "while the dialog is open. search_phone_numbers only searches; buying a number "
+            "spends real money and the user does that themselves in the phone panel."
+        ),
+    ),
+    Capability(
+        name="contacts",
+        requires=frozenset(
+            {"list_contacts", "find_contact", "create_contact", "update_contact", "delete_contact"}
+        ),
+        guidance=(
+            "list_contacts and find_contact are read-only, so use them freely -- especially "
+            "before sending or calling. update_contact changes only the fields you pass and "
+            "leaves the rest alone. delete_contact cannot be undone and asks the user first. "
+            "An ambiguous name is refused with the candidates listed rather than guessed at; "
+            "when that happens, ask which one rather than picking."
+        ),
+    ),
+    Capability(
+        name="wallet",
+        requires=frozenset({"get_wallet_summary"}),
+        guidance=(
+            "get_wallet_summary reads the wallet and cannot move, send or spend anything. "
+            "Asked to transfer or add funds, say that has to be done by hand in the wallet "
+            "panel. It is also not how a trade is paid for -- prepare_trade and submit_trade "
+            "go through the user's own broker, not this wallet."
         ),
     ),
     Capability(
