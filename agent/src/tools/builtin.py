@@ -230,6 +230,16 @@ class AgentToolsMixin:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
+    def _is_realtime_pipeline(self) -> bool:
+        """Whether this session speaks through a realtime model rather than TTS.
+
+        Read off the config rather than by probing `session.tts`, because the
+        two disagree during a reconfiguration: the agent is rebuilt before the
+        framework swaps the activity, so `session` can still be the old one.
+        """
+        voice_config = getattr(self.kwami_config, "voice", None)
+        return getattr(voice_config, "pipeline_type", "standard") == "realtime"
+
     @function_tool()
     async def get_kwami_info(self, context: RunContext) -> dict[str, Any]:
         """Get information about this Kwami instance."""
@@ -264,6 +274,19 @@ class AgentToolsMixin:
                        For ElevenLabs: Use voice names like 'Rachel', 'Josh', 'Bella', etc.
                        For OpenAI: Use 'alloy', 'echo', 'nova', 'shimmer', 'onyx', 'fable'.
         """
+        # On the realtime pipeline there is no TTS to retune: the voice belongs
+        # to the speech-to-speech model and changing it means reconfiguring
+        # that model. This used to dead-end on "TTS not available", which told
+        # the model nothing it could act on, so a user asking a realtime
+        # session to change its voice was simply refused. Name the tool that
+        # does work, so the model can recover inside the same turn.
+        if self._is_realtime_pipeline():
+            return (
+                "I'm running the realtime speech-to-speech pipeline, so my voice "
+                "comes from the realtime model rather than a TTS engine. "
+                "Use change_realtime_voice to switch it."
+            )
+
         try:
             if not hasattr(self, "session") or self.session is None:
                 return "Unable to change voice - session not available"
@@ -295,6 +318,16 @@ class AgentToolsMixin:
             speed: Speed multiplier between 0.5 (slow) and 2.0 (fast).
                    1.0 is normal speed.
         """
+        # Same dead end as change_voice: the realtime pipeline has no TTS, and
+        # "TTS not available" reads to the model as a transient fault rather
+        # than a wrong-tool answer.
+        if self._is_realtime_pipeline():
+            return (
+                "Speaking speed isn't adjustable on the realtime "
+                "speech-to-speech pipeline. Switching to the standard pipeline "
+                "with switch_pipeline_mode would make it adjustable."
+            )
+
         try:
             if not hasattr(self, "session") or self.session is None:
                 return "Unable to change speed - session not available"
