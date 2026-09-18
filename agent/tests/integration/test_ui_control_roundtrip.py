@@ -269,7 +269,7 @@ def test_the_registered_tools_are_the_ones_the_prompt_describes(agent: KwamiAgen
     registered = {tool.info.name for tool in agent.client_tools.create_client_tools()}
     enabled = available_capability_names(registered)
 
-    for expected in ("avatar", "scene_presets", "profiles", "browser_panel", "ui_router"):
+    for expected in ("avatar", "scene_presets", "profiles", "panel_layout", "ui_router"):
         assert expected in enabled, f"{expected} guidance is off despite its tool being live"
 
     prompt = agent._build_system_prompt()

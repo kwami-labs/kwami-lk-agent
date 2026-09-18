@@ -93,6 +93,9 @@ APP_TOOL_NAMES = frozenset(
         "update_contact",
         "delete_contact",
         "get_wallet_summary",
+        # The interface language, which is not the same thing as change_language.
+        "get_app_language",
+        "set_app_language",
     }
 )
 

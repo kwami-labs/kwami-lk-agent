@@ -164,6 +164,17 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
     ),
     Capability(
+        name="app_language",
+        requires=frozenset({"set_app_language", "get_app_language"}),
+        guidance=(
+            "set_app_language changes the language of the interface -- the labels on screen. "
+            "Your own change_language retunes speech recognition and synthesis and leaves "
+            "every label untouched. They are different things and the user almost never "
+            "means only one: if they ask for the app in another language, or start speaking "
+            "one and ask you to switch over, call both."
+        ),
+    ),
+    Capability(
         name="theme",
         requires=frozenset({"set_theme_control"}),
         guidance=(
@@ -225,15 +236,20 @@ CAPABILITIES: tuple[Capability, ...] = (
             }
         ),
         guidance=(
-            "You can text, message and call for the user. Check list_phone_channels first if "
-            "you do not already know a channel exists -- sending without one just fails. When "
-            "the user names a person rather than a number, resolve it with find_contact and "
-            "say the name and the last digits together before you send, because a wrong "
-            "contact match is the failure that actually happens. A call is heavier than a "
-            "text: it rings someone immediately and cannot be recalled. All three ask the "
-            "user to confirm in the app, so wait for the result and never say it is sent "
-            "while the dialog is open. search_phone_numbers only searches; buying a number "
-            "spends real money and the user does that themselves in the phone panel."
+            "You can text, message and call for the user. Read list_phone_channels first "
+            "when you do not know a channel exists -- sending without one just fails. A name "
+            "is resolved against the contacts, never guessed: if more than one matches, the "
+            "tool refuses and lists them, so ask which is meant rather than choosing. Say "
+            "the name and the last digits together before you send, because a wrong contact "
+            "match is the failure that actually happens. A call is heavier than a text -- it "
+            "rings someone immediately and cannot be recalled. All three ask the user to "
+            "confirm in the app, so wait for the result and never say it is sent while the "
+            "dialog is open; then report the tool's own field, not your intent. For messages "
+            "that is accepted, meaning the provider took it for delivery, which is not the "
+            "same as the recipient having read it; for a call it is dialling, because "
+            "whether anyone picks up is not knowable here. search_phone_numbers only "
+            "searches -- buying a number spends real money and the user does that themselves "
+            "in the phone panel."
         ),
     ),
     Capability(
@@ -243,10 +259,11 @@ CAPABILITIES: tuple[Capability, ...] = (
         ),
         guidance=(
             "list_contacts and find_contact are read-only, so use them freely -- especially "
-            "before sending or calling. update_contact changes only the fields you pass and "
-            "leaves the rest alone. delete_contact cannot be undone and asks the user first. "
-            "An ambiguous name is refused with the candidates listed rather than guessed at; "
-            "when that happens, ask which one rather than picking."
+            "before sending or calling, so the number can be read back. find_contact returns "
+            "every match plus a unique flag; check it rather than taking the first. "
+            "create_contact and update_contact are ungated, and update changes only the "
+            "fields you pass. delete_contact cannot be undone and asks the user first. An "
+            "ambiguous name is always refused with the candidates listed, never guessed at."
         ),
     ),
     Capability(
