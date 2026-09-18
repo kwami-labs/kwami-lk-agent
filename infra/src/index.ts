@@ -92,7 +92,7 @@ export default {
     const url = new URL(request.url);
     const container = workerContainer(env);
 
-    if (url.pathname === "/health") {
+    if (url.pathname === "/health" || url.pathname === "/status") {
       try {
         const state = await container.ensureRunning();
         const probe = await container.fetch(
@@ -108,11 +108,20 @@ export default {
           },
         });
       } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const needsPaidPlan = /paid plan|unauthorized|do not have access to Cloudflare Containers/i.test(
+          message,
+        );
         return json(
           {
-            status: "error",
+            status: "degraded",
             service: "kwami-lk-agent",
-            error: error instanceof Error ? error.message : String(error),
+            worker: "ok",
+            container: "unavailable",
+            error: message,
+            hint: needsPaidPlan
+              ? "Cloudflare Containers requires the Workers Paid plan: https://dash.cloudflare.com/?to=/:account/workers/plans"
+              : undefined,
           },
           503,
         );
