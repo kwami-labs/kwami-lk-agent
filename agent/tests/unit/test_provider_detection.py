@@ -195,9 +195,7 @@ def test_the_voice_is_consulted_when_no_model_is_given() -> None:
 def test_the_model_wins_over_the_voice() -> None:
     """Model detection is higher confidence; once it has moved the provider the
     voice is not allowed to move it again."""
-    detected, changed = detect_provider_change(
-        "openai", new_model="sonic-2", new_voice="a" * 20
-    )
+    detected, changed = detect_provider_change("openai", new_model="sonic-2", new_voice="a" * 20)
 
     assert (detected, changed) == ("cartesia", True)
 

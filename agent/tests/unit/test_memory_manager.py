@@ -61,9 +61,7 @@ class RecordingThread:
 
 
 class RecordingUser:
-    def __init__(
-        self, *, exists: bool = True, add_error: Exception | None = None
-    ) -> None:
+    def __init__(self, *, exists: bool = True, add_error: Exception | None = None) -> None:
         self.exists = exists
         self.add_error = add_error
         self.added: list[dict[str, Any]] = []
@@ -340,9 +338,7 @@ async def test_a_missing_thread_is_created_and_billed(zep_factory) -> None:
 
     zep_factory(MissingThreadClient)
     tracker = UsageTracker()
-    memory = KwamiMemory(
-        memory_config(configure_ontology=False), "kwami-1", usage_tracker=tracker
-    )
+    memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1", usage_tracker=tracker)
 
     await memory.initialize()
 
@@ -354,9 +350,7 @@ async def test_a_thread_creation_failure_aborts_initialize(zep_factory, caplog) 
     class BrokenThreadClient(FakeZepClient):
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
-            self.thread = RecordingThread(
-                exists=False, create_error=RuntimeError("500 boom")
-            )
+            self.thread = RecordingThread(exists=False, create_error=RuntimeError("500 boom"))
 
     zep_factory(BrokenThreadClient)
     memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1")

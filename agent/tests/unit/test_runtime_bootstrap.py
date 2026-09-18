@@ -26,9 +26,7 @@ def make_ctx(job_metadata: str | None = None, participants: list | None = None):
     return SimpleNamespace(
         job=SimpleNamespace(metadata=job_metadata),
         room=SimpleNamespace(
-            remote_participants={
-                str(i): p for i, p in enumerate(participants or [])
-            }
+            remote_participants={str(i): p for i, p in enumerate(participants or [])}
         ),
     )
 
@@ -171,9 +169,9 @@ async def test_no_api_key_disables_the_bootstrap(env_setting, caplog) -> None:
 async def test_a_config_is_fetched_and_returned(env_setting) -> None:
     env_setting("KWAMI_API_KEY", "key-123")
     env_setting("KWAMI_API_URL", "https://api.example.test")
-    route = respx.get(
-        "https://api.example.test/internal/kwamis/kwami-1/runtime"
-    ).mock(return_value=httpx.Response(200, json={"soul": {"name": "Ada"}}))
+    route = respx.get("https://api.example.test/internal/kwamis/kwami-1/runtime").mock(
+        return_value=httpx.Response(200, json={"soul": {"name": "Ada"}})
+    )
 
     assert await fetch_runtime_config("kwami-1") == {"soul": {"name": "Ada"}}
     assert route.call_count == 1
@@ -183,9 +181,9 @@ async def test_a_config_is_fetched_and_returned(env_setting) -> None:
 async def test_the_api_key_travels_in_the_kwami_header(env_setting) -> None:
     env_setting("KWAMI_API_KEY", "key-123")
     env_setting("KWAMI_API_URL", "https://api.example.test")
-    route = respx.get(
-        "https://api.example.test/internal/kwamis/kwami-1/runtime"
-    ).mock(return_value=httpx.Response(200, json={}))
+    route = respx.get("https://api.example.test/internal/kwamis/kwami-1/runtime").mock(
+        return_value=httpx.Response(200, json={})
+    )
 
     await fetch_runtime_config("kwami-1")
 
@@ -196,9 +194,9 @@ async def test_the_api_key_travels_in_the_kwami_header(env_setting) -> None:
 async def test_a_trailing_slash_on_the_base_url_does_not_double(env_setting) -> None:
     env_setting("KWAMI_API_KEY", "key-123")
     env_setting("KWAMI_API_URL", "https://api.example.test/")
-    route = respx.get(
-        "https://api.example.test/internal/kwamis/kwami-1/runtime"
-    ).mock(return_value=httpx.Response(200, json={}))
+    route = respx.get("https://api.example.test/internal/kwamis/kwami-1/runtime").mock(
+        return_value=httpx.Response(200, json={})
+    )
 
     await fetch_runtime_config("kwami-1")
 
@@ -218,9 +216,7 @@ async def test_a_non_dict_payload_is_rejected(env_setting) -> None:
 
 
 @respx.mock
-async def test_an_http_error_is_logged_with_the_status_and_body(
-    env_setting, caplog
-) -> None:
+async def test_an_http_error_is_logged_with_the_status_and_body(env_setting, caplog) -> None:
     env_setting("KWAMI_API_KEY", "key-123")
     env_setting("KWAMI_API_URL", "https://api.example.test")
     respx.get("https://api.example.test/internal/kwamis/k/runtime").mock(
@@ -264,9 +260,7 @@ async def test_an_empty_error_body_does_not_break_the_log(env_setting, caplog) -
 
 
 @respx.mock
-async def test_an_unreachable_api_explains_the_docker_localhost_trap(
-    env_setting, caplog
-) -> None:
+async def test_an_unreachable_api_explains_the_docker_localhost_trap(env_setting, caplog) -> None:
     """The single most common deploy mistake: KWAMI_API_URL=localhost inside a
     container. The message has to say so, or it reads as an outage."""
     env_setting("KWAMI_API_KEY", "key-123")

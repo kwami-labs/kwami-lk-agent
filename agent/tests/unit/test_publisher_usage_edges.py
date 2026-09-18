@@ -60,7 +60,10 @@ async def test_a_non_string_trim_field_is_left_alone() -> None:
     sent = await publisher.publish(
         {
             "type": "search_results",
-            "results": [{"content": 12345, "features": ["a", "b", "c", "d"]}, {"content": "y" * 400}],
+            "results": [
+                {"content": 12345, "features": ["a", "b", "c", "d"]},
+                {"content": "y" * 400},
+            ],
         }
     )
 
@@ -113,11 +116,20 @@ async def test_a_row_that_is_not_an_object_survives_the_last_resort_pass() -> No
 
 
 def test_a_non_billable_entry_is_left_out_of_the_summary() -> None:
-    """Only billable entries reach the API; a recorded-but-zero entry would
-    otherwise charge the user for nothing."""
+    """Only billable entries reach the API.
+
+    The record_* methods refuse to create an all-zero entry in the first place,
+    so one is placed directly here: the filter in get_usage_summary is a second
+    line of defence, and a zero-unit row reaching the credits endpoint is a
+    charge for nothing.
+    """
+    from src.domain.usage import ModelUsage
+
     tracker = UsageTracker()
     tracker.record_external_usage("search", "tavily/search", units_used=1.0)
-    tracker.record_external_usage("search", "free/thing", units_used=0, request_count=0)
+    empty = ModelUsage(model_type="search", model_id="free/thing")
+    assert empty.is_billable is False
+    tracker._usage["search:free/thing"] = empty
 
     model_ids = {item["model_id"] for item in tracker.get_usage_summary()}
 

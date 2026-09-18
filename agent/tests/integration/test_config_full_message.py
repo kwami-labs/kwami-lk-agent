@@ -117,9 +117,7 @@ async def test_emotional_traits_must_be_a_mapping(captured, create_agent_fn) -> 
     assert captured["config"].soul.emotional_traits == default
 
 
-async def test_emotional_traits_are_applied_when_a_mapping(
-    captured, create_agent_fn
-) -> None:
+async def test_emotional_traits_are_applied_when_a_mapping(captured, create_agent_fn) -> None:
     await run_config({"soul": {"emotionalTraits": {"warmth": 0.9}}}, create_agent_fn)
 
     assert captured["config"].soul.emotional_traits == {"warmth": 0.9}
@@ -139,9 +137,7 @@ async def test_the_kwami_id_sets_the_user_identity(captured, create_agent_fn) ->
     assert state.user_identity == "kwami-7"
 
 
-async def test_an_existing_user_identity_is_not_overwritten(
-    captured, create_agent_fn
-) -> None:
+async def test_an_existing_user_identity_is_not_overwritten(captured, create_agent_fn) -> None:
     state = SessionState()
     state.user_identity = "already-known"
 
@@ -150,9 +146,7 @@ async def test_an_existing_user_identity_is_not_overwritten(
     assert state.user_identity == "already-known"
 
 
-async def test_the_identity_falls_back_to_the_participant(
-    captured, create_agent_fn
-) -> None:
+async def test_the_identity_falls_back_to_the_participant(captured, create_agent_fn) -> None:
     state = SessionState()
     state.user_identity = "participant-3"
 
@@ -186,9 +180,7 @@ async def test_a_non_list_tools_payload_is_ignored(captured, create_agent_fn) ->
 # =============================================================================
 
 
-async def test_the_first_config_lets_the_new_agent_greet(
-    captured, create_agent_fn
-) -> None:
+async def test_the_first_config_lets_the_new_agent_greet(captured, create_agent_fn) -> None:
     """The first config arrives right after the placeholder starts and kills
     its greeting mid-flight, so the reconfigured agent must greet."""
     state = await run_config({}, create_agent_fn)
@@ -241,9 +233,7 @@ async def test_the_memory_user_id_defaults_to_the_kwami_id(
     personas."""
     env_setting("ZEP_API_KEY", None)
 
-    await run_config(
-        {"kwamiId": "kwami_auth_7", "memory": {"enabled": True}}, create_agent_fn
-    )
+    await run_config({"kwamiId": "kwami_auth_7", "memory": {"enabled": True}}, create_agent_fn)
 
     assert captured["config"].memory.user_id == "kwami_auth_7"
 
@@ -268,9 +258,7 @@ async def test_no_memory_section_and_no_key_means_no_memory(
     assert captured["memory"] is None
 
 
-async def test_an_existing_memory_is_reused(
-    captured, create_agent_fn, env_setting
-) -> None:
+async def test_an_existing_memory_is_reused(captured, create_agent_fn, env_setting) -> None:
     """Rebuilding the Zep client on every config message leaked a connection
     pool and re-ran the whole user/thread/ontology setup."""
     env_setting("ZEP_API_KEY", "zep-key")
@@ -289,9 +277,7 @@ async def test_an_existing_memory_is_reused(
     state.current_agent = FakeAgent(config)
     state.current_agent._memory = existing
 
-    await run_config(
-        {"kwamiId": "kwami-7", "memory": {"enabled": True}}, create_agent_fn, state
-    )
+    await run_config({"kwamiId": "kwami-7", "memory": {"enabled": True}}, create_agent_fn, state)
 
     assert captured["memory"] is existing
 
@@ -310,9 +296,7 @@ async def test_a_broken_message_leaves_the_placeholder_live(caplog) -> None:
         raise RuntimeError("factory is broken")
 
     with caplog.at_level(logging.ERROR):
-        await handle_full_config(
-            session, SessionState(), {}, vad=None, create_agent_fn=explode
-        )
+        await handle_full_config(session, SessionState(), {}, vad=None, create_agent_fn=explode)
 
     assert session.agent is None
     assert "Failed to process full config" in caplog.text
@@ -336,9 +320,7 @@ async def test_an_explicit_provider_change_rebuilds(captured, create_agent_fn) -
     assert captured["skip_greeting"] is True
 
 
-async def test_switching_provider_clears_the_old_model_and_voice(
-    captured, create_agent_fn
-) -> None:
+async def test_switching_provider_clears_the_old_model_and_voice(captured, create_agent_fn) -> None:
     """Cartesia's "sonic-3" carried over to OpenAI, where it is invalid, and
     Rime's "astra" carried over to ElevenLabs, where it does not exist."""
     agent = FakeAgent()
@@ -362,24 +344,23 @@ async def test_an_explicit_model_survives_the_switch(captured, create_agent_fn) 
     state.current_agent = agent
 
     await update_voice(
-        FakeSession(), state, agent,
+        FakeSession(),
+        state,
+        agent,
         {"tts_provider": "cartesia", "tts_model": "cartesia/sonic-2"},
-        None, create_agent_fn,
+        None,
+        create_agent_fn,
     )
 
     assert captured["config"].voice.tts_model == "sonic-2"
 
 
-async def test_a_provider_is_detected_from_the_model_alone(
-    captured, create_agent_fn
-) -> None:
+async def test_a_provider_is_detected_from_the_model_alone(captured, create_agent_fn) -> None:
     agent = FakeAgent()
     state = SessionState()
     state.current_agent = agent
 
-    await update_voice(
-        FakeSession(), state, agent, {"tts_model": "sonic-2"}, None, create_agent_fn
-    )
+    await update_voice(FakeSession(), state, agent, {"tts_model": "sonic-2"}, None, create_agent_fn)
 
     assert captured["config"].voice.tts_provider == "cartesia"
 
@@ -395,9 +376,7 @@ async def test_a_speed_change_rebuilds_for_providers_that_need_it(
     state = SessionState()
     state.current_agent = agent
 
-    await update_voice(
-        FakeSession(), state, agent, {"tts_speed": 1.4}, None, create_agent_fn
-    )
+    await update_voice(FakeSession(), state, agent, {"tts_speed": 1.4}, None, create_agent_fn)
 
     assert captured["config"].voice.tts_speed == 1.4
 
@@ -409,9 +388,7 @@ async def test_an_unchanged_speed_does_not_rebuild(create_agent_fn, captured) ->
     state = SessionState()
     state.current_agent = agent
 
-    await update_voice(
-        FakeSession(), state, agent, {"tts_speed": 1.0}, None, create_agent_fn
-    )
+    await update_voice(FakeSession(), state, agent, {"tts_speed": 1.0}, None, create_agent_fn)
 
     assert "config" not in captured
 
@@ -424,9 +401,7 @@ async def test_a_speed_change_on_a_live_updatable_provider_does_not_rebuild(
     state = SessionState()
     state.current_agent = agent
 
-    await update_voice(
-        FakeSession(), state, agent, {"tts_speed": 1.4}, None, create_agent_fn
-    )
+    await update_voice(FakeSession(), state, agent, {"tts_speed": 1.4}, None, create_agent_fn)
 
     assert "config" not in captured
 
@@ -436,17 +411,18 @@ async def test_a_speed_change_on_a_live_updatable_provider_does_not_rebuild(
 # =============================================================================
 
 
-async def test_an_llm_change_rebuilds_with_the_new_settings(
-    captured, create_agent_fn
-) -> None:
+async def test_an_llm_change_rebuilds_with_the_new_settings(captured, create_agent_fn) -> None:
     agent = FakeAgent()
     state = SessionState()
     state.current_agent = agent
 
     await update_llm(
-        FakeSession(), state, agent,
+        FakeSession(),
+        state,
+        agent,
         {"provider": "anthropic", "model": "anthropic/claude-sonnet-4", "temperature": 0.2},
-        None, create_agent_fn,
+        None,
+        create_agent_fn,
     )
 
     voice = captured["config"].voice
@@ -456,30 +432,22 @@ async def test_an_llm_change_rebuilds_with_the_new_settings(
     assert captured["skip_greeting"] is True
 
 
-async def test_a_zero_temperature_survives_an_llm_update(
-    captured, create_agent_fn
-) -> None:
+async def test_a_zero_temperature_survives_an_llm_update(captured, create_agent_fn) -> None:
     agent = FakeAgent()
     state = SessionState()
     state.current_agent = agent
 
-    await update_llm(
-        FakeSession(), state, agent, {"temperature": 0}, None, create_agent_fn
-    )
+    await update_llm(FakeSession(), state, agent, {"temperature": 0}, None, create_agent_fn)
 
     assert captured["config"].voice.llm_temperature == 0
 
 
-async def test_max_tokens_arrives_under_both_spellings(
-    captured, create_agent_fn
-) -> None:
+async def test_max_tokens_arrives_under_both_spellings(captured, create_agent_fn) -> None:
     agent = FakeAgent()
     state = SessionState()
     state.current_agent = agent
 
-    await update_llm(
-        FakeSession(), state, agent, {"max_tokens": 512}, None, create_agent_fn
-    )
+    await update_llm(FakeSession(), state, agent, {"max_tokens": 512}, None, create_agent_fn)
 
     assert captured["config"].voice.llm_max_tokens == 512
 
@@ -506,9 +474,7 @@ async def test_a_memory_for_a_different_user_is_not_reused(
     state.current_agent = FakeAgent()
     state.current_agent._memory = OtherUsersMemory()
 
-    await run_config(
-        {"kwamiId": "kwami-7", "memory": {"enabled": True}}, create_agent_fn, state
-    )
+    await run_config({"kwamiId": "kwami-7", "memory": {"enabled": True}}, create_agent_fn, state)
 
     assert captured["memory"] is None
 
@@ -526,9 +492,7 @@ async def test_an_uninitialized_memory_is_not_reused(
     state.current_agent = FakeAgent()
     state.current_agent._memory = NeverInitialized()
 
-    await run_config(
-        {"kwamiId": "kwami-7", "memory": {"enabled": True}}, create_agent_fn, state
-    )
+    await run_config({"kwamiId": "kwami-7", "memory": {"enabled": True}}, create_agent_fn, state)
 
     assert captured["memory"] is None
 
@@ -598,9 +562,7 @@ async def test_an_explicit_memory_user_id_is_not_overwritten(
     assert captured_ids == ["kwami-7"]
 
 
-async def test_a_voice_arriving_with_a_provider_switch_is_kept(
-    captured, create_agent_fn
-) -> None:
+async def test_a_voice_arriving_with_a_provider_switch_is_kept(captured, create_agent_fn) -> None:
     """`if new_voice` before the provider-changed clear: an explicitly chosen
     voice must survive the switch that was made to accommodate it."""
     agent = FakeAgent()
@@ -609,9 +571,12 @@ async def test_a_voice_arriving_with_a_provider_switch_is_kept(
     state.current_agent = agent
 
     await update_voice(
-        FakeSession(), state, agent,
+        FakeSession(),
+        state,
+        agent,
         {"tts_provider": "cartesia", "tts_voice": "79a125e8-cd45-4c13-8a67-188112f4dd22"},
-        None, create_agent_fn,
+        None,
+        create_agent_fn,
     )
 
     assert captured["config"].voice.tts_voice == "79a125e8-cd45-4c13-8a67-188112f4dd22"
@@ -651,12 +616,14 @@ async def test_a_tools_update_is_dispatched() -> None:
     state.current_agent = agent
 
     await handle_config_update(
-        FakeSession(), state,
+        FakeSession(),
+        state,
         {
             "updateType": "tools",
             "config": [{"name": "set_theme", "description": "d", "parameters": {}}],
         },
-        vad=None, create_agent_fn=lambda *a, **k: None,
+        vad=None,
+        create_agent_fn=lambda *a, **k: None,
     )
 
     assert agent.kwami_config.tools[0]["name"] == "set_theme"
@@ -728,9 +695,8 @@ async def test_a_memory_config_missing_a_knob_is_tolerated() -> None:
 
 async def test_a_pipeline_update_switches_the_pipeline(captured, create_agent_fn) -> None:
     """A real pipeline change goes through switch_pipeline, not update_voice."""
-    from src.handlers.config_handler import handle_config_update
-
     from src.agent import KwamiAgent
+    from src.handlers.config_handler import handle_config_update
 
     agent = KwamiAgent()
     assert agent.kwami_config.voice.pipeline_type == "standard"
@@ -738,9 +704,11 @@ async def test_a_pipeline_update_switches_the_pipeline(captured, create_agent_fn
     state.current_agent = agent
 
     await handle_config_update(
-        FakeSession(), state,
+        FakeSession(),
+        state,
         {"updateType": "pipeline", "config": {"type": "realtime"}},
-        vad=None, create_agent_fn=create_agent_fn,
+        vad=None,
+        create_agent_fn=create_agent_fn,
     )
 
     assert captured["config"].voice.pipeline_type == "realtime"
@@ -751,18 +719,19 @@ async def test_a_pipeline_update_to_the_current_type_is_a_voice_update(
 ) -> None:
     """Already on that pipeline: rebuilding would drop the session's browser
     and pending tool calls for nothing."""
-    from src.handlers.config_handler import handle_config_update
-
     from src.agent import KwamiAgent
+    from src.handlers.config_handler import handle_config_update
 
     agent = KwamiAgent()
     state = SessionState()
     state.current_agent = agent
 
     await handle_config_update(
-        FakeSession(), state,
+        FakeSession(),
+        state,
         {"updateType": "pipeline", "config": {"type": "stt-llm-tts"}},
-        vad=None, create_agent_fn=create_agent_fn,
+        vad=None,
+        create_agent_fn=create_agent_fn,
     )
 
     assert "config" not in captured

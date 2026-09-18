@@ -18,7 +18,6 @@ from src.domain import KwamiConfig, KwamiSoulConfig
 from src.domain.parsing import boolean, section
 from src.utils.room import should_disconnect_as_duplicate
 
-
 # =============================================================================
 # resolve_realtime_voice
 # =============================================================================

@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 from src.agent import KwamiAgent
-from src.domain import KwamiConfig, KwamiSoulConfig
+from src.domain import KwamiConfig
 from src.handlers.config_handler import (
     _update_stt_if_needed,
     _update_tts_options,
@@ -111,8 +111,11 @@ async def test_an_update_for_a_foreign_agent_is_ignored(create_agent_fn) -> None
     state = state_with(FakeAgent())
 
     await handle_config_update(
-        FakeSession(), state, {"updateType": "soul", "config": {"name": "Ada"}},
-        vad=None, create_agent_fn=create_agent_fn,
+        FakeSession(),
+        state,
+        {"updateType": "soul", "config": {"name": "Ada"}},
+        vad=None,
+        create_agent_fn=create_agent_fn,
     )
 
     assert state.current_agent.kwami_config.soul.name != "Ada"
@@ -123,8 +126,11 @@ async def test_an_unknown_update_type_is_ignored() -> None:
     state = state_with(agent)
 
     await handle_config_update(
-        FakeSession(), state, {"updateType": "nonesuch", "config": {}},
-        vad=None, create_agent_fn=lambda *a, **k: None,
+        FakeSession(),
+        state,
+        {"updateType": "nonesuch", "config": {}},
+        vad=None,
+        create_agent_fn=lambda *a, **k: None,
     )
 
     assert state.current_agent is agent
@@ -135,8 +141,11 @@ async def test_a_soul_update_is_dispatched() -> None:
     state = state_with(agent)
 
     await handle_config_update(
-        FakeSession(), state, {"updateType": "soul", "config": {"name": "Ada"}},
-        vad=None, create_agent_fn=lambda *a, **k: None,
+        FakeSession(),
+        state,
+        {"updateType": "soul", "config": {"name": "Ada"}},
+        vad=None,
+        create_agent_fn=lambda *a, **k: None,
     )
 
     assert agent.kwami_config.soul.name == "Ada"
@@ -147,8 +156,11 @@ async def test_the_legacy_persona_update_type_still_works() -> None:
     state = state_with(agent)
 
     await handle_config_update(
-        FakeSession(), state, {"updateType": "persona", "config": {"name": "Ada"}},
-        vad=None, create_agent_fn=lambda *a, **k: None,
+        FakeSession(),
+        state,
+        {"updateType": "persona", "config": {"name": "Ada"}},
+        vad=None,
+        create_agent_fn=lambda *a, **k: None,
     )
 
     assert agent.kwami_config.soul.name == "Ada"
@@ -159,8 +171,11 @@ async def test_a_memory_update_is_dispatched() -> None:
     state = state_with(agent)
 
     await handle_config_update(
-        FakeSession(), state, {"updateType": "memory", "config": {"includeFacts": False}},
-        vad=None, create_agent_fn=lambda *a, **k: None,
+        FakeSession(),
+        state,
+        {"updateType": "memory", "config": {"includeFacts": False}},
+        vad=None,
+        create_agent_fn=lambda *a, **k: None,
     )
 
     assert agent.kwami_config.memory.include_facts is False
@@ -173,9 +188,11 @@ async def test_a_failing_update_is_logged_not_raised(caplog) -> None:
 
     with caplog.at_level(logging.ERROR):
         await handle_config_update(
-            FakeSession(), state,
+            FakeSession(),
+            state,
             {"updateType": "soul", "config": None},
-            vad=None, create_agent_fn=lambda *a, **k: None,
+            vad=None,
+            create_agent_fn=lambda *a, **k: None,
         )
 
     assert "Error updating soul" in caplog.text
@@ -187,8 +204,11 @@ async def test_a_pipeline_update_with_no_type_is_a_no_op(caplog) -> None:
 
     with caplog.at_level(logging.WARNING):
         await handle_config_update(
-            FakeSession(), state, {"updateType": "pipeline", "config": {}},
-            vad=None, create_agent_fn=lambda *a, **k: None,
+            FakeSession(),
+            state,
+            {"updateType": "pipeline", "config": {}},
+            vad=None,
+            create_agent_fn=lambda *a, **k: None,
         )
 
     assert "no usable pipeline type" in caplog.text
@@ -526,9 +546,7 @@ async def test_a_plugin_without_update_options_is_left_alone() -> None:
 # =============================================================================
 
 
-async def test_an_stt_provider_change_recreates_the_agent(
-    captured, create_agent_fn
-) -> None:
+async def test_an_stt_provider_change_recreates_the_agent(captured, create_agent_fn) -> None:
     agent = FakeAgent()
     state = state_with(agent)
 
@@ -551,15 +569,17 @@ async def test_an_stt_model_change_recreates_the_agent(captured, create_agent_fn
     assert captured["config"].voice.stt_model == "nova-3"
 
 
-async def test_the_language_travels_with_an_stt_recreation(
-    captured, create_agent_fn
-) -> None:
+async def test_the_language_travels_with_an_stt_recreation(captured, create_agent_fn) -> None:
     agent = FakeAgent()
     state = state_with(agent)
 
     await _update_stt_if_needed(
-        FakeSession(), state, agent,
-        {"stt_provider": "openai", "stt_language": "fr"}, None, create_agent_fn,
+        FakeSession(),
+        state,
+        agent,
+        {"stt_provider": "openai", "stt_language": "fr"},
+        None,
+        create_agent_fn,
     )
 
     assert captured["config"].voice.stt_language == "fr"
@@ -585,8 +605,12 @@ async def test_an_unchanged_stt_does_nothing(create_agent_fn) -> None:
     state = state_with(agent)
 
     await _update_stt_if_needed(
-        FakeSession(), state, agent,
-        {"stt_provider": agent.kwami_config.voice.stt_provider}, None, create_agent_fn,
+        FakeSession(),
+        state,
+        agent,
+        {"stt_provider": agent.kwami_config.voice.stt_provider},
+        None,
+        create_agent_fn,
     )
 
     assert stt.updates == []

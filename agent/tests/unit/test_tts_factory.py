@@ -154,7 +154,7 @@ def test_elevenlabs_goes_through_livekit_inference() -> None:
 
 
 def test_a_short_voice_name_is_rejected_as_an_elevenlabs_id(caplog) -> None:
-    """"nova" is an OpenAI voice leaking through a provider switch; ElevenLabs
+    """ "nova" is an OpenAI voice leaking through a provider switch; ElevenLabs
     IDs are 20-character alphanumerics."""
     with caplog.at_level(logging.WARNING):
         create_tts(voice_config(tts_provider="elevenlabs", tts_voice="nova"))
@@ -165,9 +165,7 @@ def test_a_short_voice_name_is_rejected_as_an_elevenlabs_id(caplog) -> None:
 def test_a_long_unknown_voice_id_is_accepted() -> None:
     """Only short names are rejected; an unfamiliar 20-char id may be a real
     custom voice on the user's account."""
-    instance = create_tts(
-        voice_config(tts_provider="elevenlabs", tts_voice="A" * 20)
-    )
+    instance = create_tts(voice_config(tts_provider="elevenlabs", tts_voice="A" * 20))
 
     assert instance is not None
 
@@ -195,9 +193,7 @@ def test_an_elevenlabs_prefix_is_stripped(caplog) -> None:
 
 def test_rime_goes_through_livekit_inference(caplog) -> None:
     with caplog.at_level(logging.INFO):
-        instance = create_tts(
-            voice_config(tts_provider="rime", tts_model="", tts_voice="astra")
-        )
+        instance = create_tts(voice_config(tts_provider="rime", tts_model="", tts_voice="astra"))
 
     assert type(instance).__module__.startswith("livekit.agents")
     assert "rime/arcana:astra" in caplog.text
@@ -224,9 +220,7 @@ def test_a_rime_prefix_is_stripped(caplog) -> None:
 
 
 def test_cartesia_is_constructed_with_a_uuid_voice() -> None:
-    instance = create_tts(
-        voice_config(tts_provider="cartesia", tts_voice=CartesiaVoices.DEFAULT)
-    )
+    instance = create_tts(voice_config(tts_provider="cartesia", tts_voice=CartesiaVoices.DEFAULT))
 
     assert type(instance).__module__.startswith("livekit.plugins.cartesia")
 
@@ -245,9 +239,7 @@ def test_a_short_non_uuid_cartesia_voice_falls_back(caplog) -> None:
 
 
 def test_deepgram_is_constructed_with_a_known_voice() -> None:
-    instance = create_tts(
-        voice_config(tts_provider="deepgram", tts_voice=DeepgramVoices.DEFAULT)
-    )
+    instance = create_tts(voice_config(tts_provider="deepgram", tts_voice=DeepgramVoices.DEFAULT))
 
     assert type(instance).__module__.startswith("livekit.plugins.deepgram")
 
@@ -261,8 +253,7 @@ def test_an_unknown_deepgram_voice_falls_back(caplog) -> None:
 
 def test_an_explicit_deepgram_model_wins_over_the_derived_one() -> None:
     assert (
-        create_tts(voice_config(tts_provider="deepgram", tts_model="aura-2-thalia-en"))
-        is not None
+        create_tts(voice_config(tts_provider="deepgram", tts_model="aura-2-thalia-en")) is not None
     )
 
 

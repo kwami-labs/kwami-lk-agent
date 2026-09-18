@@ -30,9 +30,7 @@ class ReportServer:
         self._runner: web.AppRunner | None = None
         self.url = ""
 
-    async def start(
-        self, *, status: int = 200, body: Any = None, delay: float = 0.0
-    ) -> None:
+    async def start(self, *, status: int = 200, body: Any = None, delay: float = 0.0) -> None:
         async def handler(request: web.Request) -> web.Response:
             self.paths.append(request.path)
             self.headers.append(dict(request.headers))
@@ -164,9 +162,7 @@ async def test_a_successful_report_logs_the_charge_and_balance(server, caplog) -
     assert "new_balance=958" in caplog.text
 
 
-async def test_a_response_missing_the_billing_fields_still_succeeds(
-    server, caplog
-) -> None:
+async def test_a_response_missing_the_billing_fields_still_succeeds(server, caplog) -> None:
     """`result.get(..., 0)` -- a thin 200 is still a 200."""
     await server.start(body={})
     reporter = UsageReporter(api_url=server.url, api_key="k")
@@ -177,9 +173,7 @@ async def test_a_response_missing_the_billing_fields_still_succeeds(
     assert "charged=0" in caplog.text
 
 
-async def test_a_non_200_is_reported_as_a_failure_with_the_body(
-    server, caplog
-) -> None:
+async def test_a_non_200_is_reported_as_a_failure_with_the_body(server, caplog) -> None:
     await server.start(status=500, body="database is on fire")
     reporter = UsageReporter(api_url=server.url, api_key="k")
 

@@ -60,7 +60,7 @@ def test_openai_is_constructed() -> None:
 
 
 def test_openai_translates_multi_language_to_none() -> None:
-    """"multi" is a Deepgram concept; OpenAI rejects it as a language code."""
+    """ "multi" is a Deepgram concept; OpenAI rejects it as a language code."""
     assert create_stt(voice(stt_provider="openai", stt_language="multi")) is not None
 
 

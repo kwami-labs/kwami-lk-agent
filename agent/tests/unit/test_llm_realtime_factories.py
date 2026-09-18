@@ -279,14 +279,10 @@ def test_installed_google_realtime_receives_model_voice_and_temperature(
     )
 
     assert result == "realtime:gemini-2.0-flash-exp"
-    assert plugin.calls == [
-        {"model": "gemini-2.0-flash-exp", "voice": "Puck", "temperature": 0.6}
-    ]
+    assert plugin.calls == [{"model": "gemini-2.0-flash-exp", "voice": "Puck", "temperature": 0.6}]
 
 
-def test_a_realtime_construction_failure_is_logged_before_the_fallback(
-    env_setting, caplog
-) -> None:
+def test_a_realtime_construction_failure_is_logged_before_the_fallback(env_setting, caplog) -> None:
     """The catch-all has one limit worth stating: its fallback is *also*
     OpenAI Realtime, so when the reason the provider failed is a missing
     OPENAI_API_KEY, the fallback cannot succeed either and the error reaches

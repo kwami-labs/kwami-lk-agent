@@ -373,7 +373,7 @@ async def test_strategy_three_reads_an_identifying_summary(caplog) -> None:
 
 
 async def test_a_summary_missing_the_naming_words_is_not_enough() -> None:
-    """"user" alone is not evidence of a name; both halves of the guard matter."""
+    """ "user" alone is not evidence of a name; both halves of the guard matter."""
     client = FakeZep(
         results=results(edges=[]),
         nodes=[node(label="Ada", type="Other", summary="the user drinks coffee")],

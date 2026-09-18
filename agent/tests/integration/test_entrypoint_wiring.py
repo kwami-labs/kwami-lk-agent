@@ -71,7 +71,7 @@ class FakeCtx:
 class RecordingSession:
     """Strict stand-in for AgentSession: start() is the only live-room call."""
 
-    instances: list["RecordingSession"] = []
+    instances: list[RecordingSession] = []
 
     def __init__(self, *, userdata: Any = None, **kwargs: Any) -> None:
         self.userdata = userdata
@@ -143,9 +143,7 @@ def test_prewarm_puts_a_vad_on_the_process() -> None:
 # =============================================================================
 
 
-async def test_the_session_is_started_with_the_placeholder_agent(
-    fake_session, vad
-) -> None:
+async def test_the_session_is_started_with_the_placeholder_agent(fake_session, vad) -> None:
     ctx = FakeCtx(FakeRoom(), vad)
 
     await entrypoint(ctx)
@@ -231,9 +229,7 @@ async def test_a_router_failure_is_logged_not_raised(fake_session, vad, caplog) 
     handler(packet)
 
 
-async def test_a_late_joining_participant_resolves_the_identity(
-    fake_session, vad
-) -> None:
+async def test_a_late_joining_participant_resolves_the_identity(fake_session, vad) -> None:
     """A human can join after the agent; without this the session finishes with
     no user_identity and its usage is never billed."""
     ctx = FakeCtx(FakeRoom(), vad)
@@ -321,9 +317,7 @@ async def test_a_fetched_runtime_config_is_applied(
     assert applied == [{"soul": {"name": "Ada"}}]
 
 
-async def test_the_identity_is_resolved_once_the_room_is_connected(
-    fake_session, vad
-) -> None:
+async def test_the_identity_is_resolved_once_the_room_is_connected(fake_session, vad) -> None:
     ctx = FakeCtx(FakeRoom(), vad)
 
     await entrypoint(ctx)

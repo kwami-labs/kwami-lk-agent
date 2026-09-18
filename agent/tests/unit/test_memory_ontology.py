@@ -192,9 +192,7 @@ def test_a_fieldless_edge_also_gets_a_detail_field() -> None:
 
 
 def test_declared_edge_fields_become_annotations() -> None:
-    edges = _build_edge_models(
-        [{"name": "REL", "description": "d", "fields": {"context": "how"}}]
-    )
+    edges = _build_edge_models([{"name": "REL", "description": "d", "fields": {"context": "how"}}])
     model, _ = edges["REL"]
 
     assert "context" in model.__annotations__

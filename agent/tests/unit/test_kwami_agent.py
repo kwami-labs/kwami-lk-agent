@@ -106,9 +106,7 @@ class FakeMemory:
         self.buffered.append((content, name))
 
     async def add_exchange(self, *, assistant_content: str, assistant_name: str) -> None:
-        self.exchanges.append(
-            {"content": assistant_content, "name": assistant_name}
-        )
+        self.exchanges.append({"content": assistant_content, "name": assistant_name})
 
 
 class Unreadable:
@@ -483,7 +481,7 @@ async def test_a_known_user_with_topics_is_greeted_with_one() -> None:
 
 
 async def test_name_facts_are_not_offered_as_conversation_topics() -> None:
-    """"your name is Ada" is not a thing to ask how it is going."""
+    """ "your name is Ada" is not a thing to ask how it is going."""
     context = MemoryContext(facts=["the user's name is Ada"])
     agent = agent_with(memory=FakeMemory(user_name="Ada", context=context))
     agent._last_memory_context = context
@@ -537,9 +535,7 @@ async def test_the_name_is_recovered_from_facts_when_not_cached() -> None:
 async def test_the_agents_own_name_is_never_adopted_as_the_users() -> None:
     context = MemoryContext(facts=["the assistant is called Ada"])
     memory = FakeMemory(user_name=None, context=context)
-    agent = agent_with(
-        config=KwamiConfig(soul=KwamiSoulConfig(name="Ada")), memory=memory
-    )
+    agent = agent_with(config=KwamiConfig(soul=KwamiSoulConfig(name="Ada")), memory=memory)
     agent._last_memory_context = context
 
     await agent._build_greeting_instructions()
@@ -650,9 +646,7 @@ async def test_an_assistant_turn_is_persisted_as_an_exchange() -> None:
     """The hook this replaced -- on_agent_turn_completed -- is never dispatched
     by livekit-agents, so nothing the assistant said reached Zep at all."""
     memory = FakeMemory()
-    agent = agent_with(
-        config=KwamiConfig(soul=KwamiSoulConfig(name="Ada")), memory=memory
-    )
+    agent = agent_with(config=KwamiConfig(soul=KwamiSoulConfig(name="Ada")), memory=memory)
 
     agent._on_conversation_item_added(
         SimpleNamespace(item=SimpleNamespace(role="assistant", text_content="the reply"))

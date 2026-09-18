@@ -18,9 +18,7 @@ class RecordingClientTools:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None, str | None]] = []
 
-    def handle_tool_result(
-        self, tool_call_id: str, result: str | None, error: str | None
-    ) -> None:
+    def handle_tool_result(self, tool_call_id: str, result: str | None, error: str | None) -> None:
         self.calls.append((tool_call_id, result, error))
 
 
@@ -33,9 +31,7 @@ class AgentWithDirectMethod:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str | None, str | None]] = []
 
-    def handle_tool_result(
-        self, tool_call_id: str, result: str | None, error: str | None
-    ) -> None:
+    def handle_tool_result(self, tool_call_id: str, result: str | None, error: str | None) -> None:
         self.calls.append((tool_call_id, result, error))
 
 

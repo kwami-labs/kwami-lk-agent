@@ -232,9 +232,7 @@ def test_a_nameless_entity_renders_as_unknown() -> None:
 
 
 def test_entities_are_limited_in_number() -> None:
-    ctx = MemoryContext(
-        summary="s", entities=[{"name": f"E{i}"} for i in range(MAX_ENTITIES + 4)]
-    )
+    ctx = MemoryContext(summary="s", entities=[{"name": f"E{i}"} for i in range(MAX_ENTITIES + 4)])
 
     rendered = ctx.to_system_prompt_addition().split("## Relevant Entities")[1]
 

@@ -13,7 +13,6 @@ import respx
 
 from src.adapters.http import DEFAULT_TIMEOUT_SECONDS, HttpxClient, HttpxResponse
 
-
 # =============================================================================
 # HttpxResponse
 # =============================================================================
@@ -86,9 +85,7 @@ def test_the_default_timeout_is_applied_when_none_is_given() -> None:
 
 @respx.mock
 async def test_get_returns_a_wrapped_response() -> None:
-    respx.get("https://example.test/thing").mock(
-        return_value=httpx.Response(200, json={"a": 1})
-    )
+    respx.get("https://example.test/thing").mock(return_value=httpx.Response(200, json={"a": 1}))
     client = HttpxClient()
 
     response = await client.get("https://example.test/thing")
@@ -101,9 +98,7 @@ async def test_get_returns_a_wrapped_response() -> None:
 
 @respx.mock
 async def test_get_forwards_params_and_headers() -> None:
-    route = respx.get("https://example.test/thing").mock(
-        return_value=httpx.Response(200, json={})
-    )
+    route = respx.get("https://example.test/thing").mock(return_value=httpx.Response(200, json={}))
     client = HttpxClient()
 
     await client.get(
@@ -141,9 +136,7 @@ async def test_post_sends_json_and_headers() -> None:
 @respx.mock
 async def test_a_non_2xx_is_returned_rather_than_raised() -> None:
     """No raise_for_status here: callers decide what a 404 means."""
-    respx.get("https://example.test/missing").mock(
-        return_value=httpx.Response(404, text="nope")
-    )
+    respx.get("https://example.test/missing").mock(return_value=httpx.Response(404, text="nope"))
     client = HttpxClient()
 
     response = await client.get("https://example.test/missing")
