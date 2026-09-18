@@ -135,7 +135,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Config and usage types live in `domain/`; pipeline construction lives in `runtime/pipeline.py`.
 - Data-channel routing extracted from the entrypoint into `DataMessageRouter`.
 - Search results publish through `LiveKitRoomPublisher` with a single 14 KB trim policy.
-- Coverage floor ratcheted to 43%.
+- Coverage floor ratcheted; branch coverage is on and the exclusion policy is written down in `pyproject.toml` and [docs/testing.md](./docs/testing.md).
 
 ### Fixed
 

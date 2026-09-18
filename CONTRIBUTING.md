@@ -69,8 +69,10 @@ the GitHub Release from the changelog. Steps are in
 - URLs the model can open go through `validate_url_async`.
 - Background tasks are retained (`SessionState.spawn` or an equivalent set).
 - Config work stays under `state.run_serialized`.
-- The coverage floor in `pyproject.toml` does not go down. Raise it when you
-  add tests.
+- The coverage floor in `pyproject.toml` does not go down. Raise it by adding
+  tests, never by lowering it to meet the tree. What may be excluded, and the
+  two cases where `# pragma: no cover` is allowed, are in
+  [docs/testing.md](./docs/testing.md#what-may-be-excluded).
 
 ## Tests you should add
 

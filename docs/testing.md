@@ -71,10 +71,45 @@ as a pull-request gate.
 make test-cov
 ```
 
-`fail_under` in `pyproject.toml` is a ratchet (currently 43). It only moves
-up. Branch coverage is on. `if TYPE_CHECKING` and `@overload` are excluded.
+`fail_under` in `pyproject.toml` is a ratchet. It only moves up, and it is
+raised by adding tests -- never by lowering it to meet the tree. Branch
+coverage is on.
 
 CI uploads `coverage.xml` per Python version (3.11 and 3.13).
+
+### What may be excluded
+
+Categorical exclusions live in `exclude_also` in `pyproject.toml`, so they can
+be audited in one place: `if TYPE_CHECKING:` and `@overload`.
+
+A `# pragma: no cover` at a call site is allowed for two cases only, and only
+with the reason written on the same line:
+
+1. **An optional-extra import guard.** `livekit-plugins-google` and friends are
+   extras, so a locked environment always resolves the import the same way and
+   a test that forces the other branch is testing its own monkeypatch.
+2. **The process entry point** (`if __name__ == "__main__":`).
+
+Anything else that cannot be covered is a design problem, not an exclusion.
+
+### Pinning a call into a plugin that is not installed
+
+Where an optional plugin's constructor cannot be reached but the call into it
+is still worth protecting, use a **strict stand-in** -- explicit keyword
+signatures, no `MagicMock` -- and say in the docstring that what is verified is
+our call shape and not the SDK's. Rename or drop a kwarg and the test fails,
+which is the regression this buys. See `tests/unit/test_stt_factory.py` for the
+pattern.
+
+### Running coverage while someone else is
+
+`agent/.coverage` is a single SQLite file. Two processes writing it at once
+produce nonsense -- `no such table: arc`, and totals like `0.00%`. For an
+ad-hoc run, point `COVERAGE_FILE` somewhere of your own:
+
+```bash
+COVERAGE_FILE=/tmp/mine.coverage make test-cov
+```
 
 ## Writing a test
 
