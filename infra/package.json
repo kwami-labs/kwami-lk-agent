@@ -2,8 +2,10 @@
   "name": "kwami-lk-agent-infra",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.10.0",
   "scripts": {
     "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy --env=\"\"",
     "deploy:staging": "wrangler deploy --env staging",
     "types": "wrangler types",
