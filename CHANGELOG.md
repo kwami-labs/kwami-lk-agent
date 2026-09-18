@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-09-18
+
 ### Added
 
 - Self-service reconfiguration tools, so the agent can do what its system prompt
@@ -58,6 +60,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the endpoint `connectOverCDP` takes, where `Page.enable` fails outright --
   unlike Browser Use's HTTP base with its `/json/list` discovery.
 
+
+- Project documentation under `docs/` (architecture, protocol, memory, security, billing, configuration, development, testing, deployment) with mermaid diagrams.
+- Hexagonal I/O ports (`MemoryPort`, `RoomPublisherPort`, `UsageReporterPort`, `HttpClientPort`, `BrowserPort`, `SearchPort`) and LiveKit / HTTP adapters.
+- Process-wide frozen `Settings` object; credentials are no longer read from `os.environ` at import time.
+- Layered test suites: unit, contract (real SDKs), integration, runtime, and live e2e.
+- CI: Ruff + mypy, pytest with coverage on Python 3.11 and 3.13, Docker image build, nightly live e2e.
+- Cloud-browser minute metering on every release path (idle, failed connect, user close, session cleanup).
+- Live conversation, memory, and reconfiguration e2e suites.
+- Second deployment target: Cloudflare Workers + Containers (`infra/`), with a
+  staging environment, cron keep-alive, and `make deploy-cf` / `make deploy-cf-staging`.
+- `GET /health` (and its `/status` alias) on the Worker reports `degraded` rather
+  than `error` when the Worker is up but the container is unreachable, and names
+  the Workers Paid plan requirement when that is the cause.
+- CI type-checks the Worker: `wrangler types` + `tsc --noEmit` on every push and PR.
+
+### Changed
+
+- `SessionState.update_agent` split into `prepare_handoff` (carry the
+  conversation, browser, pending tool calls and session resources) plus the
+  session swap, so the framework's own function-tool handoff path keeps the
+  bookkeeping.
+- The built-in tool contract test derives its expectation from the mixins
+  instead of asserting a hard-coded count of 22.
+- `tests/unit/test_capabilities.py` fails when `kwami-app` (checked out
+  alongside) registers a tool the agent does not describe.
+- `tests/integration/test_ui_control_roundtrip.py` drives the app's real tool
+  definitions through the data channel and inspects the published envelope, so
+  a change to the `tool_call` shape cannot pass both repos' suites and still
+  break every UI command.
+
+
+- Room resolution uses `AgentDeps` on `AgentSession.userdata` instead of a process-wide `ContextVar`.
+- Config and usage types live in `domain/`; pipeline construction lives in `runtime/pipeline.py`.
+- Data-channel routing extracted from the entrypoint into `DataMessageRouter`.
+- Search results publish through `LiveKitRoomPublisher` with a single 14 KB trim policy.
+- **100% statement and branch coverage**, enforced: `fail_under = 100` is blocking, so a
+  line that is not exercised does not merge. The only exclusions are `if TYPE_CHECKING:`
+  and `@overload`, plus two narrowly-scoped pragmas (an import guard the installed
+  environment decides, and the process entry point); the rules are in `pyproject.toml`
+  and [docs/testing.md](./docs/testing.md).
+
 ### Fixed
 
 - **The realtime pipeline was unreachable from the app.** The SDK's wire field is
@@ -96,52 +139,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   usage record now names the vendor, because one line covering both cannot be
   reconciled against either invoice.
 
-### Changed
-
-- `SessionState.update_agent` split into `prepare_handoff` (carry the
-  conversation, browser, pending tool calls and session resources) plus the
-  session swap, so the framework's own function-tool handoff path keeps the
-  bookkeeping.
-- The built-in tool contract test derives its expectation from the mixins
-  instead of asserting a hard-coded count of 22.
-- `tests/unit/test_capabilities.py` fails when `kwami-app` (checked out
-  alongside) registers a tool the agent does not describe.
-- `tests/integration/test_ui_control_roundtrip.py` drives the app's real tool
-  definitions through the data channel and inspects the published envelope, so
-  a change to the `tool_call` shape cannot pass both repos' suites and still
-  break every UI command.
-
-## [1.0.0] - 2026-09-18
-
-### Added
-
-- Project documentation under `docs/` (architecture, protocol, memory, security, billing, configuration, development, testing, deployment) with mermaid diagrams.
-- Hexagonal I/O ports (`MemoryPort`, `RoomPublisherPort`, `UsageReporterPort`, `HttpClientPort`, `BrowserPort`, `SearchPort`) and LiveKit / HTTP adapters.
-- Process-wide frozen `Settings` object; credentials are no longer read from `os.environ` at import time.
-- Layered test suites: unit, contract (real SDKs), integration, runtime, and live e2e.
-- CI: Ruff + mypy, pytest with coverage on Python 3.11 and 3.13, Docker image build, nightly live e2e.
-- Cloud-browser minute metering on every release path (idle, failed connect, user close, session cleanup).
-- Live conversation, memory, and reconfiguration e2e suites.
-- Second deployment target: Cloudflare Workers + Containers (`infra/`), with a
-  staging environment, cron keep-alive, and `make deploy-cf` / `make deploy-cf-staging`.
-- `GET /health` (and its `/status` alias) on the Worker reports `degraded` rather
-  than `error` when the Worker is up but the container is unreachable, and names
-  the Workers Paid plan requirement when that is the cause.
-- CI type-checks the Worker: `wrangler types` + `tsc --noEmit` on every push and PR.
-
-### Changed
-
-- Room resolution uses `AgentDeps` on `AgentSession.userdata` instead of a process-wide `ContextVar`.
-- Config and usage types live in `domain/`; pipeline construction lives in `runtime/pipeline.py`.
-- Data-channel routing extracted from the entrypoint into `DataMessageRouter`.
-- Search results publish through `LiveKitRoomPublisher` with a single 14 KB trim policy.
-- **100% statement and branch coverage**, enforced: `fail_under = 100` is blocking, so a
-  line that is not exercised does not merge. The only exclusions are `if TYPE_CHECKING:`
-  and `@overload`, plus two narrowly-scoped pragmas (an import guard the installed
-  environment decides, and the process entry point); the rules are in `pyproject.toml`
-  and [docs/testing.md](./docs/testing.md).
-
-### Fixed
 
 - `on_enter` signature matches the framework (no `room` argument), restoring duplicate-agent detection and `self.room`.
 - Assistant turns persist to Zep via `conversation_item_added` (the previous hook was never dispatched).
