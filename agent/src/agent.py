@@ -4,6 +4,7 @@ import asyncio
 from typing import Any
 
 from livekit.agents import Agent
+from livekit.agents.voice.agent import find_function_tools
 
 from .constants import Timeouts
 from .domain import KwamiConfig, build_system_prompt
@@ -17,6 +18,7 @@ from .tools import (
     PipelineControlMixin,
     TradingToolsMixin,
 )
+from .tools.limits import trim_client_tools
 from .utils.logging import get_logger
 from .utils.room import should_disconnect_as_duplicate
 
@@ -90,9 +92,13 @@ class KwamiAgent(
         # Build system prompt
         instructions = self._build_system_prompt()
 
-        # Get client tools to pass to parent Agent
-        combined_tools = self.client_tools.create_client_tools()
-        self._tools = combined_tools
+        # Only the client tools go to the parent: the framework builds
+        # `Agent._tools` as `tools + find_function_tools(self)`, so passing the
+        # built-ins here would double them. They are counted, not passed,
+        # because the provider's 128-tool ceiling applies to the sum -- and one
+        # tool over it is a 400 on every turn, not a degraded feature.
+        builtin_count = len(find_function_tools(type(self)))
+        self._tools = trim_client_tools(builtin_count, self.client_tools.create_client_tools())
 
         super().__init__(
             instructions=instructions,

@@ -9,6 +9,7 @@ from livekit.agents.voice.agent import find_function_tools
 
 from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..memory import create_memory
+from ..tools.limits import enforce_tool_limit
 from ..utils.logging import get_logger, log_error
 from ..utils.provider import detect_provider_change, strip_model_prefix
 from .realtime import (
@@ -693,12 +694,17 @@ async def update_tools(
         # agent evaluates `realtime_llm_session`, which raises when there is no
         # running activity.
         builtin_tools = find_function_tools(type(agent))
-        await agent.update_tools(builtin_tools + client_tools)
+        # Capped at the provider's ceiling: the frontend decides how many client
+        # tools arrive, and one over the limit is a 400 on every turn rather
+        # than one missing feature.
+        combined = enforce_tool_limit(builtin_tools, client_tools)
+        await agent.update_tools(combined)
 
         logger.info(
-            "update_tools: registered %d client tools alongside %d built-in tools",
+            "update_tools: registered %d client tools alongside %d built-in tools (%d total)",
             len(client_tools),
             len(builtin_tools),
+            len(combined),
         )
     except Exception as e:
         log_error(logger, "update_tools: failed to register client tools", e)
