@@ -351,3 +351,197 @@ async def test_a_socket_with_no_state_attribute_is_read_by_the_old_flag() -> Non
 
 def test_no_socket_is_not_connected() -> None:
     assert CDPConnection().is_connected is False
+
+
+# -- the discovery fallbacks ------------------------------------------------
+
+
+@respx.mock
+async def test_a_failing_json_list_falls_through_to_json_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The HTTP base can be up while `/json/list` is not.
+
+    Falling through rather than giving up is what lets a browser that has not
+    finished opening its first page still be reached.
+    """
+    respx.get(f"{CDP_BASE}/json/list").side_effect = [
+        httpx.Response(503),
+        _targets({"id": "T1", "webSocketDebuggerUrl": PAGE_WS}),
+    ]
+    respx.get(f"{CDP_BASE}/json/version").mock(
+        return_value=httpx.Response(200, json={"webSocketDebuggerUrl": BROWSER_WS})
+    )
+
+    class BrowserSocket:
+        async def send(self, raw: str) -> None: ...
+
+        async def recv(self) -> str:
+            return json.dumps({"id": 1, "result": {"targetId": "T1"}})
+
+        async def close(self) -> None: ...
+
+        async def __aenter__(self) -> BrowserSocket:
+            return self
+
+        async def __aexit__(self, *exc: Any) -> None: ...
+
+    import websockets
+
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: BrowserSocket())
+
+    assert await CDPConnection()._resolve_ws_url(CDP_BASE) == PAGE_WS
+
+
+@respx.mock
+async def test_a_version_response_with_no_socket_url_is_an_error() -> None:
+    """Nothing to connect to; say so rather than opening `None`."""
+    respx.get(f"{CDP_BASE}/json/list").mock(return_value=_targets())
+    respx.get(f"{CDP_BASE}/json/version").mock(return_value=httpx.Response(200, json={}))
+
+    with pytest.raises(ValueError, match="No webSocketDebuggerUrl"):
+        await CDPConnection()._resolve_ws_url(CDP_BASE)
+
+
+# -- the reader loop --------------------------------------------------------
+
+
+async def test_a_dropped_socket_fails_everyone_still_waiting() -> None:
+    """Otherwise each pending command blocks for its full timeout instead."""
+
+    class Dropping:
+        def __aiter__(self) -> Dropping:
+            return self
+
+        async def __anext__(self) -> str:
+            raise ConnectionResetError("socket died")
+
+    conn = CDPConnection()
+    conn._ws = Dropping()  # type: ignore[assignment]
+    waiting = asyncio.get_running_loop().create_future()
+    settled = asyncio.get_running_loop().create_future()
+    settled.set_result({"id": 2, "result": {}})
+    conn._pending = {1: waiting, 2: settled}
+
+    await conn._reader_loop()
+
+    assert isinstance(waiting.exception(), ConnectionError)
+    assert settled.result() == {"id": 2, "result": {}}, (
+        "an answer that had already arrived was overwritten by the disconnect"
+    )
+
+
+async def test_the_reader_ignores_messages_that_match_nothing() -> None:
+    """CDP events carry no id, and a late reply may have no pending future."""
+
+    class Stream:
+        def __init__(self) -> None:
+            self._messages = [
+                json.dumps({"method": "Page.loadEventFired", "params": {}}),
+                json.dumps({"id": 99, "result": {}}),
+                json.dumps({"id": 1, "result": {"ok": True}}),
+            ]
+
+        def __aiter__(self) -> Stream:
+            return self
+
+        async def __anext__(self) -> str:
+            if not self._messages:
+                raise StopAsyncIteration
+            return self._messages.pop(0)
+
+    conn = CDPConnection()
+    conn._ws = Stream()  # type: ignore[assignment]
+    waiting = asyncio.get_running_loop().create_future()
+    conn._pending = {1: waiting}
+
+    await conn._reader_loop()
+
+    assert waiting.result() == {"id": 1, "result": {"ok": True}}
+
+
+async def test_closing_cancels_a_reader_that_is_still_running() -> None:
+    """The reader holds the socket; leaving it alive leaks the connection."""
+
+    class Forever:
+        def __aiter__(self) -> Forever:
+            return self
+
+        async def __anext__(self) -> str:
+            await asyncio.sleep(3600)
+            raise StopAsyncIteration  # pragma: no cover - never reached
+
+        async def close(self) -> None: ...
+
+    conn = CDPConnection()
+    conn._ws = Forever()  # type: ignore[assignment]
+    conn._reader_task = asyncio.create_task(conn._reader_loop())
+    await asyncio.sleep(0)
+
+    await conn.close()
+
+    assert conn._reader_task.done()
+
+
+# -- reading the page -------------------------------------------------------
+
+
+async def test_page_info_asks_the_page_for_its_elements() -> None:
+    """The stamped-element script is what every click and type depends on."""
+    captured: list[str] = []
+
+    class EvaluatingSocket(ScriptedSocket):
+        async def send(self, raw: str) -> None:
+            message = json.loads(raw)
+            self.sent.append(message)
+            captured.append(message["params"]["expression"])
+            await self._outbox.put(
+                json.dumps(
+                    {
+                        "id": message["id"],
+                        "result": {
+                            "result": {
+                                "value": {"title": "T", "text": "", "elements": [], "html": ""}
+                            }
+                        },
+                    }
+                )
+            )
+
+    socket = EvaluatingSocket()
+    conn = CDPConnection()
+    conn._ws = socket  # type: ignore[assignment]
+    conn._reader_task = asyncio.create_task(conn._reader_loop())
+
+    info = await conn.page_info()
+
+    assert info["title"] == "T"
+    script = captured[0]
+    assert "data-kwami-id" in script, "elements are not stamped, so clicks cannot address them"
+    assert "getBoundingClientRect" in script, "no coordinates, so nothing can be clicked"
+    await conn.close()
+
+
+async def test_going_forward_moves_to_the_next_history_entry() -> None:
+    """Forward is only meaningful when there is somewhere ahead to go."""
+    replies = {
+        "Page.getNavigationHistory": {
+            "result": {
+                "currentIndex": 0,
+                "entries": [{"id": 1}, {"id": 2}],
+            }
+        },
+        "Page.navigateToHistoryEntry": {"result": {}},
+    }
+    socket = ScriptedSocket(replies)
+    conn = CDPConnection()
+    conn._ws = socket  # type: ignore[assignment]
+    conn._reader_task = asyncio.create_task(conn._reader_loop())
+
+    await conn.go_forward()
+
+    sent = [message["method"] for message in socket.sent]
+    assert "Page.navigateToHistoryEntry" in sent
+    entry = next(m for m in socket.sent if m["method"] == "Page.navigateToHistoryEntry")
+    assert entry["params"]["entryId"] == 2, "it went back, or nowhere"
+    await conn.close()
