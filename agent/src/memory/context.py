@@ -133,8 +133,10 @@ async def setup_context_template(
             )
             logger.debug(f"Updated context template: {template_id}")
             return template_id
-        except Exception:
-            pass
+        except Exception as e:
+            # Expected on first use: there is nothing to update yet. Logged so
+            # a template that can never be updated is visible rather than silent.
+            logger.debug(f"Could not update context template {template_id}, creating: {e}")
 
         # Create new template
         await client.context.create_context_template(
