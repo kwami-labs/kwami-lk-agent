@@ -106,6 +106,7 @@ class Settings:
                     "DEEPGRAM_API_KEY",
                     "CARTESIA_API_KEY",
                     "ELEVEN_API_KEY",
+                    "ELEVENLABS_API_KEY",
                     "ASSEMBLYAI_API_KEY",
                     "GOOGLE_API_KEY",
                     "GOOGLE_APPLICATION_CREDENTIALS",

@@ -238,7 +238,9 @@ class EnvVars:
     ELEVENLABS = ["ELEVEN_API_KEY", "ELEVENLABS_API_KEY"]
     CARTESIA = ["CARTESIA_API_KEY"]
     DEEPGRAM = ["DEEPGRAM_API_KEY"]
-    GOOGLE = ["GOOGLE_APPLICATION_CREDENTIALS"]
+    # Both spellings count: a service-account file is what the plugin wants,
+    # but `.env.sample` documents the API key and either one means "configured".
+    GOOGLE = ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_API_KEY"]
     ZEP = ["ZEP_API_KEY"]
 
 
