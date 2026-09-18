@@ -1,6 +1,6 @@
 # Testing
 
-Four layers under `agent/tests/`. The default pytest run is **offline, free,
+Five layers under `agent/tests/`. The default pytest run is **offline, free,
 and fast**. Live tests are opted in.
 
 ```mermaid

@@ -94,7 +94,7 @@ in place.
 
 ## Testing
 
-Four layers under `agent/tests/`:
+Five layers under `agent/tests/`:
 
 - **`unit/`** — pure logic: config parsing, prompt building, usage maths, URL safety.
 - **`contract/`** — this codebase's assumptions checked against the *real* installed
