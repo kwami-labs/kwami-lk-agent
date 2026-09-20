@@ -188,12 +188,15 @@ signature meant this guard never ran.
 - No multi-tenant isolation inside one process beyond per-job `SessionState`
 - No guarantee that a determined model-plus-hostile-page pair cannot exfiltrate
   a logged-in browser profile if `KWAMI_ALLOW_BROWSER_JS=1`
-- **No validation past the first hop.** `validate_url_async` checks the URL the
-  agent is asked to open; the cloud browser then follows redirects on its own.
-  A public URL that 302s to `169.254.169.254` is not covered, and
-  `read_navigation_page` feeds whatever it lands on to the model. The same gap
-  covers DNS rebinding: the name is resolved once here and again by the browser,
-  and nothing guarantees the two answers match
+- **No prevention of the first fetch after a redirect.** The landing URL *is*
+  now checked: after navigating, `CloudBrowserSession._verify_landing_url` reads
+  the page's actual URL and, if it is one we would have refused, leaves for
+  `about:blank` and tells the model it cannot show what was there. That stops
+  the content reaching the model. It does not stop the browser having fetched
+  it — by the time the final URL is readable the request has happened. The same
+  residue covers DNS rebinding: the name is resolved once here and again by the
+  browser, and nothing guarantees the two answers match. The exposure is a
+  request from the vendor's network, not ours
 
 ## Checklist for future changes
 

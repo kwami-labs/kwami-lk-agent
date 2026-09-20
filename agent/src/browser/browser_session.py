@@ -21,12 +21,15 @@ from typing import Any
 from ..utils.logging import get_logger
 from .cloud_browser import CDPConnection
 from .providers import BrowserProviderPort, LaunchedBrowser, create_browser_provider
-from .safety import validate_url
+from .safety import UnsafeURLError, validate_url
 
 logger = get_logger("browser.session")
 
 # Auto-close cloud browser after this many seconds of inactivity
 IDLE_TIMEOUT_SECONDS = 5 * 60  # 5 minutes
+
+#: Where the browser is sent when a page redirects somewhere refused.
+BLANK_PAGE = "about:blank"
 
 
 class CloudBrowserSession:
@@ -244,7 +247,76 @@ class CloudBrowserSession:
 
         # Wait a moment for page to start loading
         await asyncio.sleep(1.5)
+
+        landed = await self._verify_landing_url()
+        if landed is not None:
+            return landed
+
         return f"Navigating to {url}. The user can see the page in their browser panel."
+
+    async def _verify_landing_url(self) -> str | None:
+        """Re-check where the page actually ended up, after redirects.
+
+        Only the URL the agent was *asked* to open was ever validated, and the
+        browser then follows redirects on its own. A public URL that 302s to
+        `169.254.169.254` was therefore uncovered -- and `read_page` feeds
+        whatever it landed on straight to the model.
+
+        This closes the practical half of that gap by checking the final URL and
+        leaving the page if it is one we would have refused. It does not close
+        the theoretical half: the page has already been fetched by the time we
+        look, so this limits what the *model* can be shown, not what the browser
+        touched. The remaining exposure is recorded under "What this agent does
+        not do" in docs/security.md rather than papered over.
+
+        Returns a message when the landing URL was refused, or None when it was
+        fine -- so the caller can report it in the same breath as the navigation.
+        """
+        try:
+            info = await self._connection.page_info()
+        except Exception as e:
+            # A page that will not report itself is not evidence of an attack.
+            logger.debug("Could not read the landing URL after navigation: %s", e)
+            return None
+
+        final_url = (info or {}).get("url") if isinstance(info, dict) else None
+        if not isinstance(final_url, str) or not final_url.strip():
+            return None
+        if final_url == self._current_url:
+            return None
+
+        try:
+            validate_url(final_url)
+        except UnsafeURLError as e:
+            logger.warning(
+                "Navigation landed on a refused address after redirect: %s (%s)",
+                final_url[:120],
+                e,
+            )
+            await self._leave_unsafe_page()
+            return (
+                "That link redirected somewhere I'm not allowed to open, so I've "
+                "left the page. I can't show you what was there."
+            )
+
+        logger.info("Navigation redirected to %s", final_url[:120])
+        self._current_url = final_url
+        await self._publish_session_event("update", url=final_url)
+        return None
+
+    async def _leave_unsafe_page(self) -> None:
+        """Move off a page that redirected somewhere it should not have.
+
+        `about:blank` rather than closing the browser: the session is still the
+        user's, the profile is still valid, and taking the whole browser away
+        over one bad link is a worse outcome than leaving the page.
+        """
+        self._current_url = ""
+        try:
+            await self._connection.navigate(BLANK_PAGE)
+            await self._publish_session_event("update", url=BLANK_PAGE)
+        except Exception as e:
+            logger.warning("Could not leave the refused page: %s", e)
 
     async def go_back(self) -> str:
         """Navigate back in history."""

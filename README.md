@@ -169,8 +169,10 @@ user's cookies and logins:
 - A browser is never started for a session without a real `kwami_id`, because
   profiles are per-user and a shared one would leak logins between users.
 
-Only the *initial* URL is validated; the browser then follows redirects. See
-"What this agent does not do" in [docs/security.md](./docs/security.md).
+The landing URL is re-checked after redirects: a link that ends up somewhere
+refused is abandoned and the model is told it cannot show the page. What that
+cannot undo is the fetch itself — see "What this agent does not do" in
+[docs/security.md](./docs/security.md).
 
 Details: [docs/security.md](./docs/security.md).
 

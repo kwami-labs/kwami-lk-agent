@@ -544,3 +544,118 @@ async def test_the_cdp_accessor_refuses_when_there_is_no_connection() -> None:
     assert session._cdp is None
     with pytest.raises(RuntimeError, match="No active cloud browser session"):
         _ = session._connection
+
+
+# -- Redirects: only the first hop was ever checked ---------------------------
+#
+# `validate_url` runs on the URL the agent is *asked* to open. The browser then
+# follows redirects on its own, so a public URL that 302s to 169.254.169.254 was
+# uncovered — and `read_page` feeds whatever it landed on to the model.
+
+
+class _RedirectingCDP:
+    """A CDP connection whose page ends up somewhere other than it was sent."""
+
+    def __init__(self, lands_on: str) -> None:
+        self.is_connected = True
+        self.lands_on = lands_on
+        self.navigations: list[str] = []
+
+    async def navigate(self, url: str) -> None:
+        self.navigations.append(url)
+
+    async def page_info(self) -> dict[str, str]:
+        return {"url": self.lands_on, "title": "somewhere"}
+
+
+def _session_landing_on(url: str) -> tuple[CloudBrowserSession, _RedirectingCDP]:
+    session = CloudBrowserSession()
+    cdp = _RedirectingCDP(url)
+    session._cdp = cdp  # type: ignore[assignment]
+    session._browser_id = "browser-1"
+    return session, cdp
+
+
+async def test_a_redirect_to_a_refused_address_leaves_the_page(monkeypatch) -> None:
+    monkeypatch.setattr(session_module, "IDLE_TIMEOUT_SECONDS", 3600)
+    session, cdp = _session_landing_on("http://169.254.169.254/latest/meta-data/")
+
+    result = await session.navigate("https://example.com")
+
+    assert "not allowed to open" in result
+    assert cdp.navigations[-1] == session_module.BLANK_PAGE
+    assert session._current_url == ""
+
+
+async def test_a_redirect_to_a_public_address_is_followed_and_recorded(monkeypatch) -> None:
+    """A normal redirect — http to https, a shortener — must not be refused."""
+    monkeypatch.setattr(session_module, "IDLE_TIMEOUT_SECONDS", 3600)
+    session, _ = _session_landing_on("https://example.com/landing")
+
+    result = await session.navigate("https://example.com")
+
+    assert "not allowed" not in result
+    assert session._current_url == "https://example.com/landing"
+
+
+async def test_no_redirect_is_the_quiet_path(monkeypatch) -> None:
+    monkeypatch.setattr(session_module, "IDLE_TIMEOUT_SECONDS", 3600)
+    session, cdp = _session_landing_on("https://example.com")
+
+    result = await session.navigate("https://example.com")
+
+    assert "Navigating to" in result
+    assert cdp.navigations == ["https://example.com"]
+
+
+async def test_a_page_that_will_not_report_itself_is_not_treated_as_an_attack(
+    monkeypatch,
+) -> None:
+    """A CDP failure is not evidence of a redirect, and refusing on it would
+    break ordinary browsing whenever the page was slow."""
+    monkeypatch.setattr(session_module, "IDLE_TIMEOUT_SECONDS", 3600)
+    session, cdp = _session_landing_on("https://example.com")
+
+    async def explode() -> dict[str, str]:
+        raise RuntimeError("target closed")
+
+    cdp.page_info = explode  # type: ignore[assignment]
+
+    assert "Navigating to" in await session.navigate("https://example.com")
+
+
+@pytest.mark.parametrize("info", [None, {}, {"url": ""}, {"url": 42}, "not a dict"])
+async def test_an_unusable_page_info_is_ignored(monkeypatch, info) -> None:
+    monkeypatch.setattr(session_module, "IDLE_TIMEOUT_SECONDS", 3600)
+    session, cdp = _session_landing_on("https://example.com")
+
+    async def page_info() -> object:
+        return info
+
+    cdp.page_info = page_info  # type: ignore[assignment]
+
+    assert "Navigating to" in await session.navigate("https://example.com")
+
+
+async def test_failing_to_leave_the_page_is_still_reported(monkeypatch, caplog) -> None:
+    """The refusal message is what stops the model reading the page, so it has
+    to survive the browser refusing to move."""
+    import logging
+
+    monkeypatch.setattr(session_module, "IDLE_TIMEOUT_SECONDS", 3600)
+    session, cdp = _session_landing_on("http://169.254.169.254/")
+
+    calls: list[str] = []
+
+    async def navigate(url: str) -> None:
+        calls.append(url)
+        if url == session_module.BLANK_PAGE:
+            raise RuntimeError("target closed")
+
+    cdp.navigate = navigate  # type: ignore[assignment]
+
+    with caplog.at_level(logging.WARNING):
+        result = await session.navigate("https://example.com")
+
+    assert "not allowed to open" in result
+    assert "Could not leave the refused page" in caplog.text
