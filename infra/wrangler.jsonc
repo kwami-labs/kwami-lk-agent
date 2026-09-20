@@ -24,6 +24,10 @@
     // The Worker beside this already logs JSON; matching it means one
     // aggregator query covers both halves of a session.
     "KWAMI_LOG_FORMAT": "json",
+    // Tracing is off until an endpoint is set. Standard OTEL_* names, so
+    // pointing this at a collector is a deploy-time decision.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    "OTEL_SERVICE_NAME": "kwami-lk-agent",
   },
   "triggers": {
     "crons": ["*/2 * * * *"],
@@ -83,6 +87,10 @@
     // The Worker beside this already logs JSON; matching it means one
     // aggregator query covers both halves of a session.
     "KWAMI_LOG_FORMAT": "json",
+    // Tracing is off until an endpoint is set. Standard OTEL_* names, so
+    // pointing this at a collector is a deploy-time decision.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    "OTEL_SERVICE_NAME": "kwami-lk-agent",
       },
       "triggers": {
         "crons": ["*/2 * * * *"],

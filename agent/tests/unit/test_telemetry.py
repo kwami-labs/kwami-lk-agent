@@ -23,7 +23,6 @@ from src.telemetry import (
     parse_headers,
 )
 
-
 # -- Headers ------------------------------------------------------------------
 
 

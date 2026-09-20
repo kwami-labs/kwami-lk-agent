@@ -40,6 +40,9 @@ export const CONTAINER_SECRET_KEYS = [
   // Settings reads both; only one of the two ever reached the container.
   "ELEVENLABS_API_KEY",
   "KWAMI_API_KEY",
+  // Carries the trace backend's API key ("api-key=..."), so it is a secret
+  // rather than a var even though the other OTEL_* settings are not.
+  "OTEL_EXPORTER_OTLP_HEADERS",
 ] as const;
 
 /**
@@ -60,6 +63,8 @@ export function containerEnvFromWorker(env: Env): Record<string, string> {
     KWAMI_ALLOW_BROWSER_JS: env.KWAMI_ALLOW_BROWSER_JS,
     KWAMI_BROWSER_PROVIDER: env.KWAMI_BROWSER_PROVIDER,
     KWAMI_LOG_FORMAT: env.KWAMI_LOG_FORMAT,
+    OTEL_EXPORTER_OTLP_ENDPOINT: env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    OTEL_SERVICE_NAME: env.OTEL_SERVICE_NAME,
   };
 
   const secrets = env as Env & Partial<Record<ContainerSecretKey, string>>;
