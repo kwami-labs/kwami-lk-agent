@@ -158,3 +158,39 @@ flowchart TD
 
 Switching TTS provider clears the previous provider's model and voice so a
 Cartesia `sonic-3` id is not sent to OpenAI.
+
+## Tool availability follows credentials
+
+Built-in tools whose credential is absent are not registered. This is not a
+preference — a tool that cannot work is withheld so the model never picks it and
+spends the user's turn on "that is not configured".
+
+| Missing credential | Tools withheld |
+| --- | --- |
+| `SERPAPI_KEY` | `product_search` |
+| `TAVILY_API_KEY` | `web_search`, `deep_research` |
+| `ZEP_API_KEY` | `remember_fact`, `recall_memories` |
+| `BROWSERBASE_API_KEY` *and* `BROWSER_USE_API_KEY` | all browser and media tools |
+
+`get_memory_status` is never withheld: "do you remember me?" is a fair question
+to ask an agent with no memory, and it is the one tool whose honest answer is
+"memory is not configured".
+
+The table lives in `src/domain/tool_gating.py`, and a test asserts every gated
+name is a real tool — a rename that orphaned a gate would silently start
+offering a tool that cannot work.
+
+## Where the environment is defined
+
+`Settings.ENV_VAR_NAMES` (`src/settings.py`) is the single inventory of every
+variable the agent reads. Three things derive from it rather than restating it,
+because all three had silently drifted:
+
+- the test suite's credential scrub (`tests/conftest.py`)
+- the Cloudflare Worker's forwarded environment (`infra/src/env.ts`)
+- `infra/secrets.example.json`
+
+`tests/unit/test_settings_env_inventory.py` fails if the inventory drifts from
+what `from_env` actually reads; `tests/unit/test_worker_env_parity.py` fails if
+the Worker stops forwarding one.
+

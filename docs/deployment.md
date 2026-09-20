@@ -123,6 +123,44 @@ it is not reported as a flat `error`. **Cloudflare Containers requires the
 Workers Paid plan**; on a free account the health route returns `degraded` with
 a `hint` naming that as the cause.
 
+### The Worker's control endpoints
+
+`POST /start` boots a container and requires `Authorization: Bearer
+$KWAMI_ADMIN_TOKEN`. It **fails closed**: with no `KWAMI_ADMIN_TOKEN` secret
+set, the route answers 401 regardless. That is deliberate — `/health` and the
+two-minute keepalive cron already start the container on their own, so `/start`
+is an operator convenience, and the Worker is published to `*.workers.dev` with
+preview URLs enabled, so an unauthenticated route that starts paid compute is
+reachable by anyone who finds the hostname.
+
+```bash
+cd infra && pnpm secrets:bulk secrets.json   # includes KWAMI_ADMIN_TOKEN
+curl -X POST https://<worker>/start -H "Authorization: Bearer $KWAMI_ADMIN_TOKEN"
+```
+
+`/health`, `/status`, `/` and `/ready` stay unauthenticated — the Containers
+runtime uses `/health` as its `pingEndpoint`. They report status only; the raw
+runtime error text goes to the Worker log, not to the response.
+
+### Staging shares production's LiveKit project and API
+
+`make deploy-cf-staging` currently deploys a separate Worker
+(`kwami-lk-agent-staging`) that connects to the **production** LiveKit project
+and the **production** Kwami API. Sessions it serves are real sessions and the
+credits they consume are real credits.
+
+The `staging` block in `infra/wrangler.jsonc` carries a `FIXME(staging)` with
+what has to change. Until it does, treat a staging deploy as a production one.
+
+### Google credentials on Cloudflare
+
+`GOOGLE_APPLICATION_CREDENTIALS` is a path to a service-account JSON file, and
+no such file exists in the container image — forwarding the variable would
+point the Google SDK at something that is not there, so the Worker deliberately
+does not forward it (see `infra/src/env.ts`). Use `GOOGLE_API_KEY` on this
+target. `tests/unit/test_worker_env_parity.py` allowlists it explicitly, with
+this reason, so it cannot be "fixed" by adding it back.
+
 ### Configuration and secrets
 
 Non-secret values live in `wrangler.jsonc` under `vars` (`ENVIRONMENT`,

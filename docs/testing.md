@@ -65,6 +65,21 @@ Conversation, memory, and reconfiguration against real providers. Spends
 money. Runs on a nightly cron, `workflow_dispatch`, and push to `main` — not
 as a pull-request gate.
 
+## Drift guards
+
+Four tests exist because the same class of bug happened four times: two lists
+that must agree, kept in step by hand, and nobody noticing when they stopped.
+
+| Test | Keeps in step |
+| --- | --- |
+| `test_settings_env_inventory.py` | `ENV_VAR_NAMES` and what `from_env` reads |
+| `test_worker_env_parity.py` | `Settings` and `infra/src/env.ts` |
+| `test_dockerfile_parity.py` | `agent/Dockerfile` and `infra/container/Dockerfile` |
+| `test_health_heartbeat.py` | the heartbeat path the agent writes and the probe reads |
+
+Each reads the other file and compares. A comment asking people to keep two
+files aligned is not a mechanism; these are.
+
 ## Coverage
 
 ```bash

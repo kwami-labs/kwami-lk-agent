@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Voice, speed and language changes are no longer lost.** `change_voice`,
+  `change_speaking_speed` and `change_language` retuned the live TTS/STT and
+  never wrote back to `kwami_config.voice`, so `get_current_voice_settings`
+  reported the *previous* voice and the next rebuild — a config message,
+  `change_ai_model`, `switch_pipeline_mode` — silently reverted the change. The
+  same bug existed a second time on the wire path, in
+  `config_handler._update_stt_if_needed`, which pushed `stt_language` live but
+  never stored it.
+- **`soul.language` now reaches the model.** It was parsed, documented and
+  settable for several releases and read by nothing, so an agent configured for
+  Spanish transcribed and spoke Spanish while writing its replies in English.
+- **`get_current_time` answers in the user's timezone.** It called
+  `datetime.now()` with no tzinfo; on both deploy targets that clock is UTC,
+  presented as though it were local. Resolution order is now the `config`
+  message, then the LiveKit participant's `timezone` attribute, then UTC —
+  labelled as UTC rather than passed off as local time.
+- **Browserbase credentials reach the Cloudflare container.** Browserbase is the
+  default vendor and neither `BROWSERBASE_API_KEY` nor `BROWSERBASE_PROJECT_ID`
+  was forwarded by the Worker, so that deploy target fell back to Browser Use —
+  signing users out of every site they were logged into — or had no browser at
+  all. `ELEVENLABS_API_KEY`, documented as an accepted alias, was missing too.
+- **The container health probe can fail.** It answered `{"status": "ok"}`
+  whenever its own HTTP thread was alive, so a worker that was running but not
+  registered with LiveKit — a dropped websocket, an auth loop — was
+  indistinguishable from one taking calls. It now reads a heartbeat the worker
+  writes on `worker_registered` and reports `degraded` when it is absent or stale.
+- **Test isolation.** `conftest.py` stripped 23 environment variables while
+  `Settings` read 25. With the missing five exported the suite reported
+  `2 failed, 1905 passed` — one of them the test asserting the browser's
+  JavaScript execution default, making a security default depend on the
+  developer's shell.
+- The "recent" research angle no longer hardcodes a year; it would have started
+  biasing every research pass towards a stale one on 1 January.
+- Three CVEs in transitive dependencies (`anyio`, `click`).
+
+### Added
+
+- `timezone` and `locale` on `KwamiConfig`, and on the `config` wire message.
+- Credential-based tool gating (`domain/tool_gating.py`). Built-in tools whose
+  credential is absent are no longer registered: a deployment with none offers
+  the model 21 tools rather than 40, so it cannot pick one that will answer
+  "not configured".
+- A process-wide pooled HTTP client. Eighteen call sites built their own
+  `httpx.AsyncClient()` per request, paying a fresh TLS handshake each time on a
+  path where the user is listening to silence.
+- `ToolResult` / `refusal` / `was_refused`: a tool refusal is now a flag rather
+  than something inferred from the prose of its message. `browser_open_request`
+  detected refusal with `result.startswith(("I can't", "Cannot", "Failed"))`, so
+  rewording one sentence would have silently restored a silent failure.
+- Security workflow: `pip-audit`, `pnpm audit`, CodeQL and gitleaks, plus
+  `dependabot.yml` and `CODEOWNERS` in the repository rather than in settings.
+- Drift guards for the four pairs of lists that had to agree and had stopped:
+  the environment inventory, the Worker's forwarded env, the two Dockerfiles,
+  and the heartbeat path.
+
+### Changed
+
+- **Every module under `src/` is type-checked.** The `ignore_errors` exemption
+  list covered 13 modules carrying 81 errors; they were cleared and the list
+  deleted, so nothing can be added to it.
+- Ruff now runs `ASYNC`, `B`, `DTZ`, `G`, `PERF`, `RUF`, `S`, `SIM` and `TRY`.
+  122 f-string log calls became lazy `%` formatting and 22 `logger.error` calls
+  inside `except` became `logger.exception`, which is the difference between a
+  one-line symptom and a traceback.
+- **User content is no longer logged.** Remembered facts and user names went to
+  INFO verbatim; they now go through `redacted()`, which records length and at
+  most a leading character.
+- Both Docker images are multi-stage: `gcc`, `g++` and `python3-dev` no longer
+  ship in the runtime image.
+- Greeting wording moved to `domain/greeting.py`, leaving only the memory
+  lookups on the agent.
+- GitHub Actions are pinned by SHA and every workflow declares least-privilege
+  `permissions`.
+
 ## [1.0.0] - 2026-09-18
 
 ### Added

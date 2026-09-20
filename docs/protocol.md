@@ -39,11 +39,14 @@ Full identity and pipeline. Replaces the placeholder agent. See
   "type": "config",
   "kwamiId": "kwami_<authUserId>_<kwamiId>",
   "kwamiName": "Ada",
+  "timezone": "Europe/Madrid",
+  "locale": "en-GB",
   "soul": {
     "name": "Ada",
     "personality": "A calm research partner",
     "systemPrompt": "",
     "traits": ["curious"],
+    "language": "en",
     "conversationStyle": "friendly",
     "responseLength": "medium",
     "emotionalTone": "warm",
@@ -71,6 +74,20 @@ Full identity and pipeline. Replaces the placeholder agent. See
   ]
 }
 ```
+
+**`timezone`** is an IANA zone (`Europe/Madrid`). Optional, and also accepted
+as `timeZone` or `tz`. Without it `get_current_time` falls back to the LiveKit
+participant's `timezone` attribute, and then to UTC — labelled as UTC, because
+answering in the container's clock as though it were the user's is how that tool
+was wrong before.
+
+**`locale`** is a BCP-47 tag for date and number formatting, distinct from
+`soul.language`, which decides what the model *writes*: someone can want Spanish
+replies with UK date formatting.
+
+**`soul.language`** now reaches the system prompt. It was parsed and settable
+for several releases and read by nothing, so an agent configured for Spanish
+transcribed and spoke Spanish while writing its replies in English.
 
 `soul` still accepts the legacy key `persona`. CamelCase and snake_case keys
 are both accepted (`systemPrompt` / `system_prompt`, …).

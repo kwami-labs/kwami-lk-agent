@@ -89,6 +89,12 @@ The cloud browser uses a **per-user** persistent profile. That is a feature
 (logins survive) and a hazard (the model can act as the user). Two controls
 are mandatory:
 
+### Cloud browser vendors
+
+Browserbase is the default (`KWAMI_BROWSER_PROVIDER`), with Browser Use
+Cloud as the alternative. Both keep a per-user profile carrying real cookies
+and logins, so everything below applies identically to either.
+
 ### URL validation (`browser/safety.py`)
 
 `validate_url` / `validate_url_async` reject:
@@ -182,11 +188,22 @@ signature meant this guard never ran.
 - No multi-tenant isolation inside one process beyond per-job `SessionState`
 - No guarantee that a determined model-plus-hostile-page pair cannot exfiltrate
   a logged-in browser profile if `KWAMI_ALLOW_BROWSER_JS=1`
+- **No validation past the first hop.** `validate_url_async` checks the URL the
+  agent is asked to open; the cloud browser then follows redirects on its own.
+  A public URL that 302s to `169.254.169.254` is not covered, and
+  `read_navigation_page` feeds whatever it lands on to the model. The same gap
+  covers DNS rebinding: the name is resolved once here and again by the browser,
+  and nothing guarantees the two answers match
 
 ## Checklist for future changes
 
 - New tool output that reaches the LLM must be size-capped
 - New URLs the model can open must go through `validate_url_async`
-- New env secrets belong on `Settings` and in `.env.sample`
+- New env secrets belong on `Settings` (add them to `ENV_VAR_NAMES`), in
+  `.env.sample`, in `infra/src/env.ts` and in `infra/secrets.example.json`.
+  `tests/unit/test_worker_env_parity.py` fails if the Worker does not forward
+  one; `tests/unit/test_settings_env_inventory.py` fails if the inventory
+  drifts from what `from_env` reads. The Browserbase credentials reached only
+  the first two of those four for an entire release.
 - New background work must be retained via `SessionState.spawn` or an equivalent set
 - New I/O should get a `ports/` protocol and a test fake, not a `MagicMock`

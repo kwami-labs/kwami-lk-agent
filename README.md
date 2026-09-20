@@ -41,7 +41,7 @@ kwami-lk-agent/
 │   │   ├── settings.py         # Frozen process Settings (env → values)
 │   │   ├── constants.py        # Provider, model and voice catalogues
 │   │   ├── runtime_bootstrap.py# Telephony: resolve kwami_id, fetch runtime config
-│   │   ├── domain/             # Pure: config, parsing, prompt, usage maths
+│   │   ├── domain/             # Pure: config, parsing, prompt, greeting, clock, usage maths
 │   │   ├── ports/              # I/O protocols
 │   │   ├── adapters/           # LiveKit publisher, pooled HTTP
 │   │   ├── runtime/            # dispatch, lifecycle, pipeline, AgentDeps
@@ -51,6 +51,7 @@ kwami-lk-agent/
 │   │   ├── tools/              # Built-in tools and client-side tool bridge
 │   │   ├── browser/            # Browser Use Cloud session, CDP, URL safety
 │   │   ├── usage/              # Credit reporting
+│   │   ├── health.py           # Heartbeat the container probe reads
 │   │   └── utils/              # Logging, provider parsing, room helpers
 │   ├── tests/                  # unit / contract / integration / runtime / e2e
 │   ├── livekit.toml            # LiveKit Cloud config
@@ -141,19 +142,35 @@ Details: [docs/memory.md](./docs/memory.md).
 
 ## Browsing
 
-The agent can drive a cloud browser (Browser Use Cloud) that the user watches
-live in the app. Two safety rules apply, and both matter because the browser
-keeps the user's cookies and logins:
+The agent can drive a cloud browser that the user watches live in the app. Two
+vendors are supported and selected with `KWAMI_BROWSER_PROVIDER`:
+
+- **Browserbase** (default) — persistence uses Contexts, which are reachable
+  only by an opaque id, so that id is stored through the Kwami API
+  (`browser/context_store.py`). Needs `BROWSERBASE_API_KEY` and
+  `BROWSERBASE_PROJECT_ID`.
+- **Browser Use Cloud** — profiles are addressed by name, so the user id is
+  enough. Needs `BROWSER_USE_API_KEY`.
+
+If the selected vendor has no credential the agent falls back to the other one
+and says so loudly: saved logins do not carry across vendors, so the user is
+signed out of everything they were signed in to.
+
+Three safety rules apply, and all three matter because the browser keeps the
+user's cookies and logins:
 
 - URLs are validated before navigation. Non-HTTP schemes, loopback, link-local
-  (including cloud metadata endpoints) and private ranges are refused.
+  (including cloud metadata endpoints) and private ranges are refused, including
+  when written as decimal, hex, octal or IPv4-mapped IPv6.
 - Arbitrary JavaScript execution is **disabled by default**. Page text reaches
   the model as untrusted input, so a hostile page could otherwise instruct it to
   exfiltrate session cookies. Set `KWAMI_ALLOW_BROWSER_JS=1` only if you accept
   that risk.
+- A browser is never started for a session without a real `kwami_id`, because
+  profiles are per-user and a shared one would leak logins between users.
 
-A browser is never started for a session without a real `kwami_id`, because
-profiles are per-user and a shared one would leak logins between users.
+Only the *initial* URL is validated; the browser then follows redirects. See
+"What this agent does not do" in [docs/security.md](./docs/security.md).
 
 Details: [docs/security.md](./docs/security.md).
 
@@ -204,12 +221,20 @@ CARTESIA_API_KEY=your-cartesia-key
 KWAMI_API_URL=http://localhost:8080
 KWAMI_API_KEY=your-kwami-api-key
 
-# Optional
-ZEP_API_KEY=            # persistent memory
-TAVILY_API_KEY=         # web_search
+# Optional -- each one enables its tools; without it they are not registered
+ZEP_API_KEY=            # persistent memory (remember_fact, recall_memories)
+TAVILY_API_KEY=         # web_search, deep_research
 SERPAPI_KEY=            # product_search
-BROWSER_USE_API_KEY=    # cloud browsing
+BROWSERBASE_API_KEY=    # cloud browsing (default vendor)
+BROWSERBASE_PROJECT_ID=
+BROWSER_USE_API_KEY=    # cloud browsing (alternative vendor)
 ```
+
+Built-in tools whose credential is absent are **not registered** at all, rather
+than registered and answering "not configured". A deployment with none of the
+above offers the model 21 tools instead of 40, which is that many fewer schemas
+on every request and that much less room to pick a tool that cannot work. See
+`domain/tool_gating.py`.
 
 Some LLM providers (`anthropic`, `groq`, `google`) need their own
 `livekit-plugins-*` package, declared here as optional extras. When one is not
