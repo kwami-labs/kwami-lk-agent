@@ -735,3 +735,43 @@ async def test_a_pipeline_update_to_the_current_type_is_a_voice_update(
     )
 
     assert "config" not in captured
+
+
+# -- Where the user is --------------------------------------------------------
+#
+# `get_current_time` answered in the container's naive local clock, which on
+# both deploy targets is UTC dressed up as the user's local time. The zone has
+# to arrive from somewhere; this is the good source, and a participant attribute
+# is the fallback for telephony and older app builds.
+
+
+@pytest.mark.parametrize("key", ["timezone", "timeZone", "tz"])
+async def test_the_timezone_arrives_under_any_spelling(captured, create_agent_fn, key) -> None:
+    await run_config({key: "Europe/Madrid"}, create_agent_fn)
+
+    assert captured["config"].timezone == "Europe/Madrid"
+
+
+@pytest.mark.parametrize("key", ["locale", "lang"])
+async def test_the_locale_arrives_under_any_spelling(captured, create_agent_fn, key) -> None:
+    await run_config({key: "en-GB"}, create_agent_fn)
+
+    assert captured["config"].locale == "en-GB"
+
+
+async def test_a_config_without_them_leaves_them_empty(captured, create_agent_fn) -> None:
+    """Both are optional: an app build that predates them must still work, and
+    empty is what makes the clock say UTC rather than guess."""
+    await run_config({"kwamiName": "Ada"}, create_agent_fn)
+
+    assert captured["config"].timezone == ""
+    assert captured["config"].locale == ""
+
+
+async def test_locale_is_independent_of_the_spoken_language(captured, create_agent_fn) -> None:
+    """Someone can want Spanish replies with UK date formatting; `locale` and
+    `soul.language` are not the same field."""
+    await run_config({"locale": "en-GB", "soul": {"language": "es"}}, create_agent_fn)
+
+    assert captured["config"].locale == "en-GB"
+    assert captured["config"].soul.language == "es"

@@ -233,6 +233,11 @@ async def test_a_pipeline_update_with_no_type_is_a_no_op(caplog) -> None:
         ("response_length", "short", "response_length"),
         ("emotionalTone", "upbeat", "emotional_tone"),
         ("emotional_tone", "upbeat", "emotional_tone"),
+        # `language` decides what the model writes. It was parsed into the soul
+        # config and then read by nothing at all, so a soul set to Spanish was
+        # heard and spoken in Spanish and answered in English.
+        ("language", "es", "language"),
+        ("lang", "es", "language"),
     ],
 )
 async def test_every_soul_field_updates_under_both_spellings(
@@ -323,7 +328,7 @@ async def test_an_unusable_tools_payload_is_skipped(payload: Any, caplog) -> Non
     assert "empty or non-list" in caplog.text
 
 
-async def test_client_tools_are_registered_alongside_the_builtins() -> None:
+async def test_client_tools_are_registered_alongside_the_builtins(all_tools_available) -> None:
     """The defect this guards: assigning client tools straight onto the agent
     deleted every built-in for the rest of the session."""
     agent = KwamiAgent()
