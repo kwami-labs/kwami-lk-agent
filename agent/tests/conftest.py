@@ -15,6 +15,7 @@ Fakes belong to *our* boundaries (the ports), not to the SDKs.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
@@ -28,34 +29,29 @@ if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
 
-# Every credential the code reads from the environment. Cleared by default so a
-# developer's exported keys can never change a test outcome -- `test_default_config`
-# used to fail on any machine with ZEP_API_KEY set.
-PROVIDER_ENV_VARS = (
-    "ANTHROPIC_API_KEY",
-    "ASSEMBLYAI_API_KEY",
-    "BROWSER_USE_API_KEY",
-    "CARTESIA_API_KEY",
-    "CEREBRAS_API_KEY",
-    "DEEPGRAM_API_KEY",
-    "DEEPSEEK_API_KEY",
-    "ELEVEN_API_KEY",
-    "GOOGLE_API_KEY",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GROQ_API_KEY",
-    "KWAMI_API_KEY",
-    "KWAMI_API_TIMEOUT",
-    "KWAMI_API_URL",
+from src.settings import ENV_VAR_NAMES
+
+# Variables the SDKs read directly, which `Settings` therefore never sees. They
+# still have to be cleared: a stray LIVEKIT_URL reaches livekit-agents at import
+# time, with no Settings field to hold it.
+SDK_ENV_VARS = (
+    "LIVEKIT_URL",
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
-    "LIVEKIT_URL",
-    "MISTRAL_API_KEY",
-    "OPENAI_API_KEY",
-    "SERPAPI_KEY",
-    "TAVILY_API_KEY",
-    "XAI_API_KEY",
-    "ZEP_API_KEY",
 )
+
+# Every variable the code reads from the environment. Cleared by default so a
+# developer's exported keys can never change a test outcome -- `test_default_config`
+# used to fail on any machine with ZEP_API_KEY set.
+#
+# Derived from `Settings.ENV_VAR_NAMES` rather than restated, because restating
+# it is how the two lists drifted: this tuple was hand-maintained and missed
+# BROWSERBASE_API_KEY, BROWSERBASE_PROJECT_ID, ELEVENLABS_API_KEY,
+# KWAMI_ALLOW_BROWSER_JS and KWAMI_BROWSER_PROVIDER. With those exported the
+# suite reported `2 failed, 1905 passed` -- and one of the two was
+# `test_js_execution_is_refused_by_default`, so whether the browser's
+# JavaScript security default held was a property of the developer's shell.
+PROVIDER_ENV_VARS = tuple(sorted({*ENV_VAR_NAMES, *SDK_ENV_VARS}))
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +70,42 @@ def reset_settings():
 
 
 @pytest.fixture(autouse=True)
+def reset_shared_http():
+    """Drop the process-wide HTTP pool around every test.
+
+    `adapters.http.shared_client` is a module-level singleton, so without this a
+    client built under one test's respx mock would be reused by the next -- and
+    a closed one would resurrect as a real client pointed at the internet.
+    """
+    import src.adapters.http as http_module
+
+    http_module._shared = None
+    yield
+    http_module._shared = None
+
+
+@pytest.fixture(autouse=True)
+def reset_logging_config():
+    """Undo any logging configuration a test installs.
+
+    `configure_logging` wraps the record factory and sets a formatter on every
+    root handler -- including pytest's own caplog handler. Without this, one
+    test switching to JSON changed how every later test's records were
+    formatted, which is exactly the kind of order-dependent failure that is
+    miserable to diagnose.
+    """
+    factory = logging.getLogRecordFactory()
+    root = logging.getLogger()
+    handlers = root.handlers[:]
+    formatters = [(h, h.formatter) for h in handlers]
+    yield
+    logging.setLogRecordFactory(factory)
+    root.handlers = handlers
+    for handler, formatter in formatters:
+        handler.setFormatter(formatter)
+
+
+@pytest.fixture(autouse=True)
 def isolated_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
     """Remove every provider credential from the environment.
 
@@ -84,6 +116,31 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
         return
     for name in PROVIDER_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def all_tools_available():
+    """Credentials for every gated built-in, so all forty are registered.
+
+    `KwamiAgent` withholds built-ins whose credential is absent (see
+    `domain/tool_gating.py`), and the offline suite strips every credential --
+    so by default an agent built in a test has 21 tools, not 40. Tests about
+    *client tools not displacing built-ins* need the full set to be meaningful;
+    they are not tests about gating, and should not accidentally become them.
+    """
+    from src.settings import Settings, set_settings
+
+    set_settings(
+        Settings(
+            serpapi_key="test-key-not-real",
+            tavily_api_key="test-key-not-real",
+            zep_api_key="test-key-not-real",
+            browserbase_api_key="test-key-not-real",
+            browserbase_project_id="test-project",
+        )
+    )
+    yield
+    set_settings(None)
 
 
 @pytest.fixture
