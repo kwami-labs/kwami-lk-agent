@@ -157,7 +157,7 @@ def test_client_tools_from_config_are_registered() -> None:
     assert "set_theme" in agent._registered_client_tool_names()
 
 
-def test_builtins_are_not_duplicated_on_the_agent() -> None:
+def test_builtins_are_not_duplicated_on_the_agent(all_tools_available) -> None:
     """The framework sets its tool list to `tools + find_function_tools(self)`,
     so passing the built-ins in as well would list each of them twice. The
     provider's 128-tool ceiling applies to the sum, and one tool over it is a
@@ -417,13 +417,21 @@ async def test_context_is_cached_for_the_greeting() -> None:
     assert agent._last_memory_context is context
 
 
-async def test_a_cached_user_name_is_logged(caplog) -> None:
+async def test_a_cached_user_name_is_logged_without_the_name(caplog) -> None:
+    """The name is the user's, so the log records that one was found, not which.
+
+    This test previously asserted the opposite -- that "Ada" appeared in the
+    log line. It did, at INFO, along with every fact the user asked to be
+    remembered, into whatever aggregator the deployment ships logs to.
+    """
     agent = agent_with(memory=FakeMemory(user_name="Ada"))
 
     with caplog.at_level(logging.INFO):
         await agent._inject_memory_context()
 
-    assert "Cached user name from memory: Ada" in caplog.text
+    assert "Cached user name from memory" in caplog.text
+    assert "A<3 chars>" in caplog.text
+    assert "Ada" not in caplog.text
 
 
 async def test_an_empty_context_does_not_rewrite_the_prompt() -> None:
