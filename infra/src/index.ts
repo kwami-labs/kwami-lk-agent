@@ -87,6 +87,49 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
+/**
+ * Whether a request may boot a container.
+ *
+ * `/start` was an unauthenticated POST that starts a paid compute instance, on
+ * a Worker published to `*.workers.dev` with preview URLs enabled -- reachable
+ * by anyone who guessed the hostname.
+ *
+ * Fails closed. With no `KWAMI_ADMIN_TOKEN` configured the route is refused
+ * rather than left open: `/health` and the keepalive cron already start the
+ * container on their own, so `/start` is an operator convenience, and a
+ * convenience is not worth an open door.
+ */
+function isAuthorised(request: Request, env: Env): boolean {
+  const expected = (env as Env & { KWAMI_ADMIN_TOKEN?: string }).KWAMI_ADMIN_TOKEN;
+  if (typeof expected !== "string" || expected.length === 0) {
+    return false;
+  }
+  const offered = request.headers.get("authorization") ?? "";
+  const prefix = "Bearer ";
+  if (!offered.startsWith(prefix)) {
+    return false;
+  }
+  return timingSafeEqual(offered.slice(prefix.length), expected);
+}
+
+/**
+ * Compares two strings without leaking their common prefix through timing.
+ *
+ * `a === b` on a secret returns as soon as it finds a differing byte, which is
+ * measurable across enough requests. The lengths are compared first and
+ * deliberately non-secretly: the length of the token is not the secret.
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false;
+  }
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 export default {
   async fetch(request, env): Promise<Response> {
     const url = new URL(request.url);
@@ -112,13 +155,18 @@ export default {
         const needsPaidPlan = /paid plan|unauthorized|do not have access to Cloudflare Containers/i.test(
           message,
         );
+        // The full message goes to the log, not to the response. `/health` is
+        // reachable by anyone who finds the workers.dev hostname, and runtime
+        // error text names internal identifiers and account state.
+        console.error(
+          JSON.stringify({ msg: "kwami-lk-agent health check failed", error: message }),
+        );
         return json(
           {
             status: "degraded",
             service: "kwami-lk-agent",
             worker: "ok",
             container: "unavailable",
-            error: message,
             hint: needsPaidPlan
               ? "Cloudflare Containers requires the Workers Paid plan: https://dash.cloudflare.com/?to=/:account/workers/plans"
               : undefined,
@@ -129,6 +177,9 @@ export default {
     }
 
     if (url.pathname === "/start" && request.method === "POST") {
+      if (!isAuthorised(request, env)) {
+        return json({ error: "unauthorized" }, 401);
+      }
       const state = await container.ensureRunning();
       return json({ status: "started", container: state.status });
     }
@@ -146,6 +197,12 @@ export default {
   },
 
   async scheduled(_controller, env, ctx): Promise<void> {
+    // The rejection has to be handled here. `ensureRunning()` fails whenever
+    // the account is not on the Workers Paid plan, or the image is still
+    // building, or the instance limit is reached -- and an unhandled rejection
+    // inside `waitUntil` surfaces as a failed cron invocation with no
+    // explanation attached, which is the least useful shape that information
+    // could take. Log it instead, in the same JSON the other handlers use.
     ctx.waitUntil(
       workerContainer(env)
         .ensureRunning()
@@ -154,6 +211,14 @@ export default {
             JSON.stringify({
               msg: "kwami-lk-agent keepalive",
               container: state.status,
+            }),
+          );
+        })
+        .catch((error: unknown) => {
+          console.error(
+            JSON.stringify({
+              msg: "kwami-lk-agent keepalive failed",
+              error: error instanceof Error ? error.message : String(error),
             }),
           );
         }),
