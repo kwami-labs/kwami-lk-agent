@@ -1,0 +1,53 @@
+# Dependabot was enabled in repository settings only -- an
+# `origin/dependabot/uv/agent/uv-*` branch existed with no config in the tree,
+# so what it watched was invisible to anyone reading the repo and could not be
+# reviewed in a pull request. This states it.
+version: 2
+
+updates:
+  # The agent's Python dependencies. Upper bounds in pyproject.toml are
+  # deliberate (this code calls framework internals), so a major bump arrives
+  # as a PR to be tested rather than a silent resolution.
+  - package-ecosystem: uv
+    directory: /agent
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, python]
+    groups:
+      livekit:
+        patterns: ["livekit-agents", "livekit-plugins-*"]
+      dev-tooling:
+        patterns: ["pytest*", "mypy", "ruff", "respx"]
+
+  # The Cloudflare Worker.
+  - package-ecosystem: npm
+    directory: /infra
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels: [dependencies, infra]
+    groups:
+      cloudflare:
+        patterns: ["wrangler", "@cloudflare/*"]
+
+  # Pinned by SHA in .github/workflows, which is only safe if something keeps
+  # them current -- otherwise pinning silently freezes a vulnerable action.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, ci]
+
+  # Both images build from ghcr.io/astral-sh/uv:python3.13-bookworm-slim.
+  - package-ecosystem: docker
+    directories:
+      - /agent
+      - /infra/container
+    schedule:
+      interval: weekly
+      day: monday
+    labels: [dependencies, docker]

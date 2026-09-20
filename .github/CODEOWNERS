@@ -1,0 +1,20 @@
+# Default owner for everything not matched below.
+*                           @quantium-rock
+
+# Security-relevant paths. These decide whether a URL the model chose can reach
+# a metadata endpoint, what the agent is allowed to run in a browser holding the
+# user's logins, and which credentials exist at all -- a change here should
+# never land on a drive-by review.
+/agent/src/browser/safety.py    @quantium-rock
+/agent/src/settings.py          @quantium-rock
+/docs/security.md               @quantium-rock
+/SECURITY.md                    @quantium-rock
+
+# Anything that runs in CI or ships credentials into the container.
+/.github/                       @quantium-rock
+/infra/src/env.ts               @quantium-rock
+/infra/wrangler.jsonc           @quantium-rock
+
+# The gates themselves: coverage ratchet, lint selection, mypy strictness.
+/agent/pyproject.toml           @quantium-rock
+/agent/tests/conftest.py        @quantium-rock
