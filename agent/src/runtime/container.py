@@ -80,3 +80,23 @@ def room_from_context(context: Any, fallback: Any = None) -> Any:
         return deps.room
     direct = getattr(context, "room", None) if context is not None else None
     return direct if direct is not None else fallback
+
+
+@dataclass(frozen=True)
+class SyntheticRunContext:
+    """A stand-in RunContext for work the framework did not originate.
+
+    Two data-channel routes call agent tools directly -- `browser_open_request`
+    and `search_similar` -- and there is no model turn behind either, so there is
+    no real `RunContext` to pass. Both used to build one inline with
+    `type("Ctx", (), {"room": self.room})()`, which carried a `room` and nothing
+    else. Any tool reaching for `AgentDeps` off `context.userdata` therefore got
+    None on exactly those paths, silently falling back or degrading, and the two
+    ad-hoc classes had to be kept in step by hand.
+
+    Carrying `userdata` makes these paths indistinguishable from a real tool call
+    as far as `deps_from_context` and `room_from_context` are concerned.
+    """
+
+    room: Any = None
+    userdata: AgentDeps | None = None

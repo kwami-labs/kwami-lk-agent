@@ -16,8 +16,10 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..domain.tool_result import was_refused
 from ..handlers import handle_config_update, handle_full_config, handle_tool_result
 from ..utils.logging import get_logger
+from .container import SyntheticRunContext
 
 logger = get_logger("dispatch")
 
@@ -80,6 +82,10 @@ class DataMessageRouter:
     vad: Any = None
     create_agent_fn: Any = None
     room: Any = None
+    #: The per-job container. Passed into the synthetic RunContexts below so a
+    #: tool invoked from a data message can reach `AgentDeps` exactly as it
+    #: would from a model turn.
+    deps: Any = None
 
     def handle(self, message: dict[str, Any]) -> str | None:
         """Route one message. Returns the handled type, or None if unrecognised."""
@@ -174,7 +180,7 @@ class DataMessageRouter:
             return
 
         logger.info("Opening %s in the browser panel per user request", url[:80])
-        run_context = type("Ctx", (), {"room": self.room})()
+        run_context = SyntheticRunContext(room=self.room, userdata=self.deps)
         self.state.spawn(
             self._open_and_report(agent, run_context, url.strip()),
             name="browser_open_request",
@@ -188,9 +194,15 @@ class DataMessageRouter:
         this path there is no model turn to return it to, so a refusal would
         otherwise look identical to success from outside -- which is the failure
         this whole handler exists to stop happening again.
+
+        The refusal is read off the result rather than matched against the text
+        of the sentence. This used to be
+        `result.startswith(("I can't", "Cannot", "Failed"))`, so rewording one
+        message in `navigate_to` would have quietly restored the silent failure
+        with nothing in CI to notice.
         """
         result = await agent.navigate_to(run_context, url)
-        if isinstance(result, str) and result.startswith(("I can't", "Cannot", "Failed")):
+        if was_refused(result):
             logger.warning("browser_open_request refused for %s: %s", url[:80], result)
 
     def _on_search_similar(self, message: dict[str, Any]) -> None:
@@ -200,7 +212,7 @@ class DataMessageRouter:
         title = (message.get("title") or "").strip() or "similar products"
         query = f"similar to {title[:MAX_SIMILAR_TITLE_CHARS]} buy"
         logger.info("Running similar search from client: query=%s", query[:60])
-        run_context = type("Ctx", (), {"room": self.room})()
+        run_context = SyntheticRunContext(room=self.room, userdata=self.deps)
         self.state.spawn(
             agent.web_search(
                 run_context, query, max_results=SIMILAR_SEARCH_RESULTS, search_for_products=True
