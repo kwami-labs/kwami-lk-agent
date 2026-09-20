@@ -26,7 +26,7 @@ def handle_tool_result(
         return
 
     if not agent:
-        logger.warning(f"No agent available to handle tool result: {tool_call_id}")
+        logger.warning("No agent available to handle tool result: %s", tool_call_id)
         return
 
     # Check if agent has client_tools manager
@@ -36,4 +36,4 @@ def handle_tool_result(
         # Fallback to direct method on agent
         agent.handle_tool_result(tool_call_id, result, error)
     else:
-        logger.warning(f"Agent cannot handle tool results: {tool_call_id}")
+        logger.warning("Agent cannot handle tool results: %s", tool_call_id)

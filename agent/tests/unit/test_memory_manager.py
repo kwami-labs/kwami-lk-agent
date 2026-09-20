@@ -626,6 +626,20 @@ async def test_flushing_with_nothing_buffered_is_a_no_op(messaging_memory) -> No
     assert messaging_memory._client.thread.added == []
 
 
+async def test_a_flush_without_a_client_clears_the_buffer_and_does_not_raise() -> None:
+    """close() can run after a failed initialize(), leaving a buffered message
+    and no client. Every other write path is guarded by `is_initialized`; this
+    one is reached directly, so it carries its own check -- without it the
+    flush raised AttributeError on None inside a shutdown callback."""
+    memory = ready_memory()
+    memory._client = None
+    memory._pending_user_message = ("hello", None)
+
+    await memory._flush_pending_message()
+
+    assert memory._pending_user_message is None
+
+
 async def test_a_flush_without_the_sdk_still_clears_the_buffer(monkeypatch) -> None:
     memory = ready_memory()
     memory._pending_user_message = ("hello", None)

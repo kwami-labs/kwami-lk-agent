@@ -143,7 +143,7 @@ def test_builtin_tools_are_discovered_by_the_framework() -> None:
         assert expected in discovered, f"{expected} is no longer discoverable"
 
 
-def test_agent_tools_property_includes_the_builtins() -> None:
+def test_agent_tools_property_includes_the_builtins(all_tools_available) -> None:
     """`Agent.tools` is what the running activity reads; built-ins must be in it.
 
     This is the invariant a `tools` config update violates by assigning

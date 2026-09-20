@@ -290,8 +290,7 @@ def test_a_realtime_construction_failure_is_logged_before_the_fallback(env_setti
     """
     env_setting("OPENAI_API_KEY", None)
 
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(Exception):
-            create_realtime_model(voice(realtime_provider="openai"))
+    with caplog.at_level(logging.ERROR), pytest.raises(Exception):
+        create_realtime_model(voice(realtime_provider="openai"))
 
     assert "Failed to create openai realtime model" in caplog.text

@@ -66,7 +66,7 @@ def test_memory_and_skip_greeting_are_threaded_through(keys: None) -> None:
     assert agent._skip_greeting is True
 
 
-def test_the_built_in_tools_survive_construction(keys: None) -> None:
+def test_the_built_in_tools_survive_construction(keys: None, all_tools_available) -> None:
     """A built agent must arrive with its 22 built-ins already discovered."""
     agent = create_agent_from_config(_config(), vad=None)
     names = {tool.info.name for tool in agent.tools}

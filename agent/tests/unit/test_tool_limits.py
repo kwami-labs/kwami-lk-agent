@@ -153,7 +153,7 @@ def _agent_with(client_tool_count: int) -> KwamiAgent:
     return KwamiAgent(config=config)
 
 
-def test_todays_real_tool_count_is_under_the_limit() -> None:
+def test_todays_real_tool_count_is_under_the_limit(all_tools_available) -> None:
     """53 client tools plus the built-ins. The headroom is worth knowing."""
     agent = _agent_with(53)
 
@@ -170,7 +170,7 @@ def test_an_agent_never_exceeds_the_limit_however_many_tools_arrive() -> None:
     assert len(agent.tools) <= MAX_TOOLS_PER_REQUEST
 
 
-def test_an_over_subscribed_agent_keeps_its_own_tools() -> None:
+def test_an_over_subscribed_agent_keeps_its_own_tools(all_tools_available) -> None:
     agent = _agent_with(300)
 
     names = {tool.info.name for tool in agent.tools}

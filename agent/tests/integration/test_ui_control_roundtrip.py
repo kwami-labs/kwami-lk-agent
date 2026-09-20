@@ -125,7 +125,9 @@ def test_the_apps_tools_become_callable_tools(agent: KwamiAgent) -> None:
         assert definition["name"] in names
 
 
-def test_registering_ui_tools_does_not_displace_the_builtins(agent: KwamiAgent) -> None:
+def test_registering_ui_tools_does_not_displace_the_builtins(
+    all_tools_available, agent: KwamiAgent
+) -> None:
     """Assigning `_tools` directly used to delete every built-in for the session."""
     names = {tool.info.name for tool in agent.tools}
 
