@@ -102,6 +102,9 @@ class KwamiApiContextStore:
             return None
 
         if response.status_code == 404:
+            # Ambiguous by design on this route: "this user has no saved context
+            # yet" and "this endpoint does not exist" look identical. The write
+            # path below can tell the difference, and says so loudly.
             return None
         if response.status_code >= 400:
             logger.warning(
@@ -129,6 +132,22 @@ class KwamiApiContextStore:
             )
         except Exception as e:
             logger.warning("Could not save the browser context (%s)", e)
+            return
+        if response.status_code == 404:
+            # A write cannot legitimately 404: the route either exists or it
+            # does not. This is the one signal that distinguishes "no context
+            # saved yet" from "context persistence is not implemented on the
+            # API at all", and without it the whole feature fails invisibly --
+            # `get` returns None forever, every session mints a fresh
+            # Browserbase Context, the user is signed out of every site each
+            # time, and the abandoned contexts keep being billed for storage.
+            logger.error(
+                "Kwami API has no %s endpoint (404 on write). Browser context "
+                "persistence is NOT working: every session will start a fresh "
+                "context, users will be signed out of every site, and the "
+                "orphaned contexts will continue to be billed.",
+                self._url("<user_id>"),
+            )
             return
         if response.status_code >= 400:
             logger.warning(

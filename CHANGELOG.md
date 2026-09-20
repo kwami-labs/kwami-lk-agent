@@ -44,6 +44,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   biasing every research pass towards a stale one on 1 January.
 - Three CVEs in transitive dependencies (`anyio`, `click`).
 
+### Known issues
+
+- **Browser context persistence has never worked in production.**
+  `browser/context_store.py` stores the Browserbase Context id through
+  `POST /internal/browser-contexts/{user_id}` on the Kwami API. That route does
+  not exist: `GET /openapi.json` on `api.kwami.io` lists exactly two internal
+  routes, and both verbs answer 404. Every failure path in the store returns
+  `None` by design, so this failed in complete silence — each session mints a
+  fresh Browserbase Context, users are signed out of every site every time, and
+  the orphaned contexts continue to be billed for storage. The agent now logs an
+  ERROR naming the missing route, and
+  `tests/e2e/test_browser_context_store_e2e.py` fails against the real API until
+  `kwami-lk-api` implements it. **The fix belongs in `kwami-lk-api`, not here.**
+
 ### Added
 
 - `timezone` and `locale` on `KwamiConfig`, and on the `config` wire message.

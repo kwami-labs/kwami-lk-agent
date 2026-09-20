@@ -174,3 +174,40 @@ async def test_a_rejected_save_is_logged_rather_than_raised() -> None:
     await _store(http).put("user-1", VENDOR, "ctx-7")  # must not raise
 
     assert len(http.posts) == 1
+
+
+async def test_a_404_on_write_reports_that_persistence_is_not_implemented(caplog) -> None:
+    """A write cannot legitimately 404 -- the route exists or it does not.
+
+    This is the only signal that separates "no context saved yet" from "the API
+    has no such endpoint". Production has the second: `GET /openapi.json` lists
+    two internal routes and this is not one of them. Without this line the
+    feature fails completely silently -- `get` returns None forever, every
+    session mints a fresh Browserbase Context, users are signed out of every
+    site each time, and the orphaned contexts keep being billed.
+    """
+    import logging
+
+    http = FakeHttp(post_result=FakeResponse(404, {"detail": "Not Found"}))
+    store = KwamiApiContextStore(settings=_settings(), http=http)
+
+    with caplog.at_level(logging.ERROR):
+        await store.put("user-1", "browserbase", "ctx_1")
+
+    assert "has no" in caplog.text
+    assert "browser-contexts" in caplog.text
+    assert "NOT working" in caplog.text
+
+
+async def test_a_404_on_read_is_not_an_error(caplog) -> None:
+    """On the read path 404 is ambiguous and usually benign -- it is what every
+    user's first browser open looks like. Only the write path can tell."""
+    import logging
+
+    http = FakeHttp(get_result=FakeResponse(404, {"detail": "Not Found"}))
+    store = KwamiApiContextStore(settings=_settings(), http=http)
+
+    with caplog.at_level(logging.ERROR):
+        assert await store.get("user-1", "browserbase") is None
+
+    assert caplog.text == ""
