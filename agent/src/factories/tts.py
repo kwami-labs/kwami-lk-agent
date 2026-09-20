@@ -14,11 +14,6 @@ from livekit.agents import inference
 # is not imported here. google is a genuine extra and stays guarded.
 from livekit.plugins import cartesia, deepgram, openai
 
-try:
-    from livekit.plugins import google
-except ImportError:
-    google = None  # type: ignore
-
 from ..constants import (
     CartesiaVoices,
     DeepgramVoices,
@@ -33,8 +28,11 @@ from ..domain import KwamiVoiceConfig
 from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
+from .optional import optional_plugin
 
 logger = get_logger("tts")
+
+google = optional_plugin("google")
 
 
 # =============================================================================
@@ -59,7 +57,7 @@ def _check_api_key(provider: str) -> bool:
     if any(settings.has_provider_key(env_var) for env_var in env_vars):
         return True
 
-    logger.warning(f"⚠️ {' or '.join(env_vars)} not set for {provider} TTS")
+    logger.warning("⚠️ %s not set for %s TTS", " or ".join(env_vars), provider)
     return False
 
 
@@ -83,7 +81,10 @@ def create_tts(config: KwamiVoiceConfig):
     provider = config.tts_provider.lower()
 
     logger.info(
-        f"🔊 Creating TTS: provider={provider}, model={config.tts_model}, voice={config.tts_voice}"
+        "🔊 Creating TTS: provider=%s, model=%s, voice=%s",
+        provider,
+        config.tts_model,
+        config.tts_voice,
     )
 
     # Check API key (warning only, don't block)
@@ -109,11 +110,11 @@ def create_tts(config: KwamiVoiceConfig):
             return _create_rime_tts(config)
 
         else:
-            logger.warning(f"Unknown TTS provider '{provider}', falling back to OpenAI")
+            logger.warning("Unknown TTS provider '%s', falling back to OpenAI", provider)
             return _fallback_to_openai_tts(config, provider)
 
-    except Exception as e:
-        logger.error(f"Failed to create {provider} TTS: {e}, falling back to OpenAI")
+    except Exception:
+        logger.exception("Failed to create %s TTS; falling back to OpenAI", provider)
         return _fallback_to_openai_tts(config, provider)
 
 
@@ -149,17 +150,20 @@ def _create_openai_tts(config: KwamiVoiceConfig):
     # Validate model
     if model not in OpenAIModels.ALL_TTS:
         logger.warning(
-            f"Model '{model}' not supported by OpenAI TTS. "
-            f"Using '{OpenAIModels.TTS_1}'. Valid: {', '.join(sorted(OpenAIModels.ALL_TTS))}"
+            "Model '%s' not supported by OpenAI TTS. Using '%s'. Valid: %s",
+            model,
+            OpenAIModels.TTS_1,
+            ", ".join(sorted(OpenAIModels.ALL_TTS)),
         )
         model = OpenAIModels.TTS_1
 
     # Validate voice
     if voice not in OpenAIVoices.STANDARD:
         logger.warning(
-            f"Voice '{voice}' not supported by OpenAI TTS. "
-            f"Using '{OpenAIVoices.DEFAULT}'. "
-            f"Valid: {', '.join(sorted(OpenAIVoices.STANDARD))}"
+            "Voice '%s' not supported by OpenAI TTS. Using '%s'. Valid: %s",
+            voice,
+            OpenAIVoices.DEFAULT,
+            ", ".join(sorted(OpenAIVoices.STANDARD)),
         )
         voice = OpenAIVoices.DEFAULT
 
@@ -179,8 +183,9 @@ def _create_elevenlabs_tts(config: KwamiVoiceConfig):
     # the TTS provider is changed but the voice isn't updated. Fall back to default.
     if voice_id and voice_id not in ElevenLabsVoices.ALL and len(voice_id) < 15:
         logger.warning(
-            f"Voice '{voice_id}' is not a valid ElevenLabs voice ID. "
-            f"Using default: {ElevenLabsVoices.DEFAULT}"
+            "Voice '%s' is not a valid ElevenLabs voice ID. Using default: %s",
+            voice_id,
+            ElevenLabsVoices.DEFAULT,
         )
         voice_id = ElevenLabsVoices.DEFAULT
 
@@ -194,7 +199,7 @@ def _create_elevenlabs_tts(config: KwamiVoiceConfig):
     # Format: "elevenlabs/model:voice_id"
     model_string = f"elevenlabs/{model}"
 
-    logger.info(f"🔊 Using LiveKit Inference for ElevenLabs: {model_string}:{voice_id}")
+    logger.info("🔊 Using LiveKit Inference for ElevenLabs: %s:%s", model_string, voice_id)
 
     return inference.TTS(
         model=model_string,
@@ -214,7 +219,7 @@ def _create_rime_tts(config: KwamiVoiceConfig):
     # Use LiveKit Inference for Rime - format: "rime/model:voice"
     model_string = f"rime/{model}"
 
-    logger.info(f"🔊 Using LiveKit Inference for Rime: {model_string}:{voice}")
+    logger.info("🔊 Using LiveKit Inference for Rime: %s:%s", model_string, voice)
 
     return inference.TTS(
         model=model_string,
@@ -233,8 +238,9 @@ def _create_cartesia_tts(config: KwamiVoiceConfig):
     # Cartesia uses UUID format voice IDs
     if voice and len(voice) < 30 and "-" not in voice:
         logger.warning(
-            f"Voice '{voice}' may be invalid for Cartesia (expected UUID format). "
-            f"Using default: {CartesiaVoices.DEFAULT}"
+            "Voice '%s' may be invalid for Cartesia (expected UUID format). Using default: %s",
+            voice,
+            CartesiaVoices.DEFAULT,
         )
         voice = CartesiaVoices.DEFAULT
 
@@ -254,9 +260,10 @@ def _create_deepgram_tts(config: KwamiVoiceConfig):
 
     if voice not in DeepgramVoices.ALL:
         logger.warning(
-            f"Voice '{voice}' not in known Deepgram voices. "
-            f"Using '{DeepgramVoices.DEFAULT}'. "
-            f"Valid: {', '.join(sorted(DeepgramVoices.ALL))}"
+            "Voice '%s' not in known Deepgram voices. Using '%s'. Valid: %s",
+            voice,
+            DeepgramVoices.DEFAULT,
+            ", ".join(sorted(DeepgramVoices.ALL)),
         )
         voice = DeepgramVoices.DEFAULT
 
