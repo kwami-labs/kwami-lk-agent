@@ -20,6 +20,7 @@ from livekit.agents import (
 
 from .domain import KwamiConfig
 from .factories.vad import prewarm_vad
+from .health import heartbeat_path, run_heartbeat, write_heartbeat
 from .runtime import (
     AgentDeps,
     DataMessageRouter,
@@ -33,7 +34,13 @@ from .runtime.pipeline import create_agent_from_config
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
-from .utils.logging import get_logger
+from .telemetry import configure_tracing
+from .utils.logging import (
+    bind_session_fields,
+    configure_logging,
+    get_logger,
+    session_context,
+)
 from .utils.room import resolve_user_identity
 
 logger = get_logger()
@@ -41,9 +48,17 @@ logger = get_logger()
 # Resolve credentials once, here, after load_dotenv has run. Everything
 # downstream takes them from Settings rather than reading os.environ itself.
 set_settings(Settings.from_env())
+# Install the correlation filter (and JSON output when asked for) before the
+# first line is written, so startup is correlated too.
+configure_logging()
+configure_tracing()
 logger.info("Settings resolved: %s", get_settings().describe())
 
 server = AgentServer()
+
+# Strong reference to the heartbeat task: the loop holds only a weak one, and a
+# collected heartbeat would read to the probe as a dead worker.
+_heartbeat_task: asyncio.Task | None = None
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -54,10 +69,52 @@ def prewarm(proc: JobProcess) -> None:
 server.setup_fnc = prewarm
 
 
+@server.on("worker_registered")
+def _on_worker_registered(*_args: object) -> None:
+    """Start reporting healthy once LiveKit has actually accepted this worker.
+
+    This is the fact the container's health probe could not previously see. It
+    answered "ok" whenever its own HTTP thread was alive, so a worker that was
+    running but unregistered -- a dropped websocket, an auth loop -- looked
+    identical to one taking calls.
+
+    `worker_registered` fires again after a reconnect, so the guard keeps a
+    single heartbeat task rather than stacking one per reconnection.
+    """
+    global _heartbeat_task
+
+    write_heartbeat("registered")
+    if _heartbeat_task is not None and not _heartbeat_task.done():
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # The SDK emits this from inside the event loop, so in practice there is
+        # always one. Handled rather than assumed: a worker that cannot start
+        # its heartbeat should say so and keep serving calls, not raise inside
+        # an event handler where the traceback goes nowhere useful.
+        logger.warning("worker_registered fired outside the event loop; no heartbeat started")
+        return
+    _heartbeat_task = loop.create_task(run_heartbeat(), name="health_heartbeat")
+    logger.info("Health heartbeat started at %s", heartbeat_path())
+
+
 @server.rtc_session(agent_name="kwami-agent")
 async def entrypoint(ctx: JobContext) -> None:
-    """Main entry point for Kwami agent sessions."""
-    logger.info(f"Kwami session starting in room: {ctx.room.name}")
+    """Main entry point for Kwami agent sessions.
+
+    Binds the room for the whole job before doing anything else. Every record
+    emitted from here on carries it -- ours and the SDK's -- so one session can
+    be pulled out of a worker serving many without grepping for a string that
+    appeared in three lines out of several hundred.
+    """
+    with session_context(room=ctx.room.name):
+        await _run_session(ctx)
+
+
+async def _run_session(ctx: JobContext) -> None:
+    """The session itself, inside the logging context bound above."""
+    logger.info("Kwami session starting")
 
     # The room is NOT connected yet -- JobContext.room is populated by
     # session.start() below, so participants are resolved after that point.
@@ -110,6 +167,9 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=vad,
         create_agent_fn=create_agent_from_config,
         room=ctx.room,
+        # So a tool invoked from a data message reaches the same AgentDeps a
+        # tool invoked from a model turn does.
+        deps=deps,
     )
 
     def handle_data(data: rtc.DataPacket) -> None:
@@ -118,8 +178,8 @@ async def entrypoint(ctx: JobContext) -> None:
             return
         try:
             router.handle(message)
-        except Exception as e:
-            logger.error(f"Error handling data message: {e}")
+        except Exception:
+            logger.exception("Error handling data message")
 
     ctx.room.on("data_received", handle_data)
 
@@ -134,6 +194,7 @@ async def entrypoint(ctx: JobContext) -> None:
     kwami_id = resolve_kwami_id(ctx)
     runtime_config_task: asyncio.Task | None = None
     if kwami_id:
+        bind_session_fields(kwami_id=kwami_id)
         logger.info("Resolved telephony kwami_id: %s", kwami_id)
         runtime_config_task = state.spawn(
             fetch_runtime_config(kwami_id), name="fetch_runtime_config"
@@ -173,7 +234,7 @@ async def entrypoint(ctx: JobContext) -> None:
         kwami_id,
     )
 
-    logger.info(f"Kwami session started for room: {ctx.room.name}")
+    logger.info("Kwami session started")
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point
