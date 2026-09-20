@@ -59,15 +59,17 @@ class UsageReporter:
             True if the report was sent successfully.
         """
         if not tracker.has_usage:
-            logger.info(f"No usage to report for session {session_id}")
+            logger.info("No usage to report for session %s", session_id)
             return True
 
         usage_summary = tracker.get_usage_summary()
         duration = tracker.session_duration_seconds
 
         logger.info(
-            f"Reporting usage for session {session_id}: "
-            f"{len(usage_summary)} models, {duration:.1f}s session"
+            "Reporting usage for session %s: %s models, %.1fs session",
+            session_id,
+            len(usage_summary),
+            duration,
         )
 
         payload = {
@@ -93,21 +95,23 @@ class UsageReporter:
             # shutdown callback with a ~10s worker budget, so an unbounded wait
             # meant the process was killed and the session's revenue lost.
             timeout = aiohttp.ClientTimeout(total=REPORT_TIMEOUT_SECONDS)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.post(url, json=payload, headers=headers) as resp:
-                    if resp.status == 200:
-                        result = await resp.json()
-                        logger.info(
-                            f"Usage reported successfully: "
-                            f"charged={result.get('total_credits_charged', 0)} micro-credits, "
-                            f"new_balance={result.get('new_balance', 0)}"
-                        )
-                        return True
-                    else:
-                        body = await resp.text()
-                        logger.error(f"Usage report failed (HTTP {resp.status}): {body}")
-                        return False
+            async with (
+                aiohttp.ClientSession(timeout=timeout) as session,
+                session.post(url, json=payload, headers=headers) as resp,
+            ):
+                if resp.status == 200:
+                    result = await resp.json()
+                    logger.info(
+                        "Usage reported successfully: charged=%s micro-credits, new_balance=%s",
+                        result.get("total_credits_charged", 0),
+                        result.get("new_balance", 0),
+                    )
+                    return True
+                else:
+                    body = await resp.text()
+                    logger.error("Usage report failed (HTTP %s): %s", resp.status, body)
+                    return False
 
-        except Exception as e:
-            logger.error(f"Failed to send usage report: {e}")
+        except Exception:
+            logger.exception("Failed to send usage report")
             return False

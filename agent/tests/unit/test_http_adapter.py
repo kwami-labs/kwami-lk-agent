@@ -185,3 +185,65 @@ async def test_a_zero_per_call_timeout_falls_back_to_the_instance_one() -> None:
     await client.get("https://example.test/thing", timeout=0)
 
     assert transport.timeouts == [9.0]
+
+
+# -- The process-wide pool ----------------------------------------------------
+#
+# Eighteen call sites used to build their own `httpx.AsyncClient()` per request,
+# paying a fresh TCP and TLS handshake each time -- on a path where the user is
+# listening to silence. They now share one pool, which only works if its
+# lifecycle is exactly right: reused while open, rebuilt after close, and never
+# closed by a caller that merely finished with it.
+
+
+async def test_the_shared_client_is_reused() -> None:
+    """The entire point: the second call must not be a new connection pool."""
+    from src.adapters.http import aclose_shared, shared_client
+
+    try:
+        assert shared_client() is shared_client()
+    finally:
+        await aclose_shared()
+
+
+async def test_a_closed_shared_client_is_rebuilt() -> None:
+    """A session closing the pool must not leave every later session with a
+    dead client -- a worker serves many sessions in one process."""
+    from src.adapters.http import aclose_shared, shared_client
+
+    first = shared_client()
+    await aclose_shared()
+    try:
+        second = shared_client()
+
+        assert second is not first
+        assert not second.is_closed
+    finally:
+        await aclose_shared()
+
+
+async def test_closing_twice_is_safe() -> None:
+    """Session cleanup can run more than once; the second must be a no-op."""
+    from src.adapters.http import aclose_shared, shared_client
+
+    shared_client()
+    await aclose_shared()
+    await aclose_shared()
+
+
+async def test_closing_when_nothing_was_ever_built_is_safe() -> None:
+    """A session that never made an HTTP call still runs cleanup."""
+    from src.adapters.http import aclose_shared
+
+    await aclose_shared()
+
+
+async def test_the_pool_is_bounded() -> None:
+    """httpx defaults are sized for a script. A worker holding sessions against
+    a handful of origins wants keepalives, and an unbounded total is how a
+    long-lived process runs out of file descriptors."""
+    from src.adapters.http import POOL_LIMITS
+
+    assert POOL_LIMITS.max_connections is not None
+    assert POOL_LIMITS.max_keepalive_connections is not None
+    assert POOL_LIMITS.max_keepalive_connections < POOL_LIMITS.max_connections

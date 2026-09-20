@@ -30,6 +30,7 @@ from typing import Any
 
 import httpx
 
+from ..adapters.http import shared_client
 from ..settings import get_settings
 from ..utils.logging import get_logger
 from .context_store import ContextStorePort, create_context_store
@@ -87,14 +88,15 @@ class BrowserbaseClient:
 
     async def create_context(self, name: str) -> str:
         """Create a persistent context and return its id."""
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(
-                f"{BB_API_BASE}/contexts",
-                json=self._with_project({"name": name}),
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            data = r.json()
+        client = shared_client()
+        r = await client.post(
+            f"{BB_API_BASE}/contexts",
+            json=self._with_project({"name": name}),
+            headers=self._headers(),
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        data = r.json()
         context_id = (data or {}).get("id") if isinstance(data, dict) else None
         if not context_id:
             raise RuntimeError("Browserbase did not return a context id")
@@ -112,11 +114,12 @@ class BrowserbaseClient:
         if not context_id:
             return False
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(
-                    f"{BB_API_BASE}/contexts/{context_id}",
-                    headers=self._headers(),
-                )
+            client = shared_client()
+            r = await client.get(
+                f"{BB_API_BASE}/contexts/{context_id}",
+                headers=self._headers(),
+                timeout=10.0,
+            )
         except httpx.RequestError as e:
             # Unreachable is not the same as gone: assume it is still there and
             # let the session-create call be the thing that fails loudly.
@@ -151,14 +154,15 @@ class BrowserbaseClient:
             {"browserSettings": browser_settings, "timeout": timeout_seconds}
         )
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(
-                f"{BB_API_BASE}/sessions",
-                json=payload,
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            data = r.json()
+        client = shared_client()
+        r = await client.post(
+            f"{BB_API_BASE}/sessions",
+            json=payload,
+            headers=self._headers(),
+            timeout=30.0,
+        )
+        r.raise_for_status()
+        data = r.json()
 
         if not isinstance(data, dict) or not data.get("id"):
             raise RuntimeError("Browserbase did not return a session id")
@@ -177,13 +181,14 @@ class BrowserbaseClient:
         the session down with it.
         """
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                r = await client.get(
-                    f"{BB_API_BASE}/sessions/{session_id}/debug",
-                    headers=self._headers(),
-                )
-                r.raise_for_status()
-                data = r.json()
+            client = shared_client()
+            r = await client.get(
+                f"{BB_API_BASE}/sessions/{session_id}/debug",
+                headers=self._headers(),
+                timeout=15.0,
+            )
+            r.raise_for_status()
+            data = r.json()
         except Exception as e:
             logger.warning("Could not fetch the Browserbase live view URL: %s", e)
             return ""
@@ -193,13 +198,14 @@ class BrowserbaseClient:
 
     async def release_session(self, session_id: str) -> None:
         """Ask the platform to end the session now, rather than at its timeout."""
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.post(
-                f"{BB_API_BASE}/sessions/{session_id}",
-                json={"status": "REQUEST_RELEASE"},
-                headers=self._headers(),
-            )
-            r.raise_for_status()
+        client = shared_client()
+        r = await client.post(
+            f"{BB_API_BASE}/sessions/{session_id}",
+            json={"status": "REQUEST_RELEASE"},
+            headers=self._headers(),
+            timeout=15.0,
+        )
+        r.raise_for_status()
         logger.info("Released Browserbase session %s", session_id[:8])
 
 

@@ -235,7 +235,7 @@ class CloudBrowserSession:
         # this is the boundary every browsing path eventually crosses, and it
         # must not depend on which of them got here.
         url = validate_url(url)
-        await self._cdp.navigate(url)
+        await self._connection.navigate(url)
         self._current_url = url
         self._reset_idle_timer()
 
@@ -249,14 +249,14 @@ class CloudBrowserSession:
     async def go_back(self) -> str:
         """Navigate back in history."""
         self._ensure_active()
-        await self._cdp.go_back()
+        await self._connection.go_back()
         self._reset_idle_timer()
         return "Going back to the previous page."
 
     async def go_forward(self) -> str:
         """Navigate forward in history."""
         self._ensure_active()
-        await self._cdp.go_forward()
+        await self._connection.go_forward()
         self._reset_idle_timer()
         return "Going forward to the next page."
 
@@ -267,7 +267,7 @@ class CloudBrowserSession:
         self._ensure_active()
         self._reset_idle_timer()
 
-        info = await self._cdp.page_info()
+        info = await self._connection.page_info()
         if not info or not isinstance(info, dict):
             return "Could not read page content."
 
@@ -302,7 +302,7 @@ class CloudBrowserSession:
         self._reset_idle_timer()
 
         # Get page elements with coordinates
-        info = await self._cdp.page_info()
+        info = await self._connection.page_info()
         elements = info.get("elements", []) if isinstance(info, dict) else []
 
         target = None
@@ -337,7 +337,7 @@ class CloudBrowserSession:
 
         x = target.get("x", 0)
         y = target.get("y", 0)
-        await self._cdp.click(float(x), float(y))
+        await self._connection.click(float(x), float(y))
 
         label = (target.get("label") or "")[:60]
         return f'Clicked on "{label}" ({target["id"]}) at ({x}, {y}).'
@@ -362,7 +362,7 @@ class CloudBrowserSession:
 
         # Clear existing content if requested
         if clear_first:
-            await self._cdp.send(
+            await self._connection.send(
                 "Input.dispatchKeyEvent",
                 type="keyDown",
                 key="a",
@@ -370,25 +370,25 @@ class CloudBrowserSession:
                 windowsVirtualKeyCode=65,
                 modifiers=2 if not _is_mac() else 4,  # Ctrl/Cmd+A
             )
-            await self._cdp.send(
+            await self._connection.send(
                 "Input.dispatchKeyEvent",
                 type="keyUp",
                 key="a",
                 code="KeyA",
                 windowsVirtualKeyCode=65,
             )
-            await self._cdp.press_key("Backspace")
+            await self._connection.press_key("Backspace")
             await asyncio.sleep(0.1)
 
         # Type the text
-        await self._cdp.type_text(text)
+        await self._connection.type_text(text)
         return f"Typed '{text[:50]}' into the field."
 
     async def press_key(self, key: str) -> str:
         """Press a keyboard key."""
         self._ensure_active()
         self._reset_idle_timer()
-        await self._cdp.press_key(key)
+        await self._connection.press_key(key)
         return f"Pressed '{key}'."
 
     async def scroll(self, direction: str = "down") -> str:
@@ -396,7 +396,7 @@ class CloudBrowserSession:
         self._ensure_active()
         self._reset_idle_timer()
         delta = 400 if direction.lower() == "down" else -400
-        await self._cdp.scroll(x=400, y=300, delta_y=delta)
+        await self._connection.scroll(x=400, y=300, delta_y=delta)
         return f"Scrolled {direction}."
 
     async def evaluate_js(self, expression: str) -> str:
@@ -404,7 +404,7 @@ class CloudBrowserSession:
         self._ensure_active()
         self._reset_idle_timer()
         try:
-            result = await self._cdp.evaluate(expression)
+            result = await self._connection.evaluate(expression)
             return f"JavaScript executed successfully. Result: {result}"
         except Exception as e:
             return f"Failed to execute JavaScript: {e}"
@@ -417,6 +417,26 @@ class CloudBrowserSession:
             raise RuntimeError(
                 "No active cloud browser session. Use navigate_to to open a website first."
             )
+
+    @property
+    def _connection(self) -> CDPConnection:
+        """The live CDP connection, narrowed.
+
+        Every caller has already been through `_ensure_active`, which raises
+        when `is_active` is false -- and `is_active` is exactly the check that
+        `_cdp is not None`. The type checker cannot follow that across a method
+        returning None, so thirteen call sites each read as "None has no
+        attribute navigate". This states the invariant in one place instead.
+
+        The raise is not dead: it is what keeps this honest if a future caller
+        reaches a driving method without the guard.
+        """
+        cdp = self._cdp
+        if cdp is None:
+            raise RuntimeError(
+                "No active cloud browser session. Use navigate_to to open a website first."
+            )
+        return cdp
 
     async def _publish_session_event(
         self, action: str, url: str | None = None, title: str | None = None
