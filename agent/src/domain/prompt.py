@@ -18,6 +18,66 @@ from .capabilities import build_capability_guidance
 # Memory context is untrusted in length; cap what reaches the system prompt.
 MAX_SYSTEM_MEMORY_CONTEXT_CHARS = 2200
 
+#: Language names for the codes the `change_language` tool accepts. A bare code
+#: in the prompt ("Respond in es") is markedly less reliable than the name.
+LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "hi": "Hindi",
+    "ar": "Arabic",
+    "tr": "Turkish",
+    "sv": "Swedish",
+    "ca": "Catalan",
+}
+
+#: English is the model's default behaviour, so saying so adds prompt with no
+#: effect. Every other language needs an explicit instruction.
+DEFAULT_LANGUAGE = "en"
+
+
+def language_directive(language: str | None) -> str:
+    """The instruction that makes the model *generate* in `language`.
+
+    `soul.language` was parsed, documented in the protocol and settable from the
+    app, and then read by nothing at all -- grep for `.language` outside
+    `stt_language` returned no hits. Retuning STT and TTS, which is all
+    `change_language` used to do, leaves the model transcribing Spanish, reading
+    Spanish aloud, and still writing its replies in English.
+
+    Returns "" for English and for anything unrecognised, rather than guessing:
+    an instruction naming a language the model cannot place is worse than none.
+    """
+    code = (language or "").strip().lower()
+    if not code:
+        return ""
+    # Clients send regional variants (`pt-BR`, `en-GB`). Resolve to the base
+    # language *before* comparing against the default, or `en-GB` earns a
+    # "Speak and write in English" line that says nothing the model does not
+    # already do.
+    if code not in LANGUAGE_NAMES:
+        code = code.split("-", 1)[0]
+    if code == DEFAULT_LANGUAGE:
+        return ""
+    name = LANGUAGE_NAMES.get(code)
+    if not name:
+        return ""
+    return (
+        f"\nSpeak and write in {name}. Keep to {name} for the whole conversation "
+        "unless the user asks for another language, even if they write to you in "
+        "a different one."
+    )
+
+
 RESPONSE_LENGTH_GUIDE: dict[str, str] = {
     "short": "Keep responses brief and concise (1-2 sentences).",
     "medium": "Provide balanced responses with enough detail (2-4 sentences).",
@@ -207,6 +267,10 @@ def build_system_prompt(
         parts.append(soul.system_prompt)
     else:
         parts.append(f"You are {soul.name}, {soul.personality}.")
+
+    directive = language_directive(getattr(soul, "language", None))
+    if directive:
+        parts.append(directive)
 
     if soul.traits:
         parts.append(f"\nKey traits: {', '.join(soul.traits)}")
