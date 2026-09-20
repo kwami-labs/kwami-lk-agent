@@ -6,12 +6,14 @@ startup errors when memory is not being used.
 
 from typing import TYPE_CHECKING
 
-from ..utils.logging import get_logger
+from ..utils.logging import get_logger, redacted
 
 if TYPE_CHECKING:
     pass
 
 logger = get_logger("memory")
+
+__all__ = ["get_zep_imports", "logger", "redacted"]
 
 
 def get_zep_imports():
@@ -26,7 +28,7 @@ def get_zep_imports():
         from zep_cloud.types import RoleType
 
         return AsyncZep, ZepMessage, RoleType
-    except ImportError as e:
-        logger.error(f"Failed to import zep_cloud: {e}")
-        logger.error("Install with: pip install zep-cloud")
+    except ImportError:
+        logger.exception("Failed to import zep_cloud")
+        logger.exception("Install with: pip install zep-cloud")
         return None, None, None

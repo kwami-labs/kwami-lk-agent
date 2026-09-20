@@ -8,7 +8,7 @@ import re
 from collections import Counter
 from typing import TYPE_CHECKING
 
-from .utils import logger
+from .utils import logger, redacted
 
 if TYPE_CHECKING:
     from zep_cloud.client import AsyncZep
@@ -61,7 +61,7 @@ async def search_thread(
         ]
 
     except Exception as e:
-        logger.error(f"Failed to search memories: {e}")
+        logger.error("Failed to search memories: %s", e)
         return []
 
 
@@ -113,7 +113,7 @@ async def get_entities_by_type(
         return entities
 
     except Exception as e:
-        logger.debug(f"Failed to get entities by type '{entity_type}': {e}")
+        logger.debug("Failed to get entities by type '%s': %s", entity_type, e)
         return []
 
 
@@ -173,9 +173,7 @@ def _is_valid_name(name: str, extra_excluded: set[str] | None = None) -> bool:
     excluded = _EXCLUDED_NAMES | (extra_excluded or set())
     if name.lower() in excluded:
         return False
-    if not name[0].isupper() or not name.isalpha():
-        return False
-    return True
+    return name[0].isupper() and name.isalpha()
 
 
 def _extract_name_from_fact(fact: str, extra_excluded: set[str] | None = None) -> str | None:
@@ -236,10 +234,10 @@ async def get_user_name(
                     fact = getattr(edge, "fact", "") or ""
                     name = _extract_name_from_fact(fact, extra_excluded)
                     if name:
-                        logger.info(f"Found user name from fact: {name}")
+                        logger.info("Found user name from fact: %s", redacted(name, keep=1))
                         return name
         except Exception as e:
-            logger.debug(f"Graph search failed for query '{query}': {e}")
+            logger.debug("Graph search failed for query '%s': %s", query, e)
 
     # Strategy 2: Look for name patterns in fact subjects
     try:
@@ -263,10 +261,14 @@ async def get_user_name(
             # re-checking it here could only ever be true; the most common
             # one is the answer.
             name, count = Counter(potential_names).most_common(1)[0]
-            logger.info(f"Found user name from patterns: {name} (appeared {count} times)")
+            logger.info(
+                "Found user name from patterns: %s (appeared %s times)",
+                redacted(name, keep=1),
+                count,
+            )
             return name
     except Exception as e:
-        logger.debug(f"Pattern-based name search failed: {e}")
+        logger.debug("Pattern-based name search failed: %s", e)
 
     # Strategy 3: Check graph nodes for user identity
     try:
@@ -278,10 +280,15 @@ async def get_user_name(
                 node_type = getattr(node, "type", "") or ""
 
                 # Check if this is a person/user node
-                if node_type.lower() in ("person", "user", "human"):
-                    if _is_valid_name(label, extra_excluded):
-                        logger.info(f"Found user name from graph node (type={node_type}): {label}")
-                        return label
+                if node_type.lower() in ("person", "user", "human") and _is_valid_name(
+                    label, extra_excluded
+                ):
+                    logger.info(
+                        "Found user name from graph node (type=%s): %s",
+                        node_type,
+                        redacted(label, keep=1),
+                    )
+                    return label
 
                 # Check summary for user identity indicators
                 summary_lower = summary.lower()
@@ -290,10 +297,10 @@ async def get_user_name(
                     and ("name" in summary_lower or "called" in summary_lower)
                     and _is_valid_name(label, extra_excluded)
                 ):
-                    logger.info(f"Found user name from node summary: {label}")
+                    logger.info("Found user name from node summary: %s", redacted(label, keep=1))
                     return label
     except Exception as e:
-        logger.debug(f"Could not get graph nodes for name search: {e}")
+        logger.debug("Could not get graph nodes for name search: %s", e)
 
     logger.debug("No user name found in memory")
     return None

@@ -5,7 +5,7 @@ Uses Zep context templates for consistent, structured retrieval and
 includes temporal validity information for facts.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from .utils import logger
@@ -42,9 +42,9 @@ class MemoryContext:
     """Pre-formatted context block from Zep context template."""
 
     summary: str | None = None
-    facts: list[str] = None
-    entities: list[dict] = None
-    recent_messages: list[dict] = None
+    facts: list[str] = field(default_factory=list)
+    entities: list[dict] = field(default_factory=list)
+    recent_messages: list[dict] = field(default_factory=list)
 
     def __post_init__(self):
         self.facts = self.facts or []
@@ -131,23 +131,23 @@ async def setup_context_template(
                 template_id=template_id,
                 template=template_content,
             )
-            logger.debug(f"Updated context template: {template_id}")
+            logger.debug("Updated context template: %s", template_id)
             return template_id
         except Exception as e:
             # Expected on first use: there is nothing to update yet. Logged so
             # a template that can never be updated is visible rather than silent.
-            logger.debug(f"Could not update context template {template_id}, creating: {e}")
+            logger.debug("Could not update context template %s, creating: %s", template_id, e)
 
         # Create new template
         await client.context.create_context_template(
             template_id=template_id,
             template=template_content,
         )
-        logger.info(f"Created context template: {template_id}")
+        logger.info("Created context template: %s", template_id)
         return template_id
 
     except Exception as e:
-        logger.debug(f"Could not set up context template: {e}")
+        logger.debug("Could not set up context template: %s", e)
         return None
 
 
@@ -192,7 +192,7 @@ async def get_context(
                 context.context_block = user_context.context
                 logger.debug("Retrieved context via template")
         except Exception as e:
-            logger.debug(f"Template-based context failed, falling back: {e}")
+            logger.debug("Template-based context failed, falling back: %s", e)
 
     # Strategy 2: Fallback to thread context + graph search
     if not context.context_block:
@@ -210,7 +210,7 @@ async def get_context(
             if thread_context and thread_context.context:
                 context.summary = thread_context.context
         except Exception as e:
-            logger.warning(f"Could not retrieve thread context: {e}")
+            logger.warning("Could not retrieve thread context: %s", e)
 
         # Get facts via graph search
         if include_facts:
@@ -237,7 +237,7 @@ async def get_context(
                             fact = f"{fact} (no longer valid since {invalid_at})"
                         context.facts.append(fact)
             except Exception as e:
-                logger.debug(f"Could not retrieve facts via graph: {e}")
+                logger.debug("Could not retrieve facts via graph: %s", e)
 
     # Always get recent messages (not part of context template)
     try:
@@ -252,17 +252,19 @@ async def get_context(
         if messages_response and messages_response.messages:
             context.recent_messages = [
                 {
-                    "role": msg.role or msg.role_type,
+                    "role": msg.role or getattr(msg, "role_type", None),
                     "content": msg.content,
                 }
                 for msg in messages_response.messages
             ]
     except Exception as e:
-        logger.debug(f"Could not retrieve thread messages: {e}")
+        logger.debug("Could not retrieve thread messages: %s", e)
 
     logger.debug(
-        f"Retrieved context: template={'yes' if context.context_block else 'no'}, "
-        f"{len(context.facts)} facts, {len(context.recent_messages)} messages"
+        "Retrieved context: template=%s, %s facts, %s messages",
+        "yes" if context.context_block else "no",
+        len(context.facts),
+        len(context.recent_messages),
     )
     return context
 
