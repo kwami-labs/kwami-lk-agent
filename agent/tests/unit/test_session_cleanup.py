@@ -382,3 +382,21 @@ def test_an_inactive_browser_is_not_offered_as_active() -> None:
     state = SessionState(browser_session=browser)
 
     assert state.active_browser_session is None
+
+
+async def test_a_failing_http_pool_close_does_not_break_cleanup(monkeypatch, caplog) -> None:
+    """Cleanup runs inside a LiveKit shutdown callback with a ~10s budget. A pool
+    that refuses to close must not take the rest of teardown -- or the usage
+    report that already ran -- down with it."""
+    import logging
+
+    async def boom() -> None:
+        raise RuntimeError("pool is wedged")
+
+    monkeypatch.setattr("src.session.aclose_shared", boom)
+    state = SessionState()
+
+    with caplog.at_level(logging.WARNING):
+        await state.cleanup()
+
+    assert "Failed to close the shared HTTP pool" in caplog.text

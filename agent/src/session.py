@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from .adapters.http import aclose_shared
 from .domain import UsageTracker
 from .usage import UsageReporter
 from .utils.logging import get_logger
@@ -155,8 +156,9 @@ class SessionState:
         if self.browser_session is not None:
             new_agent._browser_session = self.browser_session
         new_agent.usage_tracker = self.usage_tracker
-        if getattr(new_agent, "_memory", None) and hasattr(new_agent._memory, "set_usage_tracker"):
-            new_agent._memory.set_usage_tracker(self.usage_tracker)
+        new_memory = getattr(new_agent, "_memory", None)
+        if new_memory is not None and hasattr(new_memory, "set_usage_tracker"):
+            new_memory.set_usage_tracker(self.usage_tracker)
         # Ensure the new agent has the room so server-side tools (e.g. web_search) can publish
         if self.room is not None:
             new_agent.room = self.room
@@ -270,7 +272,7 @@ class SessionState:
                     await obj.aclose()
                     logger.debug("Closed agent pipeline component: %s", name)
                 elif hasattr(obj, "close"):
-                    close_fn = getattr(obj, "close")
+                    close_fn = obj.close
                     if asyncio.iscoroutinefunction(close_fn):
                         await close_fn()
                     else:
@@ -290,7 +292,7 @@ class SessionState:
                 await memory.close()
                 logger.debug("Old agent memory closed successfully")
         except Exception as e:
-            logger.warning(f"Failed to close memory: {e}")
+            logger.warning("Failed to close memory: %s", e)
 
     async def cleanup(self) -> None:
         """Clean up all pending resources.
@@ -303,7 +305,7 @@ class SessionState:
             kwami_id = getattr(self.current_agent.kwami_config, "kwami_id", None)
             if kwami_id:
                 self.user_identity = kwami_id
-                logger.info(f"Resolved user_identity from agent config: {kwami_id}")
+                logger.info("Resolved user_identity from agent config: %s", kwami_id)
 
         # Wait for all cleanup tasks to complete
         if self._cleanup_tasks:
@@ -334,14 +336,25 @@ class SessionState:
         # of the cleanup above ran.
         await self._report_usage()
 
+        # Release the shared connection pool after the report, which is the last
+        # thing that needs it. Left open, the sockets stay half-alive until the
+        # process exits -- harmless for one session, and a slow leak for a worker
+        # that serves thousands.
+        try:
+            await aclose_shared()
+        except Exception as e:
+            logger.warning("Failed to close the shared HTTP pool: %s", e)
+
         logger.debug("Session cleanup complete")
 
     async def _report_usage(self) -> None:
         """Send accumulated usage to the credits API, within a hard time bound."""
         if not (self.user_identity and self.room_name and self.usage_tracker.has_usage):
             logger.warning(
-                f"Skipping usage report: user_identity={self.user_identity}, "
-                f"room_name={self.room_name}, has_usage={self.usage_tracker.has_usage}"
+                "Skipping usage report: user_identity=%s, room_name=%s, has_usage=%s",
+                self.user_identity,
+                self.room_name,
+                self.usage_tracker.has_usage,
             )
             return
 
@@ -352,8 +365,10 @@ class SessionState:
             credits_user_id = self.user_identity.split("_", 2)[1]
 
         logger.info(
-            f"Reporting usage: user={credits_user_id}, "
-            f"room={self.room_name}, has_usage={self.usage_tracker.has_usage}"
+            "Reporting usage: user=%s, room=%s, has_usage=%s",
+            credits_user_id,
+            self.room_name,
+            self.usage_tracker.has_usage,
         )
         try:
             reported = await asyncio.wait_for(
@@ -365,7 +380,7 @@ class SessionState:
                 timeout=USAGE_REPORT_TIMEOUT_SECONDS,
             )
         except TimeoutError:
-            logger.error(
+            logger.exception(
                 "Usage report timed out after %ss; this session's usage was NOT billed "
                 "(user=%s, room=%s)",
                 USAGE_REPORT_TIMEOUT_SECONDS,
@@ -373,8 +388,8 @@ class SessionState:
                 self.room_name,
             )
             return
-        except Exception as e:
-            logger.error(f"Failed to report usage on cleanup: {e}")
+        except Exception:
+            logger.exception("Failed to report usage on cleanup")
             return
 
         # The reporter signals failure by returning falsy; without this the
