@@ -122,11 +122,13 @@ async def test_research_survives_the_whole_client_failing(
     """Not one angle failing -- the HTTP client itself refusing to start."""
     env_setting("TAVILY_API_KEY", "tvly-test")
 
-    class Broken:
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            raise RuntimeError("no event loop for you")
+    def broken(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no event loop for you")
 
-    monkeypatch.setattr("src.tools.knowledge.httpx.AsyncClient", Broken)
+    # The pooled client is the seam now: every tool asks `shared_client()` for
+    # it rather than constructing its own, so that is where "no usable HTTP
+    # client" has to be injected.
+    monkeypatch.setattr("src.tools.knowledge.shared_client", broken)
 
     result = await agent.deep_research(None, "fusion power")
 

@@ -528,3 +528,19 @@ async def test_the_idle_timer_does_nothing_to_a_browser_already_closed(monkeypat
     await session._idle_timeout()
 
     assert provider.released == []
+
+
+async def test_the_cdp_accessor_refuses_when_there_is_no_connection() -> None:
+    """`_connection` is what lets thirteen driving methods type-check.
+
+    Every one of them is already behind `_ensure_active`, so in practice this
+    raise is unreachable -- but "unreachable today" is exactly the invariant
+    that rots. A future method that drives CDP without the guard gets a clear
+    refusal here instead of `AttributeError: 'NoneType' has no attribute 'click'`
+    surfacing mid-turn.
+    """
+    session = CloudBrowserSession()
+
+    assert session._cdp is None
+    with pytest.raises(RuntimeError, match="No active cloud browser session"):
+        _ = session._connection

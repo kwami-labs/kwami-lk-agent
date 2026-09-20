@@ -264,3 +264,155 @@ async def test_kwami_info_keeps_the_legacy_persona_key() -> None:
 async def test_get_current_time_answers_in_words() -> None:
     answer = await _standard().get_current_time(None)
     assert ":" in answer and "on" in answer
+
+
+# -- Write-back: the change has to outlive the turn that made it -------------
+#
+# All three tools used to call `update_options` and stop there. Two consequences
+# followed, and neither was covered:
+#
+#   * `get_current_voice_settings` reads `_current_voice_config`, which is the
+#     same object as `kwami_config.voice`. With nothing written back, the agent
+#     confidently reported the *previous* voice after changing it.
+#   * Every rebuild -- a `config` message, `change_ai_model`,
+#     `switch_pipeline_mode` -- reconstructs STT and TTS from
+#     `kwami_config.voice`. So "use the Cedar voice" then "switch to Claude"
+#     silently put the old voice back.
+#
+# The second assertion in each test below is the regression test for that.
+
+
+def _rebuild_voice_from_config(tools: Tools) -> dict[str, Any]:
+    """What a later rebuild would reconstruct the pipeline from.
+
+    Stands in for `create_agent_from_config`, which reads exactly these fields
+    off `kwami_config.voice` and nothing off the live TTS/STT objects.
+    """
+    voice = tools.kwami_config.voice
+    return {
+        "tts_voice": voice.tts_voice,
+        "tts_speed": voice.tts_speed,
+        "stt_language": voice.stt_language,
+    }
+
+
+async def test_a_voice_change_is_written_back_to_the_config() -> None:
+    tts = FakeTTS()
+    tools = _standard(tts)
+    name, expected_id = next(iter(CartesiaVoices.NAME_MAP.items()))
+
+    await tools.change_voice(None, name)
+
+    assert tts.updates == [{"voice": expected_id}]
+    assert _rebuild_voice_from_config(tools)["tts_voice"] == expected_id
+
+
+async def test_a_voice_change_is_what_get_current_voice_settings_reports() -> None:
+    """The agent must not describe a voice it is no longer using."""
+    tools = _standard()
+    before = (await tools.get_current_voice_settings(None))["tts_voice"]
+    name, expected_id = next(iter(CartesiaVoices.NAME_MAP.items()))
+
+    await tools.change_voice(None, name)
+    after = (await tools.get_current_voice_settings(None))["tts_voice"]
+
+    assert before != expected_id
+    assert after == expected_id
+
+
+async def test_a_failed_voice_change_is_not_written_back() -> None:
+    """The write-back sits inside the try, after the push. A provider that
+    rejects the voice must not leave the config claiming it took -- otherwise
+    the next rebuild applies a voice the provider already refused."""
+    tts = FakeTTS()
+    tts.fail = RuntimeError("no such voice")
+    tools = _standard(tts)
+    original = tools.kwami_config.voice.tts_voice
+
+    result = await tools.change_voice(None, "Cedar")
+
+    assert "couldn't" in result.lower()
+    assert tools.kwami_config.voice.tts_voice == original
+
+
+async def test_a_speed_change_is_written_back_at_its_clamped_value() -> None:
+    """The stored value must be what was applied, not what was asked for."""
+    tts = FakeTTS()
+    tools = _standard(tts)
+
+    await tools.change_speaking_speed(None, 9.0)
+
+    assert tts.updates == [{"speed": 2.0}]
+    assert _rebuild_voice_from_config(tools)["tts_speed"] == 2.0
+
+
+async def test_a_language_change_is_written_back_to_stt_and_to_the_soul() -> None:
+    """Both halves matter: stt_language survives the rebuild, soul.language is
+    what makes the model generate in that language rather than merely hear it."""
+    stt = FakeSTT()
+    tools = _standard(stt=stt)
+
+    await tools.change_language(None, "ES")
+
+    assert stt.updates[0] == {"language": "es"}
+    assert _rebuild_voice_from_config(tools)["stt_language"] == "es"
+    assert tools.kwami_config.soul.language == "es"
+
+
+async def test_a_language_change_survives_being_rebuilt_from_config() -> None:
+    """The end-to-end shape of the bug: change language, then rebuild."""
+    tools = _standard()
+
+    await tools.change_language(None, "fr")
+    rebuilt = _rebuild_voice_from_config(tools)
+
+    assert rebuilt["stt_language"] == "fr", "a rebuild would have reverted to English"
+
+
+async def test_a_language_preference_is_recorded_even_with_no_session() -> None:
+    """A config message can build the real pipeline moments later; it should
+    come up in the language that was asked for."""
+    tools = Tools(session=None)
+
+    result = await tools.change_language(None, "  DE  ")
+
+    assert "de" in result
+    assert tools.kwami_config.soul.language == "de"
+
+
+async def test_a_language_change_rebuilds_the_live_instructions() -> None:
+    """Writing the config alone would delay the new language until the *next*
+    rebuild, so the turn that asked for it would still answer in the old one."""
+    tools = _standard()
+    rebuilt: list[str] = []
+    tools._build_system_prompt = lambda: "SYSTEM PROMPT IN FRENCH"  # type: ignore[attr-defined]
+
+    async def update_instructions(text: str) -> None:
+        rebuilt.append(text)
+
+    tools.update_instructions = update_instructions  # type: ignore[attr-defined]
+
+    await tools.change_language(None, "fr")
+
+    assert rebuilt == ["SYSTEM PROMPT IN FRENCH"]
+
+
+async def test_a_failed_instruction_rebuild_does_not_fail_the_tool(caplog) -> None:
+    """STT and TTS have already been retuned by this point, so the useful half
+    of the change is in effect -- reporting total failure would misdescribe it."""
+    import logging
+
+    tools = _standard()
+    tools._build_system_prompt = lambda: "prompt"  # type: ignore[attr-defined]
+
+    async def update_instructions(text: str) -> None:
+        raise RuntimeError("no activity yet")
+
+    tools.update_instructions = update_instructions  # type: ignore[attr-defined]
+
+    with caplog.at_level(logging.WARNING):
+        result = await tools.change_language(None, "it")
+
+    assert "it" in result.lower() or "italian" in result.lower()
+    assert tools.kwami_config.soul.language == "it"
+    assert "instructions were not rebuilt" in caplog.text
