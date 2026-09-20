@@ -315,3 +315,49 @@ async def test_research_briefing_is_bounded(agent: KwamiAgent, env_setting) -> N
     result = await agent.deep_research(None, "fusion power")
 
     assert len(result) < MAX_BRIEFING_CHARS + 500
+
+
+# -- Research angle templating ------------------------------------------------
+
+
+def test_the_recent_angle_uses_the_current_year() -> None:
+    """The template read `latest news 2026` as a literal. Correct the day it
+    was written, and from the next 1 January a silent bias towards a year that
+    is no longer recent -- a bug no test would ever have caught, because
+    nothing fails, the answers just quietly get worse."""
+    from datetime import UTC, datetime
+
+    from src.tools.knowledge import RESEARCH_ANGLES, research_query
+
+    recent = dict(RESEARCH_ANGLES)["recent"]
+
+    assert research_query(recent, "Tesla", now=datetime(2031, 3, 1, tzinfo=UTC)) == (
+        "Tesla latest news 2031"
+    )
+
+
+def test_no_research_angle_hardcodes_a_year() -> None:
+    """Guards the whole table, not just the one angle that had the problem."""
+    import re
+
+    from src.tools.knowledge import RESEARCH_ANGLES
+
+    for name, template in RESEARCH_ANGLES:
+        assert not re.search(r"\b(19|20)\d{2}\b", template), (
+            f"the {name!r} angle hardcodes a year: {template!r}"
+        )
+
+
+def test_a_template_without_a_year_placeholder_still_formats() -> None:
+    """Only one angle uses `{year}`; the others must not need it."""
+    from src.tools.knowledge import research_query
+
+    assert research_query("{topic} analysis", "Tesla") == "Tesla analysis"
+
+
+def test_the_year_defaults_to_now() -> None:
+    from datetime import UTC, datetime
+
+    from src.tools.knowledge import research_query
+
+    assert str(datetime.now(UTC).year) in research_query("{topic} {year}", "x")

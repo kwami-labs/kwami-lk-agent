@@ -19,11 +19,13 @@ quote tool here and no order tool.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from livekit.agents import RunContext, function_tool
 
+from ..adapters.http import shared_client
 from ..settings import get_settings
 from ..utils.logging import get_logger
 
@@ -53,7 +55,11 @@ MAX_SNIPPET_CHARS = 420
 #: latency the user hears, for a gain the breadth here already delivers.
 RESEARCH_ANGLES: tuple[tuple[str, str], ...] = (
     ("overview", "{topic}"),
-    ("recent", "{topic} latest news 2026"),
+    # `{year}` rather than a literal. This read "latest news 2026", which was
+    # correct when it was written and would have quietly started biasing every
+    # research pass towards a stale year on 1 January -- the kind of bug that
+    # never fails a test, just slowly makes the answers worse.
+    ("recent", "{topic} latest news {year}"),
     ("analysis", "{topic} analysis explained in depth"),
     ("critique", "{topic} criticism problems risks limitations"),
 )
@@ -85,6 +91,19 @@ def _clean(text: Any, limit: int) -> str:
     return collapsed[:limit]
 
 
+def research_query(template: str, topic: str, *, now: datetime | None = None) -> str:
+    """Fill a research angle template.
+
+    `{year}` resolves at call time rather than being baked in. The "recent"
+    angle previously read `latest news 2026`: correct on the day it was written,
+    and from the following 1 January a silent bias towards a year that is no
+    longer recent. Nothing would have failed -- the searches would just have
+    quietly got worse.
+    """
+    year = (now or datetime.now(UTC)).year
+    return template.format(topic=topic, year=year)
+
+
 async def _tavily(
     client: httpx.AsyncClient, api_key: str, query: str, max_results: int
 ) -> dict[str, Any]:
@@ -99,6 +118,7 @@ async def _tavily(
                 "include_answer": True,
             },
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=RESEARCH_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         data = response.json()
@@ -150,19 +170,22 @@ class KnowledgeToolsMixin:
 
         angles = RESEARCH_ANGLES[:MAX_RESEARCH_ANGLES]
         try:
-            async with httpx.AsyncClient(timeout=RESEARCH_TIMEOUT_SECONDS) as client:
-                # Concurrent, not sequential: the angles are independent, and
-                # four round trips in series is dead air the user sits through.
-                payloads = await asyncio.gather(
-                    *(
-                        _tavily(
-                            client, api_key, template.format(topic=topic), MAX_SOURCES_PER_ANGLE
-                        )
-                        for _, template in angles
+            client = shared_client()
+            # Concurrent, not sequential: the angles are independent, and
+            # four round trips in series is dead air the user sits through.
+            payloads = await asyncio.gather(
+                *(
+                    _tavily(
+                        client,
+                        api_key,
+                        research_query(template, topic),
+                        MAX_SOURCES_PER_ANGLE,
                     )
+                    for _, template in angles
                 )
-        except Exception as e:
-            logger.error("Deep research failed: %s", e)
+            )
+        except Exception:
+            logger.exception("Deep research failed")
             return f"I couldn't complete the research on {topic}."
 
         if getattr(self, "usage_tracker", None):
@@ -277,23 +300,24 @@ class KnowledgeToolsMixin:
             return {"error": "No symbol given."}
 
         try:
-            async with httpx.AsyncClient(timeout=QUOTE_TIMEOUT_SECONDS) as client:
-                response = await client.get(
-                    QUOTE_URL.format(symbol=ticker),
-                    headers={"User-Agent": QUOTE_USER_AGENT},
-                    params={"range": "1d", "interval": "1d"},
-                )
-                # An unknown ticker 404s. That is a different answer from "the
-                # feed is down", and the user can act on it -- they misheard
-                # themselves, or the thing trades under another symbol.
-                if response.status_code == 404:
-                    logger.info("Unknown market symbol: %s", ticker)
-                    return {
-                        "error": f"I don't recognise the symbol {ticker}.",
-                        "hint": "Crypto needs a currency, like BTC-USD. Indices start with ^.",
-                    }
-                response.raise_for_status()
-                data = response.json()
+            client = shared_client()
+            response = await client.get(
+                QUOTE_URL.format(symbol=ticker),
+                headers={"User-Agent": QUOTE_USER_AGENT},
+                params={"range": "1d", "interval": "1d"},
+                timeout=QUOTE_TIMEOUT_SECONDS,
+            )
+            # An unknown ticker 404s. That is a different answer from "the
+            # feed is down", and the user can act on it -- they misheard
+            # themselves, or the thing trades under another symbol.
+            if response.status_code == 404:
+                logger.info("Unknown market symbol: %s", ticker)
+                return {
+                    "error": f"I don't recognise the symbol {ticker}.",
+                    "hint": "Crypto needs a currency, like BTC-USD. Indices start with ^.",
+                }
+            response.raise_for_status()
+            data = response.json()
         except Exception as e:
             logger.warning("Quote lookup failed for %s: %s", ticker, e)
             return {"error": f"I couldn't get a price for {ticker} right now."}
