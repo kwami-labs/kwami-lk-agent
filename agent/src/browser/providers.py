@@ -77,11 +77,11 @@ class BrowserProviderPort(Protocol):
         these carry cookies and logins, so one would hand one user's
         authenticated sessions to the next.
         """
-        raise NotImplementedError
+        ...
 
     async def release(self, browser_id: str) -> None:
         """Stop the browser, persisting its state. Safe to call more than once."""
-        pass
+        ...
 
 
 class ProviderUnavailableError(RuntimeError):
