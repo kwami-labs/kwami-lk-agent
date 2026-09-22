@@ -195,8 +195,8 @@ resolution-markers = [
     "python_full_version < '3.13'",
 ]
 dependencies = [
-    { name = "idna", marker = "python_full_version < '3.13'" },
-    { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13'" },
+    { name = "idna" },
+    { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" } },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/61/cc/a381afa6efea9f496eff839d4a6a1aed3bfafc7b3ab4b0d1b243a12573dd/anyio-4.14.2.tar.gz", hash = "sha256:cfa139f3ed1a23ee8f88a145ddb5ac7605b8bbfd8592baacd7ce3d8bb4313c7f", size = 260176, upload-time = "2026-07-12T20:29:07.082Z" }
 wheels = [
@@ -213,8 +213,8 @@ resolution-markers = [
     "python_full_version == '3.13.*'",
 ]
 dependencies = [
-    { name = "idna", marker = "python_full_version >= '3.13'" },
-    { name = "typing-extensions", version = "4.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and python_full_version < '3.15'" },
+    { name = "idna" },
+    { name = "typing-extensions", version = "4.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.15'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a9/d2/f4d173e22df740bc37b1db102b386ba719b66e95b0f0d751f556b387e6d2/anyio-4.15.1.tar.gz", hash = "sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94", size = 276966, upload-time = "2026-09-05T10:42:39.44Z" }
 wheels = [
@@ -3043,7 +3043,7 @@ wheels = [
 
 [[package]]
 name = "zep-cloud"
-version = "3.16.0"
+version = "3.28.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "httpx" },
@@ -3053,9 +3053,9 @@ dependencies = [
     { name = "typing-extensions", version = "4.15.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.13' or python_full_version >= '3.15'" },
     { name = "typing-extensions", version = "4.16.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.13' and python_full_version < '3.15'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/79/46f8d46d90c15dab68e062a10cb802ec24bedf6d4df6c708fe5ab4232b64/zep_cloud-3.16.0.tar.gz", hash = "sha256:5e6e363797ce613a79e56625aa282bde1fd819b8b70028415a5ba16817b19433", size = 66447, upload-time = "2026-01-17T02:08:09.665Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ac/03/90e1ecca7eb5192d526d51dfbcd8ac8dc2646c72f59ee63b64b521a99372/zep_cloud-3.28.0.tar.gz", hash = "sha256:225d2d89eabe713bd4e3d5996b6783cd5d2f4dfae39c4e7ec841b1c71efed833", size = 107299, upload-time = "2026-08-11T21:51:42.043Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/48/85ccaec38ef7ee44d5e255139af36e5ecee76a893c1a5827a983d3471e13/zep_cloud-3.16.0-py3-none-any.whl", hash = "sha256:d740cb2432bd23895f78f5340dcc1ae8474e62b8c7a32dab84bd1133432d7778", size = 115116, upload-time = "2026-01-17T02:08:08.24Z" },
+    { url = "https://files.pythonhosted.org/packages/5e/8b/6d7c7d92b7e25f8f3d2d69172156f60e9f02d21477763c470ff34bc6ac72/zep_cloud-3.28.0-py3-none-any.whl", hash = "sha256:12864e96a77cecd2685d069752a511ac65926184199cf2f44c23a26baced46ed", size = 188658, upload-time = "2026-08-11T21:51:40.374Z" },
 ]
 
 [[package]]
