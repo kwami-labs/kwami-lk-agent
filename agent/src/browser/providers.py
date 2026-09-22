@@ -81,7 +81,7 @@ class BrowserProviderPort(Protocol):
 
     async def release(self, browser_id: str) -> None:
         """Stop the browser, persisting its state. Safe to call more than once."""
-        ...
+        pass
 
 
 class ProviderUnavailableError(RuntimeError):
