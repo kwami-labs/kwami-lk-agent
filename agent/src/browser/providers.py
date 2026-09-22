@@ -68,7 +68,7 @@ class BrowserProviderPort(Protocol):
     @property
     def vendor(self) -> str:
         """Short id used in logs and usage records."""
-        ...
+        raise NotImplementedError
 
     async def launch(self, user_id: str) -> LaunchedBrowser:
         """Start a browser bound to `user_id`'s persisted state.
