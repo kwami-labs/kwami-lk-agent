@@ -175,7 +175,9 @@ def test_ui_control_guidance_appears_once_the_client_registers_them() -> None:
 
     assert "set_ui_control" in prompt
     assert "list_ui_controls" in prompt
-    assert "domain='theme'" in prompt
+    # A worked example is the point of the block: the model has to see how a
+    # spoken request maps onto domain/control/value, not just be told it can.
+    assert "theme/mode/dark" in prompt
 
 
 def test_one_registered_ui_tool_is_enough_to_emit_the_guidance() -> None:
@@ -183,9 +185,24 @@ def test_one_registered_ui_tool_is_enough_to_emit_the_guidance() -> None:
 
 
 def test_unrelated_client_tools_do_not_trigger_ui_guidance() -> None:
-    prompt = build_system_prompt(soul(), client_tool_names=["send_email", "book_flight"])
+    """A client with only its own custom tools gets no app guidance at all.
+
+    `send_email` used to stand in for "unrelated" here. It is not unrelated any
+    more -- it is one of the app's own email tools -- so this now uses names
+    that really are outside every capability block.
+    """
+    prompt = build_system_prompt(soul(), client_tool_names=["book_flight", "order_taxi"])
 
     assert "set_ui_control" not in prompt
+    assert "Controlling the app" not in prompt
+
+
+def test_registering_only_the_email_tools_describes_only_email() -> None:
+    """Guidance follows the registration, not an all-or-nothing switch."""
+    prompt = build_system_prompt(soul(), client_tool_names=["read_emails", "send_email"])
+
+    assert "read_emails" in prompt
+    assert "set_ui_control" not in prompt, "described a UI router the client never registered"
 
 
 # -- memory context ---------------------------------------------------------
@@ -210,3 +227,71 @@ def test_memory_context_is_capped() -> None:
 
 def test_empty_memory_context_is_treated_as_absent() -> None:
     assert MEMORY_HEADER not in build_system_prompt(soul(), "")
+
+
+# -- Language -----------------------------------------------------------------
+#
+# `soul.language` was parsed, documented in docs/protocol.md and settable from
+# the app, and then read by nothing: grep for `.language` outside `stt_language`
+# returned no hits at all. Retuning STT and TTS leaves the model hearing and
+# speaking the new language while still writing English, so the directive below
+# is what actually makes "switch to Spanish" work.
+
+
+def test_a_non_default_language_produces_a_directive() -> None:
+    from src.domain.prompt import language_directive
+
+    directive = language_directive("es")
+
+    assert "Spanish" in directive
+    assert "es" not in directive.split("Spanish")[0], "the name, not the bare code"
+
+
+def test_english_produces_no_directive() -> None:
+    """It is the model's default, so saying it spends prompt for nothing."""
+    from src.domain.prompt import language_directive
+
+    assert language_directive("en") == ""
+
+
+def test_an_absent_language_produces_no_directive() -> None:
+    from src.domain.prompt import language_directive
+
+    assert language_directive(None) == ""
+    assert language_directive("") == ""
+    assert language_directive("   ") == ""
+
+
+def test_an_unrecognised_language_produces_no_directive() -> None:
+    """Better silent than naming a language the model cannot place."""
+    from src.domain.prompt import language_directive
+
+    assert language_directive("xx") == ""
+    assert language_directive("klingon") == ""
+
+
+def test_a_regional_variant_falls_back_to_its_base_language() -> None:
+    """Clients send `pt-BR` and `en-GB`; neither is in the table by itself."""
+    from src.domain.prompt import language_directive
+
+    assert "Portuguese" in language_directive("pt-BR")
+    assert language_directive("en-GB") == "", "still English, still the default"
+
+
+def test_the_directive_reaches_the_system_prompt() -> None:
+    from src.domain import KwamiConfig, build_system_prompt
+
+    config = KwamiConfig()
+    config.soul.language = "ja"
+
+    prompt = build_system_prompt(config.soul)
+
+    assert "Japanese" in prompt
+
+
+def test_a_default_language_soul_gets_no_language_line() -> None:
+    from src.domain import KwamiConfig, build_system_prompt
+
+    prompt = build_system_prompt(KwamiConfig().soul)
+
+    assert "Speak and write in" not in prompt

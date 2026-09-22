@@ -25,19 +25,19 @@ def validate_tool_definition(tool_def: dict[str, Any]) -> bool:
         return False
 
     if not isinstance(name, str):
-        logger.warning(f"Tool 'name' must be a string, got {type(name)}")
+        logger.warning("Tool 'name' must be a string, got %s", type(name))
         return False
 
     # Description is optional but recommended
     description = func_def.get("description")
     if description and not isinstance(description, str):
-        logger.warning(f"Tool 'description' must be a string, got {type(description)}")
+        logger.warning("Tool 'description' must be a string, got %s", type(description))
         return False
 
     # Parameters should be a dict if present
     parameters = func_def.get("parameters")
     if parameters and not isinstance(parameters, dict):
-        logger.warning(f"Tool 'parameters' must be a dict, got {type(parameters)}")
+        logger.warning("Tool 'parameters' must be a dict, got %s", type(parameters))
         return False
 
     return True

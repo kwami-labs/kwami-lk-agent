@@ -106,12 +106,67 @@ async def should_disconnect_as_duplicate(
 
             if my_identity > oldest_agent.identity:
                 logger.warning(
-                    f"Another active agent ({oldest_agent.identity}) has priority. "
-                    f"This agent ({my_identity}) should disconnect."
+                    "Another active agent (%s) has priority. This agent (%s) should disconnect.",
+                    oldest_agent.identity,
+                    my_identity,
                 )
                 return True
             else:
-                logger.info(f"This agent ({my_identity}) has priority over {oldest_agent.identity}")
+                logger.info(
+                    "This agent (%s) has priority over %s", my_identity, oldest_agent.identity
+                )
                 return False
 
     return False
+
+
+#: Attribute and metadata keys a client may use to say where the user is.
+#: Several spellings because the app, the SDK and SIP each pick their own, and
+#: the same tolerance already exists in `runtime_bootstrap.resolve_kwami_id`.
+TIMEZONE_KEYS = ("timezone", "timeZone", "tz")
+
+
+def participant_timezone(room: "Room | None") -> str | None:
+    """The user's IANA timezone from their LiveKit participant, if they sent one.
+
+    The fallback for `get_current_time` when the `config` message carries no
+    timezone -- which is every telephony session and every app build older than
+    the field. Reads attributes and then metadata, mirroring how
+    `runtime_bootstrap.resolve_kwami_id` resolves a kwami id, so a client that
+    already knows one convention does not have to learn a second.
+
+    Never raises: this sits on a voice path, and a malformed participant should
+    cost the user a labelled-UTC answer, not the turn.
+    """
+    if room is None:
+        return None
+    try:
+        participants = list(room.remote_participants.values())
+    except Exception:
+        return None
+
+    for participant in participants:
+        if is_agent_participant(participant):
+            continue
+
+        attributes = getattr(participant, "attributes", None) or {}
+        if isinstance(attributes, dict):
+            for key in TIMEZONE_KEYS:
+                value = attributes.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+
+        metadata = getattr(participant, "metadata", None)
+        if isinstance(metadata, str) and metadata:
+            import json
+
+            try:
+                parsed = json.loads(metadata)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                for key in TIMEZONE_KEYS:
+                    value = parsed.get(key)
+                    if isinstance(value, str) and value.strip():
+                        return value.strip()
+    return None

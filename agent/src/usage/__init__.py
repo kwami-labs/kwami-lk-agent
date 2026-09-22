@@ -3,4 +3,4 @@
 from ..domain import UsageTracker
 from .reporter import UsageReporter
 
-__all__ = ["UsageTracker", "UsageReporter"]
+__all__ = ["UsageReporter", "UsageTracker"]

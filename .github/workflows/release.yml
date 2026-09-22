@@ -1,0 +1,166 @@
+name: Release
+
+# Cutting a release is pushing a `v*` tag. Everything below is a gate on that
+# tag: if any of it fails, no GitHub Release is published.
+on:
+  push:
+    tags: ["v*"]
+
+# Default to read. Only `publish` creates the GitHub Release, and only it is
+# granted write -- `verify` and `infra` run arbitrary build tooling and have
+# no business holding a token that can push to the repo.
+permissions:
+  contents: read
+
+env:
+  UV_FROZEN: "1"
+
+jobs:
+  verify:
+    name: Verify tag and gates
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: agent/uv.lock
+
+      # A tag that disagrees with the packaged version produces a release whose
+      # artifacts say something else. Fail here rather than ship that.
+      - name: Tag matches agent/pyproject.toml
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          packaged="$(grep -m1 '^version = ' agent/pyproject.toml | cut -d'"' -f2)"
+          if [ "$tag" != "$packaged" ]; then
+            echo "::error::tag $GITHUB_REF_NAME implies $tag but agent/pyproject.toml is $packaged"
+            exit 1
+          fi
+          echo "version=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Install dependencies
+        working-directory: agent
+        run: uv sync --extra dev
+
+      - name: Ruff (lint)
+        working-directory: agent
+        run: uv run ruff check .
+
+      - name: Ruff (format check)
+        working-directory: agent
+        run: uv run ruff format --check .
+
+      - name: mypy
+        working-directory: agent
+        run: uv run mypy
+
+      - name: Offline suite with coverage
+        working-directory: agent
+        run: uv run python -m pytest tests/ --cov=src --cov-report=term-missing
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build agent image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: agent
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  infra:
+    name: Verify Worker deploys
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # packageManager lives in infra/package.json, not the repo root. Without
+      # this the action looks at a file that does not exist and exits before
+      # the Worker can be type-checked.
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install dependencies
+        working-directory: infra
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate worker types
+        working-directory: infra
+        run: pnpm types
+
+      - name: TypeScript
+        working-directory: infra
+        run: pnpm typecheck
+
+      # Runs inside workerd via @cloudflare/vitest-plugin, so the container
+      # binding, the Durable Object and ctx.waitUntil are the real ones. This
+      # deploy target had no tests at all while the agent sat at 100%.
+      - name: Worker tests
+        working-directory: infra
+        run: pnpm test
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      # A full `wrangler deploy --dry-run`: bundles the Worker, validates every
+      # binding and migration in wrangler.jsonc, and builds the container image.
+      # No Cloudflare credentials are involved. Too slow for the PR gate, but a
+      # tag should not be published if `make deploy-cf` would fail.
+      - name: Deploy dry-run
+        working-directory: infra
+        run: pnpm check
+
+  publish:
+    name: Publish GitHub Release
+    needs: [verify, infra]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # creates the tag's GitHub Release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # The release body is the changelog section for this version, so the
+      # changelog stays the single source of truth for what shipped.
+      - name: Extract changelog section
+        id: notes
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          python3 - <<'PY' > release-notes.md
+          import os, re, sys
+
+          version = os.environ["VERSION"]
+          text = open("CHANGELOG.md", encoding="utf-8").read()
+          # Match "## [1.0.0]" up to the next "## " heading.
+          pattern = rf"^## \[{re.escape(version)}\][^\n]*\n(.*?)(?=^## |\Z)"
+          match = re.search(pattern, text, re.S | re.M)
+          if not match or not match.group(1).strip():
+              print(f"No changelog section for {version}", file=sys.stderr)
+              raise SystemExit(1)
+          print(match.group(1).strip())
+          PY
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file release-notes.md \
+            --verify-tag

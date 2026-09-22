@@ -145,7 +145,7 @@ class UsageTracker:
             entry.completion_tokens += completion_tokens
             entry.cached_input_tokens += cached_input_tokens
 
-        logger.info(f"LLM usage: {model_id} +{tokens} tokens (total: {entry.total_units:.0f})")
+        logger.info("LLM usage: %s +%s tokens (total: %.0f)", model_id, tokens, entry.total_units)
 
     # -----------------------------------------------------------------
     # STT tracking
@@ -170,7 +170,7 @@ class UsageTracker:
             entry.audio_input_minutes += minutes
 
         logger.info(
-            f"STT usage: {model_id} +{minutes:.3f} min (total: {entry.total_units:.3f} min)"
+            "STT usage: %s +%.3f min (total: %.3f min)", model_id, minutes, entry.total_units
         )
 
     # -----------------------------------------------------------------
@@ -194,7 +194,7 @@ class UsageTracker:
             entry.event_count += 1
 
         logger.info(
-            f"TTS usage: {model_id} +{characters} chars (total: {entry.total_units:.0f} chars)"
+            "TTS usage: %s +%s chars (total: %.0f chars)", model_id, characters, entry.total_units
         )
 
     # -----------------------------------------------------------------
@@ -251,8 +251,10 @@ class UsageTracker:
             entry.text_output_tokens += text_output_tokens
 
         logger.info(
-            f"Realtime usage: {model_id} +{normalized_units:.3f} min "
-            f"(total: {entry.total_units:.3f} min)"
+            "Realtime usage: %s +%.3f min (total: %.3f min)",
+            model_id,
+            normalized_units,
+            entry.total_units,
         )
 
     # -----------------------------------------------------------------

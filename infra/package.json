@@ -2,18 +2,24 @@
   "name": "kwami-lk-agent-infra",
   "private": true,
   "type": "module",
+  "packageManager": "pnpm@11.10.0",
   "scripts": {
     "dev": "wrangler dev",
+    "typecheck": "tsc --noEmit",
     "deploy": "wrangler deploy --env=\"\"",
     "deploy:staging": "wrangler deploy --env staging",
     "types": "wrangler types",
     "check": "wrangler deploy --dry-run --env=\"\"",
     "tail": "wrangler tail",
-    "secrets:bulk": "wrangler secret bulk"
+    "secrets:bulk": "wrangler secret bulk",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "devDependencies": {
+    "@cloudflare/vitest-plugin": "^1.1.13",
     "@types/node": "^22.20.3",
     "typescript": "^7.0.2",
+    "vitest": "^4.1.11",
     "wrangler": "4.132.0"
   },
   "dependencies": {

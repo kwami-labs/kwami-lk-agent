@@ -11,7 +11,7 @@ Key fixes over the previous implementation:
   Preference, Location, Event, Object, Topic, Organization, Document)
 """
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .utils import logger
 
@@ -194,8 +194,8 @@ def _build_entity_models(
         fields = et.get("fields", {})
 
         # Build annotations and field defaults for the model
-        annotations = {}
-        field_defaults = {}
+        annotations: dict[str, Any] = {}
+        field_defaults: dict[str, Any] = {}
         for field_name, field_desc in fields.items():
             annotations[field_name] = EntityText
             field_defaults[field_name] = Field(description=field_desc, default=None)
@@ -252,8 +252,8 @@ def _build_edge_models(
         target = edge.get("target")
 
         # Build annotations and field defaults
-        annotations = {}
-        field_defaults = {}
+        annotations: dict[str, Any] = {}
+        field_defaults: dict[str, Any] = {}
         for field_name, field_desc in fields.items():
             annotations[field_name] = EntityText
             field_defaults[field_name] = Field(description=field_desc, default=None)
@@ -314,7 +314,7 @@ async def configure_ontology(
             logger.warning("No ontology models could be built, skipping configuration")
             return False
 
-        await client.graph.set_ontology(
+        await client.graph.set_ontology(  # type: ignore[attr-defined]
             entities=entities,
             edges=edges,
             user_ids=[user_id],
@@ -323,9 +323,12 @@ async def configure_ontology(
         entity_names = [e["name"] for e in entity_types]
         edge_names = [e["name"] for e in edge_types]
         logger.info(
-            f"Configured ontology for {user_id}: "
-            f"{len(entity_types)} entity types ({', '.join(entity_names[:5])}...), "
-            f"{len(edge_types)} edge types ({', '.join(edge_names[:5])}...)"
+            "Configured ontology for %s: %s entity types (%s...), %s edge types (%s...)",
+            user_id,
+            len(entity_types),
+            ", ".join(entity_names[:5]),
+            len(edge_types),
+            ", ".join(edge_names[:5]),
         )
         return True
 
@@ -333,5 +336,5 @@ async def configure_ontology(
         logger.warning("Zep ontology SDK classes not available, skipping ontology configuration")
         return False
     except Exception as e:
-        logger.warning(f"Could not configure ontology (may not be supported on your plan): {e}")
+        logger.warning("Could not configure ontology (may not be supported on your plan): %s", e)
         return False

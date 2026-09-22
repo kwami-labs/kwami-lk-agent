@@ -61,8 +61,8 @@ async def apply_runtime_config(
 
     try:
         runtime_config = await runtime_config_task
-    except Exception as e:
-        logger.error("Failed to fetch runtime config for %s: %s", kwami_id, e)
+    except Exception:
+        logger.exception("Failed to fetch runtime config for %s", kwami_id)
         return False
 
     if not runtime_config:

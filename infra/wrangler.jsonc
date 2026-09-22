@@ -17,6 +17,17 @@
     "KWAMI_API_URL": "https://api.kwami.io",
     "KWAMI_API_TIMEOUT": "30.0",
     "KWAMI_ALLOW_BROWSER_JS": "false",
+    // browserbase (default) or browser_use. Must match what is
+    // actually configured as a secret, or the agent falls back to the
+    // other vendor and the user loses their saved logins.
+    "KWAMI_BROWSER_PROVIDER": "browserbase",
+    // The Worker beside this already logs JSON; matching it means one
+    // aggregator query covers both halves of a session.
+    "KWAMI_LOG_FORMAT": "json",
+    // Tracing is off until an endpoint is set. Standard OTEL_* names, so
+    // pointing this at a collector is a deploy-time decision.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    "OTEL_SERVICE_NAME": "kwami-lk-agent",
   },
   "triggers": {
     "crons": ["*/2 * * * *"],
@@ -49,10 +60,37 @@
       "name": "kwami-lk-agent-staging",
       "vars": {
         "ENVIRONMENT": "staging",
+        // FIXME(staging): these two still point at PRODUCTION.
+        //
+        // `make deploy-cf-staging` therefore joins the production LiveKit
+        // project and bills real user credits against the production API --
+        // a staging deploy is indistinguishable from a production one from
+        // the outside, which is the opposite of what staging is for.
+        //
+        // A separate LiveKit project and API environment exist; these need
+        // their URLs, and the staging project's LIVEKIT_API_KEY /
+        // LIVEKIT_API_SECRET pushed as staging Worker secrets:
+        //
+        //   cd infra && pnpm secrets:bulk secrets.json --env staging
+        //
+        // Left as an explicit FIXME rather than guessed, because a staging
+        // env silently pointed at the wrong host is the bug being fixed here,
+        // not a smaller version of it.
         "LIVEKIT_URL": "wss://kwami-uslb42tw.livekit.cloud",
         "KWAMI_API_URL": "https://api.kwami.io",
         "KWAMI_API_TIMEOUT": "30.0",
         "KWAMI_ALLOW_BROWSER_JS": "false",
+    // browserbase (default) or browser_use. Must match what is
+    // actually configured as a secret, or the agent falls back to the
+    // other vendor and the user loses their saved logins.
+    "KWAMI_BROWSER_PROVIDER": "browserbase",
+    // The Worker beside this already logs JSON; matching it means one
+    // aggregator query covers both halves of a session.
+    "KWAMI_LOG_FORMAT": "json",
+    // Tracing is off until an endpoint is set. Standard OTEL_* names, so
+    // pointing this at a collector is a deploy-time decision.
+    "OTEL_EXPORTER_OTLP_ENDPOINT": "",
+    "OTEL_SERVICE_NAME": "kwami-lk-agent",
       },
       "triggers": {
         "crons": ["*/2 * * * *"],

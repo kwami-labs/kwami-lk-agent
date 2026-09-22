@@ -43,7 +43,7 @@ def test_every_advertised_llm_provider_constructs(
 
     try:
         instance = create_llm(config)
-    except Exception as exc:  # noqa: BLE001 - the point of the test
+    except Exception as exc:
         pytest.fail(f"create_llm({provider!r}) raised {type(exc).__name__}: {exc}")
 
     assert instance is not None
@@ -74,7 +74,7 @@ def test_silent_provider_substitution_is_logged(
     with caplog.at_level("WARNING"):
         try:
             instance = create_llm(config)
-        except Exception:  # noqa: BLE001 - covered by the test above
+        except Exception:
             pytest.skip(f"{provider} raises; see test_every_advertised_llm_provider_constructs")
 
     served_by_openai = type(instance).__module__.startswith("livekit.plugins.openai")
@@ -144,7 +144,7 @@ def test_mistral_reads_its_own_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
 
     try:
         instance = create_llm(config)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         pytest.fail(f"MISTRAL_API_KEY alone is not enough to build a Mistral LLM: {exc}")
 
     client = getattr(instance, "_client", None)

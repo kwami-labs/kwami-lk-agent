@@ -1,12 +1,14 @@
 """Built-in function tools for KwamiAgent."""
 
 import asyncio
+import contextlib
 import re
 from typing import Any
 
 import httpx
 from livekit.agents import RunContext, function_tool
 
+from ..adapters.http import shared_client
 from ..browser.safety import (
     UnsafeURLError,
     javascript_execution_enabled,
@@ -18,9 +20,12 @@ from ..constants import (
     CartesiaVoices,
     TTSProviders,
 )
+from ..domain.clock import current_time_phrase
+from ..domain.tool_result import refusal
 from ..runtime.container import room_from_context
 from ..settings import get_settings
-from ..utils.logging import get_logger
+from ..utils.logging import get_logger, redacted
+from ..utils.room import participant_timezone
 
 logger = get_logger("tools")
 
@@ -40,10 +45,12 @@ def _extract_price(text: str) -> str | None:
     if not m:
         return None
     prefix = (m.group(1) or "").strip()
-    num = (m.group(2) or "").replace(",", ".")
+    # Group 2 is not optional and both of its alternatives require at least one
+    # digit, so a match always carries a number. There used to be a `if not num:
+    # return None` guard here; it could not run, and an unreachable guard is a
+    # claim about the pattern that nothing checks.
+    num = m.group(2).replace(",", ".")
     suffix = (m.group(3) or "").strip()
-    if not num:
-        return None
     currency = prefix or suffix or ""
     if currency.upper() in ("USD", "EUR", "GBP"):
         currency = {"USD": "$", "EUR": "€", "GBP": "£"}.get(currency.upper(), currency)
@@ -55,7 +62,7 @@ def _product_name_from_title(title: str) -> str:
     if not title:
         return ""
     t = title.strip()
-    for sep in (" | ", " – ", " - ", " — "):
+    for sep in (" | ", " – ", " - ", " — "):  # noqa: RUF001 - real title separators
         if sep in t:
             t = t.split(sep)[0].strip()
     return t[:80] if t else ""
@@ -98,28 +105,29 @@ async def _tavily_extract_images(
     if not api_key or not urls:
         return out
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.post(
-                "https://api.tavily.com/extract",
-                json={"urls": urls[:5], "include_images": True, "extract_depth": "basic"},
-                headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        client = shared_client()
+        r = await client.post(
+            "https://api.tavily.com/extract",
+            json={"urls": urls[:5], "include_images": True, "extract_depth": "basic"},
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        if usage_tracker:
+            usage_tracker.record_external_usage(
+                "tool",
+                "tavily/extract",
+                units_used=1.0,
+                request_count=1,
             )
-            r.raise_for_status()
-            if usage_tracker:
-                usage_tracker.record_external_usage(
-                    "tool",
-                    "tavily/extract",
-                    units_used=1.0,
-                    request_count=1,
-                )
-            data = r.json()
-            for item in data.get("results") or []:
-                url = item.get("url")
-                images = item.get("images") or []
-                if url and isinstance(images, list):
-                    out[url] = [
-                        img for img in images if isinstance(img, str) and img.startswith("http")
-                    ][:3]
+        data = r.json()
+        for item in data.get("results") or []:
+            url = item.get("url")
+            images = item.get("images") or []
+            if url and isinstance(images, list):
+                out[url] = [
+                    img for img in images if isinstance(img, str) and img.startswith("http")
+                ][:3]
     except Exception as e:
         logger.debug("Tavily extract failed: %s", e)
     return out
@@ -132,34 +140,35 @@ async def _fetch_image_for_url(
 ) -> str | None:
     """Try to get og:image or primary image for a URL via Microlink (no key required)."""
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            r = await client.get(
-                "https://api.microlink.io/",
-                params={"url": url, "screenshot": "false", "video": "false"},
+        client = shared_client()
+        r = await client.get(
+            "https://api.microlink.io/",
+            params={"url": url, "screenshot": "false", "video": "false"},
+            timeout=timeout,
+        )
+        r.raise_for_status()
+        if usage_tracker:
+            usage_tracker.record_external_usage(
+                "tool",
+                "microlink/fetch",
+                units_used=1.0,
+                request_count=1,
             )
-            r.raise_for_status()
-            if usage_tracker:
-                usage_tracker.record_external_usage(
-                    "tool",
-                    "microlink/fetch",
-                    units_used=1.0,
-                    request_count=1,
-                )
-            data = r.json()
-            d = data.get("data") or {}
-            img = d.get("image")
-            url_out = None
-            if isinstance(img, dict) and img.get("url"):
-                url_out = img["url"]
-            elif isinstance(img, str) and img.startswith("http"):
-                url_out = img
-            if not url_out and d.get("logo"):
-                logo = d.get("logo")
-                if isinstance(logo, dict) and logo.get("url"):
-                    url_out = logo["url"]
-                elif isinstance(logo, str) and logo.startswith("http"):
-                    url_out = logo
-            return url_out
+        data = r.json()
+        d = data.get("data") or {}
+        img = d.get("image")
+        url_out = None
+        if isinstance(img, dict) and img.get("url"):
+            url_out = img["url"]
+        elif isinstance(img, str) and img.startswith("http"):
+            url_out = img
+        if not url_out and d.get("logo"):
+            logo = d.get("logo")
+            if isinstance(logo, dict) and logo.get("url"):
+                url_out = logo["url"]
+            elif isinstance(logo, str) and logo.startswith("http"):
+                url_out = logo
+        return url_out
     except Exception as e:
         logger.debug("Microlink fetch failed for %s: %s", url[:50], e)
     return None
@@ -184,12 +193,30 @@ def _is_elevenlabs_tts(tts: Any) -> bool:
 class AgentToolsMixin:
     """Mixin containing function tools for KwamiAgent.
 
-    This mixin assumes the following attributes exist on the class:
-    - kwami_config: KwamiConfig instance
-    - _current_voice_config: KwamiVoiceConfig instance
-    - _memory: Optional KwamiMemory instance
-    - session: AgentSession with tts and stt attributes
+    The attributes below are supplied by the class this is mixed into
+    (``KwamiAgent``), not by the mixin itself. They are *declared* rather than
+    assigned: annotation-only statements create no class attribute, so nothing
+    here shadows what ``KwamiAgent.__init__`` sets, while the type checker and
+    any reader get the contract that used to live in prose.
+
+    Twenty-three of the type errors this module carried were the checker having
+    no way to know these exist. A prose list cannot be verified; this can.
     """
+
+    #: Set by KwamiAgent.__init__ and re-pointed by SessionState on every swap.
+    kwami_config: Any
+    #: The same object as ``kwami_config.voice`` -- see SessionState.prepare_handoff.
+    _current_voice_config: Any
+    #: None when no Zep credential is configured, so every use is guarded.
+    _memory: Any
+    #: The LiveKit room. None until main.py wires it; tools fall back to the
+    #: context lookup in ``room_from_context``.
+    room: Any
+    #: Accumulates provider usage for the end-of-session credit report.
+    usage_tracker: Any
+    #: Supplied by the framework from the running activity; raises before there
+    #: is one, which is why callers check ``hasattr`` first.
+    session: Any
 
     def _publisher(self, context: Any = None):
         """The room publisher for this call.
@@ -230,6 +257,16 @@ class AgentToolsMixin:
         tasks.add(task)
         task.add_done_callback(tasks.discard)
 
+    def _is_realtime_pipeline(self) -> bool:
+        """Whether this session speaks through a realtime model rather than TTS.
+
+        Read off the config rather than by probing `session.tts`, because the
+        two disagree during a reconfiguration: the agent is rebuilt before the
+        framework swaps the activity, so `session` can still be the old one.
+        """
+        voice_config = getattr(self.kwami_config, "voice", None)
+        return getattr(voice_config, "pipeline_type", "standard") == "realtime"
+
     @function_tool()
     async def get_kwami_info(self, context: RunContext) -> dict[str, Any]:
         """Get information about this Kwami instance."""
@@ -249,10 +286,14 @@ class AgentToolsMixin:
 
     @function_tool()
     async def get_current_time(self, context: RunContext) -> str:
-        """Get the current time. Useful when the user asks what time it is."""
-        from datetime import datetime
+        """Get the current date and time where the user is.
 
-        return datetime.now().strftime("%I:%M %p on %A, %B %d, %Y")
+        Useful when the user asks what time it is, or what today's date is.
+        """
+        return current_time_phrase(
+            getattr(self.kwami_config, "timezone", ""),
+            participant_timezone(room_from_context(context, self.room)),
+        )
 
     @function_tool()
     async def change_voice(self, context: RunContext, voice_name: str) -> str:
@@ -264,6 +305,19 @@ class AgentToolsMixin:
                        For ElevenLabs: Use voice names like 'Rachel', 'Josh', 'Bella', etc.
                        For OpenAI: Use 'alloy', 'echo', 'nova', 'shimmer', 'onyx', 'fable'.
         """
+        # On the realtime pipeline there is no TTS to retune: the voice belongs
+        # to the speech-to-speech model and changing it means reconfiguring
+        # that model. This used to dead-end on "TTS not available", which told
+        # the model nothing it could act on, so a user asking a realtime
+        # session to change its voice was simply refused. Name the tool that
+        # does work, so the model can recover inside the same turn.
+        if self._is_realtime_pipeline():
+            return (
+                "I'm running the realtime speech-to-speech pipeline, so my voice "
+                "comes from the realtime model rather than a TTS engine. "
+                "Use change_realtime_voice to switch it."
+            )
+
         try:
             if not hasattr(self, "session") or self.session is None:
                 return "Unable to change voice - session not available"
@@ -280,12 +334,21 @@ class AgentToolsMixin:
             else:
                 self.session.tts.update_options(voice=voice_id)
 
-            logger.info(f"Voice changed to: {voice_name}")
+            # Write the change back into the config, after the live push has
+            # succeeded. Without this the tool changed the running TTS and
+            # nothing else: `get_current_voice_settings` kept reporting the old
+            # voice, and the next rebuild -- a config message, change_ai_model,
+            # switch_pipeline_mode -- reconstructed TTS from `kwami_config.voice`
+            # and silently undid it. Inside the try on purpose, so a provider
+            # that rejects the voice does not leave the config claiming it took.
+            self.kwami_config.voice.tts_voice = voice_id
+
+            logger.info("Voice changed to: %s", voice_name)
             return f"Voice changed to {voice_name}. I'm now speaking with a different voice!"
 
         except Exception as e:
-            logger.error(f"Failed to change voice: {e}")
-            return f"Sorry, I couldn't change the voice: {str(e)}"
+            logger.exception("Failed to change voice")
+            return f"Sorry, I couldn't change the voice: {e!s}"
 
     @function_tool()
     async def change_speaking_speed(self, context: RunContext, speed: float) -> str:
@@ -295,6 +358,16 @@ class AgentToolsMixin:
             speed: Speed multiplier between 0.5 (slow) and 2.0 (fast).
                    1.0 is normal speed.
         """
+        # Same dead end as change_voice: the realtime pipeline has no TTS, and
+        # "TTS not available" reads to the model as a transient fault rather
+        # than a wrong-tool answer.
+        if self._is_realtime_pipeline():
+            return (
+                "Speaking speed isn't adjustable on the realtime "
+                "speech-to-speech pipeline. Switching to the standard pipeline "
+                "with switch_pipeline_mode would make it adjustable."
+            )
+
         try:
             if not hasattr(self, "session") or self.session is None:
                 return "Unable to change speed - session not available"
@@ -311,7 +384,10 @@ class AgentToolsMixin:
                 )
 
             self.session.tts.update_options(speed=speed)
-            logger.info(f"Speaking speed changed to: {speed}")
+            # Same write-back as change_voice: the clamped value is the one that
+            # has to survive the next rebuild, not the one the model asked for.
+            self.kwami_config.voice.tts_speed = speed
+            logger.info("Speaking speed changed to: %s", speed)
 
             if speed < 0.8:
                 return f"Speed set to {speed}. I'll speak more slowly now."
@@ -321,8 +397,8 @@ class AgentToolsMixin:
                 return f"Speed set to {speed}. Speaking at normal pace."
 
         except Exception as e:
-            logger.error(f"Failed to change speed: {e}")
-            return f"Sorry, I couldn't change the speed: {str(e)}"
+            logger.exception("Failed to change speed")
+            return f"Sorry, I couldn't change the speed: {e!s}"
 
     @function_tool()
     async def change_language(self, context: RunContext, language: str) -> str:
@@ -333,30 +409,69 @@ class AgentToolsMixin:
                      'de' (German), 'it' (Italian), 'pt' (Portuguese), 'ja' (Japanese),
                      'ko' (Korean), 'zh' (Chinese).
         """
+        language = language.lower().strip()
         try:
             if not hasattr(self, "session") or self.session is None:
+                # Still record the preference: a config message may build the
+                # real pipeline moments later, and it should come up in the
+                # language that was asked for.
+                await self._remember_language(language)
                 return f"Language preference noted: {language}"
-
-            language = language.lower().strip()
 
             # Update STT language
             if self.session.stt is not None:
                 self.session.stt.update_options(language=language)
-                logger.info(f"STT language changed to: {language}")
+                logger.info("STT language changed to: %s", language)
 
             # Update TTS language if supported
             if self.session.tts is not None:
                 try:
                     self.session.tts.update_options(language=language)
-                    logger.info(f"TTS language changed to: {language}")
-                except Exception:
-                    pass  # Not all TTS providers support language parameter
+                    logger.info("TTS language changed to: %s", language)
+                except Exception as e:
+                    # Not every TTS provider takes a language option; that is
+                    # expected, but a silent pass here made a genuine failure
+                    # look identical to an unsupported one.
+                    logger.debug("TTS provider did not accept a language option: %s", e)
+
+            await self._remember_language(language)
 
             return LANGUAGE_GREETINGS.get(language, f"Language changed to {language}.")
 
         except Exception as e:
-            logger.error(f"Failed to change language: {e}")
-            return f"Sorry, I couldn't change the language: {str(e)}"
+            logger.exception("Failed to change language")
+            return f"Sorry, I couldn't change the language: {e!s}"
+
+    async def _remember_language(self, language: str) -> None:
+        """Record a language change where the rest of the agent will see it.
+
+        Three places, because they answer three different questions:
+
+        * ``voice.stt_language`` is what a rebuild reconstructs STT from, so
+          without it "switch to Spanish" survived only until the next voice or
+          model change and then silently reverted to English.
+        * ``soul.language`` is read by ``build_system_prompt``, which is what
+          makes the model *generate* Spanish. Retuning STT and TTS alone left it
+          transcribing and speaking Spanish while still writing English.
+        * The live instructions, rebuilt here -- writing the config alone would
+          mean the new language only took effect at the *next* rebuild, so the
+          turn that asked for it would still answer in the old one.
+
+        Failure to rebuild instructions is logged, not raised: the STT and TTS
+        push has already happened by this point, so the useful half of the
+        change is in effect and refusing the whole tool would misreport that.
+        """
+        self.kwami_config.voice.stt_language = language
+        self.kwami_config.soul.language = language
+
+        build = getattr(self, "_build_system_prompt", None)
+        update = getattr(self, "update_instructions", None)
+        if build is None or update is None:
+            return
+        try:
+            await update(build())
+        except Exception as e:
+            logger.warning("Language recorded but instructions were not rebuilt: %s", e)
 
     @function_tool()
     async def get_current_voice_settings(self, context: RunContext) -> dict[str, Any]:
@@ -383,10 +498,10 @@ class AgentToolsMixin:
 
         try:
             await self._memory.add_fact(fact)
-            logger.info(f"Remembered fact: {fact}")
+            logger.info("Remembered fact: %s", redacted(fact))
             return f"I'll remember that: {fact}"
-        except Exception as e:
-            logger.error(f"Failed to remember fact: {e}")
+        except Exception:
+            logger.exception("Failed to remember fact")
             return "Sorry, I couldn't save that to memory."
 
     @function_tool()
@@ -401,17 +516,14 @@ class AgentToolsMixin:
             if not results:
                 return f"I don't have any memories about '{topic}' yet."
 
-            memories = []
-            for r in results:
-                if r.get("content"):
-                    memories.append(f"- {r['content']}")
+            memories = [f"- {r['content']}" for r in results if r.get("content")]
 
             if memories:
                 return f"Here's what I remember about '{topic}':\n" + "\n".join(memories)
             return f"I don't have specific memories about '{topic}'."
 
-        except Exception as e:
-            logger.error(f"Failed to recall memories: {e}")
+        except Exception:
+            logger.exception("Failed to recall memories")
             return "Sorry, I couldn't search my memory right now."
 
     @function_tool()
@@ -443,7 +555,7 @@ class AgentToolsMixin:
         except Exception as e:
             return {
                 "enabled": True,
-                "status": f"Error: {str(e)}",
+                "status": f"Error: {e!s}",
             }
 
     @function_tool()
@@ -467,25 +579,26 @@ class AgentToolsMixin:
             )
         max_results = max(1, min(10, max_results))
         try:
-            async with httpx.AsyncClient(timeout=12.0) as client:
-                r = await client.get(
-                    "https://serpapi.com/search",
-                    params={
-                        "engine": "google_shopping",
-                        "q": query,
-                        "api_key": api_key,
-                        "num": max_results,
-                    },
+            client = shared_client()
+            r = await client.get(
+                "https://serpapi.com/search",
+                params={
+                    "engine": "google_shopping",
+                    "q": query,
+                    "api_key": api_key,
+                    "num": max_results,
+                },
+                timeout=12.0,
+            )
+            r.raise_for_status()
+            if getattr(self, "usage_tracker", None):
+                self.usage_tracker.record_external_usage(
+                    "tool",
+                    "serpapi/google_shopping",
+                    units_used=1.0,
+                    request_count=1,
                 )
-                r.raise_for_status()
-                if getattr(self, "usage_tracker", None):
-                    self.usage_tracker.record_external_usage(
-                        "tool",
-                        "serpapi/google_shopping",
-                        units_used=1.0,
-                        request_count=1,
-                    )
-                data = r.json()
+            data = r.json()
         except Exception as e:
             logger.warning("SerpApi product search failed: %s", e)
             return "Product search failed. Try web_search with search_for_products=True."
@@ -575,27 +688,26 @@ class AgentToolsMixin:
             "Content-Type": "application/json",
         }
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(
-                    "https://api.tavily.com/search",
-                    json=payload,
-                    headers=headers,
+            client = shared_client()
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json=payload,
+                headers=headers,
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            if getattr(self, "usage_tracker", None):
+                self.usage_tracker.record_external_usage(
+                    "tool",
+                    "tavily/search",
+                    units_used=1.0,
+                    request_count=1,
                 )
-                resp.raise_for_status()
-                if getattr(self, "usage_tracker", None):
-                    self.usage_tracker.record_external_usage(
-                        "tool",
-                        "tavily/search",
-                        units_used=1.0,
-                        request_count=1,
-                    )
-                data = resp.json()
+            data = resp.json()
         except httpx.HTTPStatusError as e:
             body = ""
-            try:
+            with contextlib.suppress(Exception):
                 body = e.response.text
-            except Exception:
-                pass
             logger.warning(
                 "Tavily search failed: status=%s body=%s",
                 e.response.status_code,
@@ -617,7 +729,7 @@ class AgentToolsMixin:
             return f"Search failed: {msg}"
         except Exception as e:
             logger.exception("Tavily search failed")
-            return f"Search failed: {str(e)}"
+            return f"Search failed: {e!s}"
 
         results: list[dict[str, Any]] = [
             {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
@@ -745,7 +857,7 @@ class AgentToolsMixin:
             url = await validate_url_async(url)
         except UnsafeURLError as e:
             logger.warning("Refused to navigate to %r: %s", url[:120], e)
-            return f"I can't open that address: {e}."
+            return refusal(f"I can't open that address: {e}.")
 
         # Browser profiles persist cookies and logins by design. Falling back to
         # a shared "anonymous" profile handed one user's authenticated sessions
@@ -756,7 +868,7 @@ class AgentToolsMixin:
                 "Refusing to start a cloud browser without a kwami_id -- a shared "
                 "profile would leak cookies and logins across users."
             )
-            return (
+            return refusal(
                 "I can't open the browser right now because this session isn't "
                 "linked to an account yet."
             )
@@ -770,10 +882,10 @@ class AgentToolsMixin:
                 await session.start(user_id=user_id, url=url)
                 result = f"Opening {url}. The user can see and interact with the page in the browser panel."
         except ValueError as e:
-            return f"Cannot open browser: {e}"
+            return refusal(f"Cannot open browser: {e}")
         except Exception as e:
             logger.exception("Failed to open cloud browser")
-            return f"Failed to open browser: {e}"
+            return refusal(f"Failed to open browser: {e}")
 
         logger.info("Cloud browser navigated to: %s", url[:80])
         return result

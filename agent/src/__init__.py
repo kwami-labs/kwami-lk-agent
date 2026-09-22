@@ -14,12 +14,12 @@ from .session import SessionState, create_session_state
 __all__ = [
     "KwamiAgent",
     "KwamiConfig",
-    "KwamiVoiceConfig",
-    "KwamiSoulConfig",
-    "KwamiPersonaConfig",
-    "KwamiMemoryConfig",
     "KwamiMemory",
-    "create_memory",
+    "KwamiMemoryConfig",
+    "KwamiPersonaConfig",
+    "KwamiSoulConfig",
+    "KwamiVoiceConfig",
     "SessionState",
+    "create_memory",
     "create_session_state",
 ]

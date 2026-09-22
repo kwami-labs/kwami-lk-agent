@@ -90,11 +90,10 @@ def create_realtime_model(config: KwamiVoiceConfig):
         )
         return _default_openai_realtime()
 
-    except Exception as e:
-        logger.error(
-            "Failed to create %s realtime model (%s); falling back to OpenAI Realtime %s.",
+    except Exception:
+        logger.exception(
+            "Failed to create %s realtime model; falling back to OpenAI Realtime %s.",
             provider,
-            e,
             DEFAULT_OPENAI_REALTIME_MODEL,
         )
         return _default_openai_realtime()

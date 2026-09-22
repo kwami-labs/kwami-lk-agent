@@ -69,7 +69,7 @@ def create_vad(config: KwamiVoiceConfig, prewarmed: Any = None) -> Any:
             min_speech_duration=min_speech,
             min_silence_duration=min_silence,
         )
-    except Exception as e:
+    except Exception:
         # Never take a session down over turn-taking tuning.
-        logger.error("Failed to load a configured VAD (%s); using the prewarmed model", e)
+        logger.exception("Failed to load a configured VAD; using the prewarmed model")
         return prewarmed if prewarmed is not None else silero.VAD.load()

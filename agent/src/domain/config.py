@@ -245,6 +245,15 @@ class KwamiConfig:
 
     kwami_id: str = ""
     kwami_name: str = "Kwami"
+    #: IANA zone for the person on the other end ("Europe/Madrid"). Empty means
+    #: unknown, and `get_current_time` then says UTC rather than implying the
+    #: container's clock is theirs -- it answered in naive container-local time,
+    #: which on both deploy targets is UTC presented as if it were the user's.
+    timezone: str = ""
+    #: BCP-47 tag ("en-GB", "es-ES") for date and number formatting. Distinct
+    #: from `soul.language`, which decides what the model *writes*: someone can
+    #: want Spanish replies with UK date formatting.
+    locale: str = ""
     soul: KwamiSoulConfig = field(default_factory=KwamiSoulConfig)
     voice: KwamiVoiceConfig = field(default_factory=KwamiVoiceConfig)
     memory: KwamiMemoryConfig = field(default_factory=KwamiMemoryConfig)

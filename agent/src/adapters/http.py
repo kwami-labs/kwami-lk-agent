@@ -1,8 +1,22 @@
-"""A pooled HTTP client shared by every adapter.
+"""A pooled HTTP client shared by every adapter and tool.
 
-Replaces per-call `httpx.AsyncClient()` construction, which happened at ten
-separate call sites and paid a fresh TCP and TLS handshake on every tool
-invocation -- roughly 100-300ms of avoidable latency each, on a voice path.
+Constructing `httpx.AsyncClient()` per call pays a fresh TCP and TLS handshake
+every time -- roughly 100-300ms, on a path where the user is listening to
+silence. This module existed to fix that and its docstring claimed it had, but
+eighteen call sites across `browser/`, `tools/` and `runtime_bootstrap` still
+built their own; the claim was aspirational.
+
+`shared_client()` is the process-wide pool those call sites use now. It is a
+module-level singleton rather than something threaded through every signature
+because the alternative -- passing a client down into every tool body -- is the
+refactor that stalled the first time.
+
+Pool limits are set explicitly. httpx defaults to 100 connections and 20
+keepalives, which is sized for a script rather than a worker serving many
+concurrent sessions against a handful of hosts: the agent talks to maybe eight
+origins (OpenAI, Deepgram, Cartesia, Tavily, SerpAPI, Zep, Browserbase, the
+Kwami API), so a large *per-host* keepalive pool is what actually helps, and an
+unbounded total is what eventually exhausts file descriptors.
 """
 
 from __future__ import annotations
@@ -83,3 +97,41 @@ class HttpxClient:
         """Release the pool. Safe to call more than once."""
         if self._owns_client and not self._client.is_closed:
             await self._client.aclose()
+
+
+#: Sized for a worker talking to a few origins under concurrency, not for a
+#: script making one request. `max_keepalive_connections` is what turns the
+#: second call to a provider into a resumed connection instead of a new TLS
+#: handshake.
+POOL_LIMITS = httpx.Limits(
+    max_connections=200,
+    max_keepalive_connections=50,
+    keepalive_expiry=30.0,
+)
+
+_shared: httpx.AsyncClient | None = None
+
+
+def shared_client() -> httpx.AsyncClient:
+    """The process-wide pooled client.
+
+    Created on first use. Callers pass a per-request `timeout=` rather than
+    getting their own client, because the timeouts here are genuinely different
+    per call site -- 10s to check a browser's status, 20s for a research fan-out
+    -- and that difference is not a reason to pay another handshake.
+
+    Never used with `async with`: closing it would close the pool out from under
+    every other caller. `aclose_shared()` is the only thing that closes it.
+    """
+    global _shared
+    if _shared is None or _shared.is_closed:
+        _shared = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT_SECONDS, limits=POOL_LIMITS)
+    return _shared
+
+
+async def aclose_shared() -> None:
+    """Release the shared pool. Safe to call more than once."""
+    global _shared
+    if _shared is not None and not _shared.is_closed:
+        await _shared.aclose()
+    _shared = None

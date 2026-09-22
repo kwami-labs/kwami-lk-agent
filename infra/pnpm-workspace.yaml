@@ -1,0 +1,18 @@
+# pnpm 11 restricts .npmrc to auth and registry settings; everything else lives
+# here. These entries were previously in .npmrc as `only-built-dependencies[]`
+# and `minimum-release-age-exclude[]`, where pnpm 11 silently ignored them.
+
+# esbuild and workerd ship prebuilt binaries fetched by a postinstall script.
+# Without these, `wrangler dev` and `wrangler deploy` have no runtime to use.
+allowBuilds:
+  esbuild: true
+  workerd: true
+
+# pnpm 11 defaults minimumReleaseAge to 1440 (24h) as supply-chain protection.
+# The Cloudflare toolchain is version-locked in package.json and released
+# frequently, so a pinned wrangler younger than a day must still install.
+minimumReleaseAgeExclude:
+  - wrangler
+  - miniflare
+  - workerd
+  - "@cloudflare/workerd-linux-64"

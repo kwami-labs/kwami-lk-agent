@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 
+from .adapters.http import shared_client
 from .settings import get_settings
 from .utils.logging import get_logger
 
@@ -54,13 +55,15 @@ async def fetch_runtime_config(kwami_id: str) -> dict[str, Any] | None:
     url = f"{get_settings().kwami_api_url.rstrip('/')}/internal/kwamis/{kwami_id}/runtime"
     timeout = _api_timeout_seconds()
     try:
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.get(
-                url, headers={"X-Kwami-API-Key": get_settings().kwami_api_key}
-            )
-            response.raise_for_status()
-            payload = response.json()
-            return payload if isinstance(payload, dict) else None
+        client = shared_client()
+        response = await client.get(
+            url,
+            headers={"X-Kwami-API-Key": get_settings().kwami_api_key},
+            timeout=timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        return payload if isinstance(payload, dict) else None
     except httpx.HTTPStatusError as exc:
         body = (exc.response.text[:300] + "...") if exc.response and exc.response.text else ""
         logger.warning(
