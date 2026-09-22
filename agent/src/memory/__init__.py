@@ -9,9 +9,9 @@ from .manager import KwamiMemory, create_memory
 from .ontology import DEFAULT_EDGE_TYPES, DEFAULT_ENTITY_TYPES
 
 __all__ = [
+    "DEFAULT_EDGE_TYPES",
+    "DEFAULT_ENTITY_TYPES",
     "KwamiMemory",
     "MemoryContext",
     "create_memory",
-    "DEFAULT_ENTITY_TYPES",
-    "DEFAULT_EDGE_TYPES",
 ]

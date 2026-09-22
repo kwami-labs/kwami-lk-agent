@@ -1,0 +1,8 @@
+# Tests are full of doubles that raise injected errors, assert on URL
+# substrings, and import a module both as a package and as names -- all of
+# which CodeQL's quality pack flags as if they were production defects.
+# Production code stays in the scan; the suite does not.
+name: kwami
+paths-ignore:
+  - "**/tests/**"
+  - "agent/tests/**"

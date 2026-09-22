@@ -1,7 +1,14 @@
 """Cloud browser session lifecycle manager.
 
-Manages a single cloud browser per agent session: creation with per-user
-profiles, CDP-based navigation and interaction, idle timeout, and cleanup.
+Manages a single cloud browser per agent session: creation against the user's
+persistent profile, CDP-based navigation and interaction, idle timeout, and
+cleanup.
+
+Which vendor supplies the browser is decided in `browser.providers`, not here.
+This class used to construct `BrowserUseClient` itself and read that vendor's
+response shape inline, which made a second vendor impossible to add without
+forking it. Everything below the launch call -- CDP, idle timeout, metering,
+publishing to the frontend -- is the same whoever is running the browser.
 """
 
 from __future__ import annotations
@@ -12,36 +19,49 @@ import time
 from typing import Any
 
 from ..utils.logging import get_logger
-from .cloud_browser import BrowserUseClient, CDPConnection
-from .safety import validate_url
+from .cloud_browser import CDPConnection
+from .providers import BrowserProviderPort, LaunchedBrowser, create_browser_provider
+from .safety import UnsafeURLError, validate_url
 
 logger = get_logger("browser.session")
 
 # Auto-close cloud browser after this many seconds of inactivity
 IDLE_TIMEOUT_SECONDS = 5 * 60  # 5 minutes
 
+#: Where the browser is sent when a page redirects somewhere refused.
+BLANK_PAGE = "about:blank"
+
 
 class CloudBrowserSession:
     """Manages a cloud browser session with CDP control.
 
     Lifecycle:
-        1. start() — create cloud browser (with profile), connect CDP, return liveUrl
+        1. start() — rent a browser on the user's profile, connect CDP, return liveUrl
         2. navigate() / read_page() / click() / type_text() — interact via CDP
-        3. close() — stop browser (persists profile), disconnect CDP
+        3. close() — release the browser (persisting logins), disconnect CDP
     """
 
-    def __init__(self, room: Any = None, usage_tracker: Any = None) -> None:
+    def __init__(
+        self,
+        room: Any = None,
+        usage_tracker: Any = None,
+        provider: BrowserProviderPort | None = None,
+    ) -> None:
         """Initialize the session manager.
 
         Args:
             room: LiveKit room for publishing data to the frontend.
             usage_tracker: Records the billed minutes this session consumes.
+            provider: Cloud-browser vendor. Resolved from settings on first use
+                when not supplied, so constructing a session never needs
+                credentials -- only starting one does.
         """
-        self._client: BrowserUseClient | None = None
+        self._provider: BrowserProviderPort | None = provider
         self._cdp: CDPConnection | None = None
         self._browser_id: str | None = None
         self._live_url: str | None = None
-        self._profile_id: str | None = None
+        self._vendor: str = ""
+        self._persistence_id: str | None = None
         self._room = room
         self._current_url: str = ""
         self._idle_timer: asyncio.Task | None = None
@@ -84,7 +104,7 @@ class CloudBrowserSession:
         try:
             self._usage_tracker.record_external_usage(
                 "browser",
-                "browser_use/cloud",
+                f"{self._vendor or 'browser'}/cloud",
                 units_used=round(minutes, 4),
             )
         except Exception as e:  # never let metering break teardown
@@ -102,36 +122,33 @@ class CloudBrowserSession:
         Returns:
             The liveUrl for embedding in the frontend iframe.
         """
+        # Validate before renting anything. The reuse path below goes through
+        # `navigate`, which validates, but the fresh path drove `self._cdp`
+        # directly and so had no gate at all -- `navigate_to` happened to
+        # validate first, which left the session object safe only because of
+        # its caller. A browser profile carries the user's cookies and logins,
+        # so this has to hold wherever `start` is called from.
+        if url:
+            url = validate_url(url)
+
         if self.is_active:
             # Reuse existing session — just navigate if URL given
             if url:
                 await self.navigate(url)
             return self._live_url or ""
 
-        try:
-            self._client = BrowserUseClient()
-        except ValueError as e:
-            logger.warning("Cannot start cloud browser: %s", e)
-            raise
+        if self._provider is None:
+            try:
+                self._provider = create_browser_provider()
+            except Exception as e:
+                logger.warning("Cannot start cloud browser: %s", e)
+                raise
 
-        # Get or create a persistent profile for this user
-        try:
-            self._profile_id = await self._client.get_or_create_profile(user_id)
-        except Exception as e:
-            logger.warning("Profile lookup failed, continuing without profile: %s", e)
-            self._profile_id = None
-
-        # Create the cloud browser
-        browser = await self._client.create_browser(
-            profile_id=self._profile_id,
-            timeout_minutes=15,
-        )
-        browser_id = browser.get("id") if isinstance(browser, dict) else None
-        if not browser_id:
-            raise RuntimeError("Browser Use Cloud did not return a browser id")
-        self._browser_id = browser_id
-        self._live_url = browser.get("liveUrl")
-        cdp_url = browser.get("cdpUrl")
+        launched: LaunchedBrowser = await self._provider.launch(user_id)
+        self._browser_id = launched.browser_id
+        self._live_url = launched.live_url
+        self._vendor = launched.vendor
+        self._persistence_id = launched.persistence_id or None
 
         # From here on the cloud browser exists and is being billed by the
         # minute. Anything that fails before the session is usable must release
@@ -139,12 +156,13 @@ class CloudBrowserSession:
         # cleanup path is gated on `is_active`, so a failure here used to strand
         # a paid browser until its own 15-minute server timeout.
         try:
-            if not cdp_url:
-                raise RuntimeError("Browser Use Cloud did not return a cdpUrl")
-
-            # Connect CDP
             self._cdp = CDPConnection()
-            await self._cdp.connect(cdp_url)
+            if launched.cdp_ws_url:
+                # A browser-level endpoint: attach to a page, or the Page,
+                # Input and Runtime domains are simply absent.
+                await self._cdp.connect_ws(launched.cdp_ws_url)
+            else:
+                await self._cdp.connect(launched.cdp_http_url)
         except Exception:
             await self._release_unusable_browser()
             raise
@@ -175,11 +193,17 @@ class CloudBrowserSession:
         self._reset_idle_timer()
 
         logger.info(
-            "Cloud browser started: id=%s, profile=%s, url=%s",
+            "Cloud browser started: vendor=%s, id=%s, profile=%s, url=%s",
+            self._vendor or "?",
             self._browser_id[:8] if self._browser_id else "?",
-            self._profile_id[:8] if self._profile_id else "none",
+            self._persistence_id[:8] if self._persistence_id else "none",
             (url or "")[:60],
         )
+        if not self._persistence_id:
+            logger.warning(
+                "Browsing without a persistent profile: nothing the user signs "
+                "in to during this session will be remembered."
+            )
         return self._live_url or ""
 
     async def close(self) -> None:
@@ -191,9 +215,9 @@ class CloudBrowserSession:
             await self._cdp.close()
             self._cdp = None
 
-        if self._client and self._browser_id:
+        if self._provider and self._browser_id:
             try:
-                await self._client.stop_browser(self._browser_id)
+                await self._provider.release(self._browser_id)
             except Exception as e:
                 logger.warning("Failed to stop cloud browser %s: %s", self._browser_id[:8], e)
 
@@ -210,10 +234,11 @@ class CloudBrowserSession:
     async def navigate(self, url: str) -> str:
         """Navigate to a URL in the cloud browser."""
         self._ensure_active()
-        # Second gate: navigate() is also reachable from start() and from the
-        # session-event path, not just the navigate_to tool.
+        # Revalidated here as well as in `start` and in the `navigate_to` tool:
+        # this is the boundary every browsing path eventually crosses, and it
+        # must not depend on which of them got here.
         url = validate_url(url)
-        await self._cdp.navigate(url)
+        await self._connection.navigate(url)
         self._current_url = url
         self._reset_idle_timer()
 
@@ -222,19 +247,88 @@ class CloudBrowserSession:
 
         # Wait a moment for page to start loading
         await asyncio.sleep(1.5)
+
+        landed = await self._verify_landing_url()
+        if landed is not None:
+            return landed
+
         return f"Navigating to {url}. The user can see the page in their browser panel."
+
+    async def _verify_landing_url(self) -> str | None:
+        """Re-check where the page actually ended up, after redirects.
+
+        Only the URL the agent was *asked* to open was ever validated, and the
+        browser then follows redirects on its own. A public URL that 302s to
+        `169.254.169.254` was therefore uncovered -- and `read_page` feeds
+        whatever it landed on straight to the model.
+
+        This closes the practical half of that gap by checking the final URL and
+        leaving the page if it is one we would have refused. It does not close
+        the theoretical half: the page has already been fetched by the time we
+        look, so this limits what the *model* can be shown, not what the browser
+        touched. The remaining exposure is recorded under "What this agent does
+        not do" in docs/security.md rather than papered over.
+
+        Returns a message when the landing URL was refused, or None when it was
+        fine -- so the caller can report it in the same breath as the navigation.
+        """
+        try:
+            info = await self._connection.page_info()
+        except Exception as e:
+            # A page that will not report itself is not evidence of an attack.
+            logger.debug("Could not read the landing URL after navigation: %s", e)
+            return None
+
+        final_url = (info or {}).get("url") if isinstance(info, dict) else None
+        if not isinstance(final_url, str) or not final_url.strip():
+            return None
+        if final_url == self._current_url:
+            return None
+
+        try:
+            validate_url(final_url)
+        except UnsafeURLError as e:
+            logger.warning(
+                "Navigation landed on a refused address after redirect: %s (%s)",
+                final_url[:120],
+                e,
+            )
+            await self._leave_unsafe_page()
+            return (
+                "That link redirected somewhere I'm not allowed to open, so I've "
+                "left the page. I can't show you what was there."
+            )
+
+        logger.info("Navigation redirected to %s", final_url[:120])
+        self._current_url = final_url
+        await self._publish_session_event("update", url=final_url)
+        return None
+
+    async def _leave_unsafe_page(self) -> None:
+        """Move off a page that redirected somewhere it should not have.
+
+        `about:blank` rather than closing the browser: the session is still the
+        user's, the profile is still valid, and taking the whole browser away
+        over one bad link is a worse outcome than leaving the page.
+        """
+        self._current_url = ""
+        try:
+            await self._connection.navigate(BLANK_PAGE)
+            await self._publish_session_event("update", url=BLANK_PAGE)
+        except Exception as e:
+            logger.warning("Could not leave the refused page: %s", e)
 
     async def go_back(self) -> str:
         """Navigate back in history."""
         self._ensure_active()
-        await self._cdp.go_back()
+        await self._connection.go_back()
         self._reset_idle_timer()
         return "Going back to the previous page."
 
     async def go_forward(self) -> str:
         """Navigate forward in history."""
         self._ensure_active()
-        await self._cdp.go_forward()
+        await self._connection.go_forward()
         self._reset_idle_timer()
         return "Going forward to the next page."
 
@@ -245,7 +339,7 @@ class CloudBrowserSession:
         self._ensure_active()
         self._reset_idle_timer()
 
-        info = await self._cdp.page_info()
+        info = await self._connection.page_info()
         if not info or not isinstance(info, dict):
             return "Could not read page content."
 
@@ -280,7 +374,7 @@ class CloudBrowserSession:
         self._reset_idle_timer()
 
         # Get page elements with coordinates
-        info = await self._cdp.page_info()
+        info = await self._connection.page_info()
         elements = info.get("elements", []) if isinstance(info, dict) else []
 
         target = None
@@ -315,7 +409,7 @@ class CloudBrowserSession:
 
         x = target.get("x", 0)
         y = target.get("y", 0)
-        await self._cdp.click(float(x), float(y))
+        await self._connection.click(float(x), float(y))
 
         label = (target.get("label") or "")[:60]
         return f'Clicked on "{label}" ({target["id"]}) at ({x}, {y}).'
@@ -340,7 +434,7 @@ class CloudBrowserSession:
 
         # Clear existing content if requested
         if clear_first:
-            await self._cdp.send(
+            await self._connection.send(
                 "Input.dispatchKeyEvent",
                 type="keyDown",
                 key="a",
@@ -348,25 +442,25 @@ class CloudBrowserSession:
                 windowsVirtualKeyCode=65,
                 modifiers=2 if not _is_mac() else 4,  # Ctrl/Cmd+A
             )
-            await self._cdp.send(
+            await self._connection.send(
                 "Input.dispatchKeyEvent",
                 type="keyUp",
                 key="a",
                 code="KeyA",
                 windowsVirtualKeyCode=65,
             )
-            await self._cdp.press_key("Backspace")
+            await self._connection.press_key("Backspace")
             await asyncio.sleep(0.1)
 
         # Type the text
-        await self._cdp.type_text(text)
+        await self._connection.type_text(text)
         return f"Typed '{text[:50]}' into the field."
 
     async def press_key(self, key: str) -> str:
         """Press a keyboard key."""
         self._ensure_active()
         self._reset_idle_timer()
-        await self._cdp.press_key(key)
+        await self._connection.press_key(key)
         return f"Pressed '{key}'."
 
     async def scroll(self, direction: str = "down") -> str:
@@ -374,7 +468,7 @@ class CloudBrowserSession:
         self._ensure_active()
         self._reset_idle_timer()
         delta = 400 if direction.lower() == "down" else -400
-        await self._cdp.scroll(x=400, y=300, delta_y=delta)
+        await self._connection.scroll(x=400, y=300, delta_y=delta)
         return f"Scrolled {direction}."
 
     async def evaluate_js(self, expression: str) -> str:
@@ -382,7 +476,7 @@ class CloudBrowserSession:
         self._ensure_active()
         self._reset_idle_timer()
         try:
-            result = await self._cdp.evaluate(expression)
+            result = await self._connection.evaluate(expression)
             return f"JavaScript executed successfully. Result: {result}"
         except Exception as e:
             return f"Failed to execute JavaScript: {e}"
@@ -396,6 +490,26 @@ class CloudBrowserSession:
                 "No active cloud browser session. Use navigate_to to open a website first."
             )
 
+    @property
+    def _connection(self) -> CDPConnection:
+        """The live CDP connection, narrowed.
+
+        Every caller has already been through `_ensure_active`, which raises
+        when `is_active` is false -- and `is_active` is exactly the check that
+        `_cdp is not None`. The type checker cannot follow that across a method
+        returning None, so thirteen call sites each read as "None has no
+        attribute navigate". This states the invariant in one place instead.
+
+        The raise is not dead: it is what keeps this honest if a future caller
+        reaches a driving method without the guard.
+        """
+        cdp = self._cdp
+        if cdp is None:
+            raise RuntimeError(
+                "No active cloud browser session. Use navigate_to to open a website first."
+            )
+        return cdp
+
     async def _publish_session_event(
         self, action: str, url: str | None = None, title: str | None = None
     ) -> None:
@@ -404,10 +518,11 @@ class CloudBrowserSession:
             return
         msg: dict[str, Any] = {"type": "browser_session", "action": action}
         if self._live_url and action == "open":
-            # Append dark theme and hide BU UI chrome
-            live = self._live_url
-            sep = "&" if "?" in live else "?"
-            msg["liveUrl"] = f"{live}{sep}theme=dark&ui=false"
+            msg["liveUrl"] = self._embeddable_live_url()
+            msg["vendor"] = self._vendor
+            # The panel shows a "not signed in" hint when persistence is off,
+            # rather than letting the user discover it by being logged out.
+            msg["persistent"] = bool(self._persistence_id)
         if url:
             msg["url"] = url
         if title:
@@ -418,6 +533,26 @@ class CloudBrowserSession:
             logger.debug("Published browser_session event: action=%s", action)
         except Exception as e:
             logger.warning("Failed to publish browser_session event: %s", e)
+
+    def _embeddable_live_url(self) -> str:
+        """The live view URL, tuned for an iframe.
+
+        Each vendor hides its own chrome differently, and the parameters are
+        not interchangeable: Browser Use takes `ui=false`, while Browserbase's
+        fullscreen debugger URL is already bare and takes `navbar` to put
+        controls *back*. Sending one vendor's parameters to the other is
+        harmless but does nothing, which is exactly the kind of silent no-op
+        that reads as "the panel is broken".
+        """
+        live = self._live_url or ""
+        if not live:
+            return ""
+        from .providers import BROWSER_USE
+
+        if self._vendor != BROWSER_USE:
+            return live
+        sep = "&" if "?" in live else "?"
+        return f"{live}{sep}theme=dark&ui=false"
 
     def _reset_idle_timer(self) -> None:
         """Reset the idle auto-close timer."""
@@ -435,9 +570,9 @@ class CloudBrowserSession:
                 await cdp.close()
             except Exception as e:
                 logger.debug("Failed to close half-open CDP connection: %s", e)
-        if browser_id and self._client:
+        if browser_id and self._provider:
             try:
-                await self._client.stop_browser(browser_id)
+                await self._provider.release(browser_id)
                 logger.info("Released unusable cloud browser %s", browser_id[:8])
             except Exception as e:
                 logger.warning("Failed to release cloud browser %s: %s", browser_id[:8], e)
@@ -457,7 +592,7 @@ class CloudBrowserSession:
 
         try:
             running = asyncio.current_task()
-        except RuntimeError:  # pragma: no cover - no running loop
+        except RuntimeError:
             running = None
         if running is timer:
             # Let the timer finish its own close(); just drop the reference.

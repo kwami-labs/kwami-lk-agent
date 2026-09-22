@@ -132,3 +132,33 @@ def test_every_documented_variable_is_read_by_settings() -> None:
 
     missing = sorted(name for name in documented - plugin_owned if name not in source)
     assert not missing, f".env.sample documents variables Settings never reads: {missing}"
+
+
+def test_the_documented_elevenlabs_alias_actually_resolves(env_setting) -> None:
+    """`EnvVars.ELEVENLABS` advertises two spellings; both must be readable.
+
+    `constants.EnvVars.ELEVENLABS` lists `ELEVEN_API_KEY` *and*
+    `ELEVENLABS_API_KEY`, and `factories/tts.py::_check_api_key` asks
+    `has_provider_key` about each. But `provider_keys` only ever collected the
+    first spelling, so the alias could never resolve: a user who set only
+    `ELEVENLABS_API_KEY` got "not set" and a silent fallback to OpenAI.
+    """
+    env_setting("ELEVEN_API_KEY", None)
+    env_setting("ELEVENLABS_API_KEY", "el-alias-key")
+
+    assert Settings.from_env().has_provider_key("ELEVENLABS_API_KEY") is True
+
+
+def test_google_credentials_resolve_under_either_documented_name(env_setting) -> None:
+    """`.env.sample` documents `GOOGLE_API_KEY`; the TTS check wanted the other one.
+
+    `EnvVars.GOOGLE` listed only `GOOGLE_APPLICATION_CREDENTIALS`, so following
+    `.env.sample` warned and fell back on every Google TTS request.
+    """
+    env_setting("GOOGLE_APPLICATION_CREDENTIALS", None)
+    env_setting("GOOGLE_API_KEY", "google-test-key")
+    settings = Settings.from_env()
+
+    from src.constants import EnvVars
+
+    assert any(settings.has_provider_key(name) for name in EnvVars.GOOGLE)

@@ -13,8 +13,70 @@ from __future__ import annotations
 
 from typing import Any
 
+from .capabilities import build_capability_guidance
+
 # Memory context is untrusted in length; cap what reaches the system prompt.
 MAX_SYSTEM_MEMORY_CONTEXT_CHARS = 2200
+
+#: Language names for the codes the `change_language` tool accepts. A bare code
+#: in the prompt ("Respond in es") is markedly less reliable than the name.
+LANGUAGE_NAMES: dict[str, str] = {
+    "en": "English",
+    "es": "Spanish",
+    "fr": "French",
+    "de": "German",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "ru": "Russian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "zh": "Chinese",
+    "hi": "Hindi",
+    "ar": "Arabic",
+    "tr": "Turkish",
+    "sv": "Swedish",
+    "ca": "Catalan",
+}
+
+#: English is the model's default behaviour, so saying so adds prompt with no
+#: effect. Every other language needs an explicit instruction.
+DEFAULT_LANGUAGE = "en"
+
+
+def language_directive(language: str | None) -> str:
+    """The instruction that makes the model *generate* in `language`.
+
+    `soul.language` was parsed, documented in the protocol and settable from the
+    app, and then read by nothing at all -- grep for `.language` outside
+    `stt_language` returned no hits. Retuning STT and TTS, which is all
+    `change_language` used to do, leaves the model transcribing Spanish, reading
+    Spanish aloud, and still writing its replies in English.
+
+    Returns "" for English and for anything unrecognised, rather than guessing:
+    an instruction naming a language the model cannot place is worse than none.
+    """
+    code = (language or "").strip().lower()
+    if not code:
+        return ""
+    # Clients send regional variants (`pt-BR`, `en-GB`). Resolve to the base
+    # language *before* comparing against the default, or `en-GB` earns a
+    # "Speak and write in English" line that says nothing the model does not
+    # already do.
+    if code not in LANGUAGE_NAMES:
+        code = code.split("-", 1)[0]
+    if code == DEFAULT_LANGUAGE:
+        return ""
+    name = LANGUAGE_NAMES.get(code)
+    if not name:
+        return ""
+    return (
+        f"\nSpeak and write in {name}. Keep to {name} for the whole conversation "
+        "unless the user asks for another language, even if they write to you in "
+        "a different one."
+    )
+
 
 RESPONSE_LENGTH_GUIDE: dict[str, str] = {
     "short": "Keep responses brief and concise (1-2 sentences).",
@@ -71,7 +133,14 @@ _STATIC_GUIDANCE_PARTS: tuple[str, ...] = (
     "Speak naturally as if having a real conversation.",
     "\nWhen users share their name, remember it and use it naturally in conversation.",
     "Be genuinely interested in learning about who you're talking to.",
-    "\nYou can change your voice or the AI model being used if the user requests it.",
+    "\nYou can reconfigure yourself mid-conversation, and the conversation is kept: "
+    "change_voice or change_speaking_speed for how you sound, change_realtime_voice on the "
+    "realtime pipeline, change_ai_model to move to another model or provider (the user can "
+    "say a family name like Claude, Gemini or Groq, or an exact model id), "
+    "switch_pipeline_mode to move between the standard and realtime pipelines, and "
+    "change_language for the conversation language. Do it when asked rather than "
+    "describing which setting to open. Use get_pipeline_status, list_available_models or "
+    "list_available_voices when you need to know what you are running or could switch to.",
     "\nWhen the user asks to find products, gifts, or things to buy (e.g. bags, clothes, items), use the product_search tool first so they see actual product cards with product image, name, and price—not store website links. If product_search says it is not configured, use web_search with search_for_products=True instead.",
     "Remember what the user searched for; use your memory of past searches in follow-up answers.",
     "If the user says to discard, remove, or dismiss a result (e.g. 'discard the first one', 'remove that card'), call dismiss_search_result with the 0-based index (first card = 0, second = 1).",
@@ -82,6 +151,25 @@ _STATIC_GUIDANCE_PARTS: tuple[str, ...] = (
     "click_in_navigation to click elements (prefer element_id like 'el-5'), "
     "type_in_navigation to type text, press_key_in_navigation for keys like Enter, "
     "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along.",
+    "\nWhen the user asks you to research, investigate, compare or explain something in "
+    "depth, use deep_research rather than web_search: it runs several angles at once and "
+    "comes back with a briefing. Summarise it conversationally in your own words and offer "
+    "to go deeper -- never read it out verbatim.",
+    "\nFor markets: get_market_quote gives an exact, current price for a stock, ETF, index, "
+    "currency or crypto, which a search snippet does not. Use deep_research for the story "
+    "behind a move. You give information, not financial advice -- say so if you are asked to "
+    "choose for them.",
+    "\nTo play music or video, use play_media with what the user asked for -- it opens the "
+    "service, picks the first result and starts it playing, which navigate_to alone cannot "
+    "do. Then control_playback (pause, resume, stop, mute, unmute, restart), "
+    "set_playback_volume and get_now_playing. Say what you are putting on.",
+    "\nTo trade, the order goes through three steps and they cannot be skipped. "
+    "prepare_trade validates it, prices it and gives you a confirmation code -- it sends "
+    "nothing. Read the order and the estimated value back to the user in full, then ask "
+    "them to say the code aloud. open_trade_ticket puts their own broker on screen. "
+    "submit_trade takes the code AS THE USER SPOKE IT; never pass a code you produced "
+    "yourself, and if you did not clearly hear the ticker, the side or the quantity, ask "
+    "again rather than preparing an order. cancel_prepared_trade drops it.",
     "ADVANCED NAVIGATION STRATEGIES:\n"
     "1. DIRECT SEARCHING: If the user asks you to search for something on a major site (YouTube, Google, Amazon, etc.), "
     "DO NOT try to navigate to the homepage and click the search bar. Instead, navigate DIRECTLY to the search URL. "
@@ -93,31 +181,14 @@ _STATIC_GUIDANCE_PARTS: tuple[str, ...] = (
 )
 
 # Joined once, at import, rather than rebuilt on every call.
-# Guidance that only makes sense when the frontend has actually registered the
-# UI-control tools. These name `set_ui_control` and `list_ui_controls`, which are
-# client-side tools -- nothing in this repo defines them. Emitting this
-# unconditionally told the model to call tools that did not exist, inviting
-# hallucinated tool calls on any deployment that does not register them.
-_UI_CONTROL_GUIDANCE_PARTS: tuple[str, ...] = (
-    "When the user asks you to control the app workspace or interface, prefer the available client workspace tools instead of telling them what to click.",
-    "Use the structured client UI tools for requests like opening panels, changing theme settings, modifying avatar parameters, adjusting scene controls, changing voice settings, tuning enhancements, clearing search results, or checking workspace status.",
-    "Prefer set_ui_control as the default tool for free-form interface requests because it gives you one consistent path for domain, control, and value.",
-    "For visible UI changes, briefly say what action you are taking. If a request is ambiguous, ask a clarifying question instead of guessing.",
-    "Do not change lasting workspace preferences unless the user clearly asks. If a tool requires confirmation, wait for that result before continuing.",
-    "If you are unsure which structured UI control to use, call list_ui_controls first to inspect the supported control names and domains.",
-    "Examples: if the user says 'make it darker', use set_ui_control with domain='theme', control='mode', value='dark'. "
-    "If they say 'move the sidebar right', use domain='theme', control='sidebarPosition', value='right'. "
-    "If they say 'open memory', use domain='workspace', control='openPanel', value='memory'. "
-    "If they say 'make the blob spikier', use domain='avatar', control='blobSpikes' with a modest increase to x, y, and z values. "
-    "If they say 'switch to particles face', use domain='avatar', control='renderer', value='particles-face'. "
-    "If they say 'speak a bit faster', use domain='voice', control='ttsSpeed', value set slightly above the current speed.",
-)
-
-#: Client tools this guidance depends on; the block is emitted only if present.
-UI_CONTROL_TOOL_NAMES = frozenset({"set_ui_control", "list_ui_controls"})
-
 STATIC_GUIDANCE = "\n".join(_STATIC_GUIDANCE_PARTS)
-UI_CONTROL_GUIDANCE = "\n".join(_UI_CONTROL_GUIDANCE_PARTS)
+
+#: Client tools the *old* fixed UI block depended on. Kept as a name so the
+#: contract tests that assert "guidance is gated on registration" still have
+#: something to point at; the guidance itself is now assembled per-client from
+#: `domain.capabilities`, because a single block naming four domains described
+#: about a sixth of what the app actually registers.
+UI_CONTROL_TOOL_NAMES = frozenset({"set_ui_control", "list_ui_controls"})
 
 _MEMORY_HEADER_PARTS: tuple[str, ...] = (
     "\n\n## Your Memory\n",
@@ -186,9 +257,9 @@ def build_system_prompt(
         soul: The soul configuration driving persona and tone.
         memory_context: Retrieved memory, appended under a header and bounded.
         client_tool_names: Names of client-side tools the frontend registered.
-            The UI-control guidance is emitted only when those tools are really
-            available, so the model is never told to call something that does
-            not exist.
+            Capability guidance is assembled from exactly these, so the model is
+            never told to call something that does not exist -- and, just as
+            importantly, is told about everything that does.
     """
     parts: list[str] = []
 
@@ -196,6 +267,10 @@ def build_system_prompt(
         parts.append(soul.system_prompt)
     else:
         parts.append(f"You are {soul.name}, {soul.personality}.")
+
+    directive = language_directive(getattr(soul, "language", None))
+    if directive:
+        parts.append(directive)
 
     if soul.traits:
         parts.append(f"\nKey traits: {', '.join(soul.traits)}")
@@ -215,8 +290,9 @@ def build_system_prompt(
 
     parts.append(STATIC_GUIDANCE)
 
-    if UI_CONTROL_TOOL_NAMES & set(client_tool_names or ()):
-        parts.append(UI_CONTROL_GUIDANCE)
+    capability_guidance = build_capability_guidance(client_tool_names)
+    if capability_guidance:
+        parts.append(capability_guidance)
 
     if memory_context:
         parts.append(MEMORY_HEADER)

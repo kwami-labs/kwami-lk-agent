@@ -1,6 +1,6 @@
 # Testing
 
-Four layers under `agent/tests/`. The default pytest run is **offline, free,
+Five layers under `agent/tests/`. The default pytest run is **offline, free,
 and fast**. Live tests are opted in.
 
 ```mermaid
@@ -65,16 +65,76 @@ Conversation, memory, and reconfiguration against real providers. Spends
 money. Runs on a nightly cron, `workflow_dispatch`, and push to `main` — not
 as a pull-request gate.
 
+## Drift guards
+
+Four tests exist because the same class of bug happened four times: two lists
+that must agree, kept in step by hand, and nobody noticing when they stopped.
+
+| Test | Keeps in step |
+| --- | --- |
+| `test_settings_env_inventory.py` | `ENV_VAR_NAMES` and what `from_env` reads |
+| `test_worker_env_parity.py` | `Settings` and `infra/src/env.ts` |
+| `test_dockerfile_parity.py` | `agent/Dockerfile` and `infra/container/Dockerfile` |
+| `test_health_heartbeat.py` | the heartbeat path the agent writes and the probe reads |
+
+Each reads the other file and compares. A comment asking people to keep two
+files aligned is not a mechanism; these are.
+
 ## Coverage
 
 ```bash
 make test-cov
 ```
 
-`fail_under` in `pyproject.toml` is a ratchet (currently 43). It only moves
-up. Branch coverage is on. `if TYPE_CHECKING` and `@overload` are excluded.
+`fail_under` in `pyproject.toml` is a ratchet. It only moves up, and it is
+raised by adding tests -- never by lowering it to meet the tree. Branch
+coverage is on.
 
 CI uploads `coverage.xml` per Python version (3.11 and 3.13).
+
+### What may be excluded
+
+Categorical exclusions live in `exclude_also` in `pyproject.toml`, so they can
+be audited in one place: `if TYPE_CHECKING:` and `@overload`.
+
+A `# pragma: no cover` at a call site is allowed for two cases only, and only
+with the reason written on the same line:
+
+1. **An import guard whose branch the environment decides**, not our code: an
+   optional extra that is absent, or a symbol that may move between versions of
+   a dependency we do ship. A locked environment resolves those one way, so a
+   test that forces the other branch is testing its own monkeypatch.
+2. **The process entry point** (`if __name__ == "__main__":`).
+
+Check before adding one. If the package is genuinely absent here, the `except`
+branch *runs* and is already covered — a pragma there excludes a covered line
+and only misleads. Three in `factories/` were doing exactly that and were
+removed.
+
+**Not allowed:** a branch our own composition happens not to take. A mixin that
+is always combined, or a guard around a mandatory dependency, is either
+reachable from a test or dead code to delete — both have happened here.
+
+Anything else that cannot be covered is a design problem, not an exclusion.
+
+### Pinning a call into a plugin that is not installed
+
+Where an optional plugin's constructor cannot be reached but the call into it
+is still worth protecting, use a **strict stand-in** -- explicit keyword
+signatures, no `MagicMock` -- and say in the docstring that what is verified is
+our call shape and not the SDK's. Rename or drop a kwarg and the test fails,
+which is the regression this buys. See `tests/unit/test_stt_factory.py` for the
+pattern.
+
+### Running coverage while someone else is
+
+`agent/.coverage` is a single SQLite file. Two processes writing it at once
+produce nonsense -- `no such table: arc`, and totals like `0.00%`. For an
+ad-hoc run, point `COVERAGE_FILE` somewhere of your own:
+
+```bash
+COVERAGE_FILE=/tmp/mine.coverage make test-cov
+```
 
 ## Writing a test
 

@@ -4,19 +4,51 @@ import asyncio
 from typing import Any
 
 from livekit.agents import Agent
+from livekit.agents.voice.agent import find_function_tools
 
 from .constants import Timeouts
 from .domain import KwamiConfig, build_system_prompt
+from .domain.greeting import (
+    MAX_CONTEXT_SUMMARY_CHARS,
+    GreetingFacts,
+    build_greeting_instructions,
+    extract_name_from_facts,
+    topics_from_facts,
+)
+from .domain.tool_gating import describe_gating, unavailable_builtin_tools
 from .memory import KwamiMemory
 from .runtime.container import room_from_context
-from .tools import AgentToolsMixin, ClientToolManager
-from .utils.logging import get_logger
+from .settings import get_settings
+from .tools import (
+    AgentToolsMixin,
+    ClientToolManager,
+    KnowledgeToolsMixin,
+    MediaToolsMixin,
+    PipelineControlMixin,
+    TradingToolsMixin,
+)
+from .tools.limits import trim_client_tools
+from .utils.logging import get_logger, redacted
 from .utils.room import should_disconnect_as_duplicate
 
 logger = get_logger("agent")
 
 
-class KwamiAgent(Agent, AgentToolsMixin):
+def _tool_name(tool: Any) -> str:
+    """The registered name of a function tool, or "" if it has none."""
+    info = getattr(tool, "info", None)
+    name = getattr(info, "name", None) if info is not None else None
+    return name if isinstance(name, str) else ""
+
+
+class KwamiAgent(
+    Agent,
+    AgentToolsMixin,
+    PipelineControlMixin,
+    KnowledgeToolsMixin,
+    MediaToolsMixin,
+    TradingToolsMixin,
+):
     """Dynamic AI agent configured by the Kwami frontend library.
 
     This agent supports:
@@ -24,6 +56,10 @@ class KwamiAgent(Agent, AgentToolsMixin):
     - Persistent memory via Zep Cloud
     - Client-side tools executed via data channel
     - Built-in tools for voice/language control
+    - Self-service model, voice and pipeline switching (PipelineControlMixin)
+    - Multi-angle research and market data (KnowledgeToolsMixin)
+    - Music and video playback in the browser panel (MediaToolsMixin)
+    - Confirmation-gated order placement (TradingToolsMixin)
     - Dynamic reconfiguration without disconnection
     """
 
@@ -52,7 +88,8 @@ class KwamiAgent(Agent, AgentToolsMixin):
         self._vad = vad
         self._memory = memory
         self._skip_greeting = skip_greeting
-        self._last_memory_context = None  # Cached context from _inject_memory_context
+        # Cached context from _inject_memory_context.
+        self._last_memory_context: Any = None
 
         # Track current voice config for switching
         self._current_voice_config = self.kwami_config.voice
@@ -72,9 +109,13 @@ class KwamiAgent(Agent, AgentToolsMixin):
         # Build system prompt
         instructions = self._build_system_prompt()
 
-        # Get client tools to pass to parent Agent
-        combined_tools = self.client_tools.create_client_tools()
-        self._tools = combined_tools
+        # Only the client tools go to the parent: the framework builds
+        # `Agent._tools` as `tools + find_function_tools(self)`, so passing the
+        # built-ins here would double them. They are counted, not passed,
+        # because the provider's 128-tool ceiling applies to the sum -- and one
+        # tool over it is a 400 on every turn, not a degraded feature.
+        builtin_count = len(find_function_tools(type(self)))
+        self._tools = trim_client_tools(builtin_count, self.client_tools.create_client_tools())
 
         super().__init__(
             instructions=instructions,
@@ -83,6 +124,39 @@ class KwamiAgent(Agent, AgentToolsMixin):
             tts=tts,
             vad=vad,
             tools=self._tools,
+        )
+
+        # The framework sets `_tools = tools + find_function_tools(self)`, so
+        # every built-in is now attached whether or not this deployment can
+        # serve it. Withhold the ones whose credential is absent: offering
+        # `product_search` with no SERPAPI_KEY spends the user's turn on a
+        # refusal the agent advertised, and forty schemas go out on every
+        # request of every session whether they work or not.
+        self._withhold_unavailable_builtins()
+
+    def _withhold_unavailable_builtins(self) -> None:
+        """Drop built-in tools this deployment has no credential for.
+
+        Reassigns `_tools` and refreshes `_chat_ctx`, which is exactly what the
+        framework's own `update_tools` does when there is no activity yet --
+        and there never is during `__init__`. Doing it here rather than awaiting
+        `update_tools` later keeps the very first request correct; a tool
+        withheld only after the greeting would already have been advertised.
+        """
+        unavailable = unavailable_builtin_tools(get_settings())
+        if not unavailable:
+            return
+
+        # No `if nothing was dropped` guard: every gated name is a real built-in
+        # -- pinned by test_the_gated_names_are_real_tools -- so a non-empty
+        # `unavailable` always matches at least one tool here. A guard for the
+        # other case would be a branch no test could reach.
+        kept = [tool for tool in self._tools if _tool_name(tool) not in unavailable]
+        self._tools = kept
+        self._chat_ctx = self._chat_ctx.copy(tools=kept)
+        logger.info(
+            "%s",
+            describe_gating({_tool_name(t) for t in find_function_tools(type(self))} & unavailable),
         )
 
     def _build_system_prompt(self, memory_context: str | None = None) -> str:
@@ -109,10 +183,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
         registered = getattr(manager, "registered_tools", None) or []
         names: set[str] = set()
         for entry in registered:
-            if isinstance(entry, dict):
-                name = entry.get("name")
-            else:
-                name = getattr(entry, "name", None)
+            name = entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None)
             if isinstance(name, str) and name:
                 names.add(name)
         return names
@@ -135,7 +206,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
                 self._memory.get_context(),
             )
             if user_name:
-                logger.info(f"Cached user name from memory: {user_name}")
+                logger.info("Cached user name from memory: %s", redacted(user_name, keep=1))
 
             memory_text = context.to_system_prompt_addition()
 
@@ -146,8 +217,8 @@ class KwamiAgent(Agent, AgentToolsMixin):
 
             # Store context for greeting use (avoids a second API call)
             self._last_memory_context = context
-        except Exception as e:
-            logger.error(f"Failed to inject memory context: {e}")
+        except Exception:
+            logger.exception("Failed to inject memory context")
 
     async def on_enter(self) -> None:
         """Called when the agent joins the room.
@@ -166,12 +237,12 @@ class KwamiAgent(Agent, AgentToolsMixin):
         if room:
             self.room = room
             my_identity = room.local_participant.identity if room.local_participant else ""
-            logger.info(f"Agent {my_identity} entering room...")
+            logger.info("Agent %s entering room...", my_identity)
 
             # Quick check for duplicate agents (non-blocking)
             should_disconnect = await should_disconnect_as_duplicate(room, my_identity)
             if should_disconnect:
-                logger.warning(f"Agent {my_identity} disconnecting due to duplicate detection")
+                logger.warning("Agent %s disconnecting due to duplicate detection", my_identity)
                 await room.disconnect()
                 return
         else:
@@ -180,8 +251,9 @@ class KwamiAgent(Agent, AgentToolsMixin):
         self._register_session_listeners()
 
         logger.info(
-            f"Kwami agent '{self.kwami_config.kwami_name}' "
-            f"({self.kwami_config.kwami_id}) entered room successfully"
+            "Kwami agent '%s' (%s) entered room successfully",
+            self.kwami_config.kwami_name,
+            self.kwami_config.kwami_id,
         )
 
         # Inject memory context into system prompt.
@@ -199,8 +271,8 @@ class KwamiAgent(Agent, AgentToolsMixin):
                 "Memory context timed out after %.1fs; greeting without it.",
                 Timeouts.MEMORY_CONTEXT,
             )
-        except Exception as e:
-            logger.error("Memory context failed (%s); greeting without it.", e)
+        except Exception:
+            logger.exception("Memory context failed; greeting without it.")
 
         # Greet the user - but only once per session
         if self._skip_greeting:
@@ -215,8 +287,8 @@ class KwamiAgent(Agent, AgentToolsMixin):
                 instructions=greeting_instructions,
                 allow_interruptions=True,
             )
-        except Exception as e:
-            logger.error(f"Failed to generate greeting: {e}")
+        except Exception:
+            logger.exception("Failed to generate greeting")
             # Fall back to a simple greeting so the agent still speaks
             try:
                 self.session.generate_reply(
@@ -224,124 +296,71 @@ class KwamiAgent(Agent, AgentToolsMixin):
                     allow_interruptions=True,
                 )
             except Exception:
-                logger.error("Failed to generate fallback greeting")
+                logger.exception("Failed to generate fallback greeting")
 
     async def _build_greeting_instructions(self) -> str:
-        """Build natural greeting instructions based on memory context.
+        """Gather what we know about the user, then hand it to the domain layer.
 
-        Reuses the context already fetched by _inject_memory_context()
-        to avoid redundant API calls. Only makes a fresh call if no
-        cached context is available.
+        This method used to be 110 lines that did both: the memory lookups *and*
+        the four branches of wording. Only the lookups need an agent, so the
+        wording moved to `domain/greeting.py` where every branch is reachable
+        from a plain unit test -- see the module docstring there.
 
-        Returns:
-            Greeting instructions for the LLM.
+        Reuses the context `_inject_memory_context` already fetched, so the
+        greeting does not pay a second Zep round trip on the critical path.
         """
+        facts = await self._gather_greeting_facts()
+        return build_greeting_instructions(facts)
+
+    async def _gather_greeting_facts(self) -> GreetingFacts:
+        """The I/O half: everything the greeting needs, fetched."""
         agent_name = self.kwami_config.soul.name or self.kwami_config.kwami_name or "Kwami"
-        user_name = None
-        is_returning_user = False
-        recent_context_summary = None
-        recent_topics = []
+        language = getattr(self.kwami_config.soul, "language", None)
 
-        if self._memory and self._memory.is_initialized:
-            try:
-                # Use cached user name (already looked up in _inject_memory_context)
-                user_name = self._memory._cached_user_name
+        if not (self._memory and self._memory.is_initialized):
+            return GreetingFacts(agent_name=agent_name, language=language)
 
-                # Reuse cached context from _inject_memory_context (avoids 2nd API call)
-                context = self._last_memory_context
-                if context is None:
-                    context = await self._memory.get_context()
+        try:
+            user_name = self._memory._cached_user_name
+            context = self._last_memory_context
+            if context is None:
+                context = await self._memory.get_context()
 
-                if context.recent_messages or context.facts or context.context_block:
-                    is_returning_user = True
-                    logger.debug(
-                        f"Returning user detected "
-                        f"(messages: {len(context.recent_messages)}, facts: {len(context.facts)})"
-                    )
-
-                    # Extract recent topics from context block or summary
-                    if context.context_block:
-                        recent_context_summary = context.context_block[:500]
-                    elif context.summary:
-                        recent_context_summary = context.summary
-
-                    # Get interesting facts to reference in greeting
-                    if context.facts:
-                        name_skip = ["name is", "called", "i am", "i'm"]
-                        for fact in context.facts[:5]:
-                            fact_lower = fact.lower()
-                            if not any(skip in fact_lower for skip in name_skip):
-                                recent_topics.append(fact)
-
-                # If name not cached, try extracting from facts as fallback
-                if not user_name and context and context.facts:
-                    import re
-
-                    for fact in context.facts:
-                        match = re.search(
-                            r"(?:name is|called|i'm|i am)\s+([A-Z][a-z]+)", fact, re.IGNORECASE
-                        )
-                        if match:
-                            potential = match.group(1).capitalize()
-                            excluded = {
-                                "the",
-                                "a",
-                                "user",
-                                "assistant",
-                                "kwami",
-                                agent_name.lower(),
-                            }
-                            if potential.lower() not in excluded:
-                                user_name = potential
-                                self._memory.set_user_name(user_name)
-                                logger.info(f"Found user name from facts: {user_name}")
-                                break
-
-            except Exception as e:
-                logger.warning(f"Could not extract user info from memory: {e}")
-
-        # Build natural greeting instructions based on what we know
-        if user_name:
-            if recent_topics:
-                topics_str = "; ".join(recent_topics[:3])
-                return (
-                    f"Greet {user_name} warmly by name, like you're happy to see them again. "
-                    f"Reference something from your recent conversations naturally. "
-                    f"Here's what you remember about recent topics: {topics_str}. "
-                    f"Ask a casual follow-up question about one of these topics, or just ask how something is going. "
-                    f"Examples: 'Hey {user_name}! How did that [project/thing] turn out?' or "
-                    f"'What's up {user_name}? Been thinking about [topic] lately?' "
-                    "Keep it short, friendly, and chill. Don't be formal or robotic. "
-                    "Pick ONE topic and ask about it naturally - don't list everything you remember."
+            is_returning = bool(context.recent_messages or context.facts or context.context_block)
+            summary = None
+            topics: list[str] = []
+            if is_returning:
+                logger.debug(
+                    "Returning user detected (messages: %s, facts: %s)",
+                    len(context.recent_messages),
+                    len(context.facts),
                 )
-            elif recent_context_summary:
-                return (
-                    f"Greet {user_name} warmly by name, like you're happy to see them again. "
-                    f"Here's a summary of your past conversations: {recent_context_summary}. "
-                    f"Ask a casual follow-up about something relevant, or just check in on how things are going. "
-                    f"Example: 'Hey {user_name}! How's everything going?' or reference something specific. "
-                    "Keep it short, friendly, and natural."
-                )
-            else:
-                return (
-                    f"Greet {user_name} casually by name, like you're happy to see them again. "
-                    f"Something like 'Hey {user_name}, great to see you! What's on your mind today?' or "
-                    f"'What's up {user_name}? How've you been?' "
-                    "Keep it short, friendly, and chill. Don't be formal or robotic. "
-                    "Don't repeat the same greeting every time - vary it naturally."
-                )
-        elif is_returning_user:
-            return (
-                f"Greet the user casually like you've talked before but can't remember their name. "
-                f"Something like 'Hey there! Good to hear from you again. By the way, I'm {agent_name} - "
-                "what's your name?' Keep it natural and chill."
+                if context.context_block:
+                    summary = context.context_block[:MAX_CONTEXT_SUMMARY_CHARS]
+                elif context.summary:
+                    summary = context.summary
+                topics = topics_from_facts(context.facts)
+
+            if not user_name and context.facts:
+                found = extract_name_from_facts(context.facts, agent_name=agent_name)
+                if found:
+                    user_name = found
+                    self._memory.set_user_name(found)
+                    logger.info("Found user name from facts: %s", redacted(found, keep=1))
+
+            return GreetingFacts(
+                agent_name=agent_name,
+                user_name=user_name,
+                is_returning_user=is_returning,
+                recent_context_summary=summary,
+                recent_topics=topics,
+                language=language,
             )
-        else:
-            return (
-                f"Introduce yourself casually to this new user. "
-                f"Something like 'Hey there! I'm {agent_name}, what's your name?' "
-                "Keep it short, friendly, and natural. Don't be overly formal or give a long introduction."
-            )
+        except Exception as e:
+            # Memory is an enhancement; the greeting is the product. A Zep
+            # failure here means greeting as a stranger, not not greeting.
+            logger.warning("Could not extract user info from memory: %s", e)
+            return GreetingFacts(agent_name=agent_name, language=language)
 
     async def on_user_turn_completed(self, turn_ctx: Any, new_message: Any) -> None:
         """Called when user finishes speaking.
@@ -362,7 +381,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
                     user_name = self._memory._cached_user_name or None
                     await self._memory.buffer_user_message(content, name=user_name)
             except Exception as e:
-                logger.warning(f"Failed to buffer user message: {e}")
+                logger.warning("Failed to buffer user message: %s", e)
 
     def _register_session_listeners(self) -> None:
         """Subscribe to the session events this agent depends on.
@@ -417,7 +436,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
                 assistant_name=agent_name,
             )
         except Exception as e:
-            logger.warning(f"Failed to add exchange to memory: {e}")
+            logger.warning("Failed to add exchange to memory: %s", e)
 
     def _extract_message_content(self, message: Any) -> str:
         """Extract text content from various message formats.
@@ -461,7 +480,7 @@ class KwamiAgent(Agent, AgentToolsMixin):
         # Last resort: stringify but filter out object representations
         text = str(message)
         if text.startswith("<") and text.endswith(">"):
-            logger.debug(f"Could not extract content from message type: {type(message)}")
+            logger.debug("Could not extract content from message type: %s", type(message))
             return ""
 
         return text.strip()

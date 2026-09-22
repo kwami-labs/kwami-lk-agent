@@ -7,7 +7,7 @@ from .tts import create_tts
 
 __all__ = [
     "create_llm",
+    "create_realtime_model",
     "create_stt",
     "create_tts",
-    "create_realtime_model",
 ]

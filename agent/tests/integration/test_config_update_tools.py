@@ -29,7 +29,9 @@ def agent() -> KwamiAgent:
     return KwamiAgent()
 
 
-async def test_registering_client_tools_keeps_every_builtin(agent: KwamiAgent) -> None:
+async def test_registering_client_tools_keeps_every_builtin(
+    all_tools_available, agent: KwamiAgent
+) -> None:
     """The regression that silently disabled web_search and all navigation tools.
 
     The handler used to assign `agent._tools = <client tools only>`, but the
