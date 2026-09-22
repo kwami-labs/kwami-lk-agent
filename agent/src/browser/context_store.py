@@ -36,9 +36,11 @@ STORE_TIMEOUT_SECONDS = 5.0
 class ContextStorePort(Protocol):
     """Maps a user to the vendor-side handle for their persisted browser state."""
 
-    async def get(self, user_id: str, vendor: str) -> str | None: ...
+    async def get(self, user_id: str, vendor: str) -> str | None:
+        pass
 
-    async def put(self, user_id: str, vendor: str, context_id: str) -> None: ...
+    async def put(self, user_id: str, vendor: str, context_id: str) -> None:
+        pass
 
 
 class InMemoryContextStore:
