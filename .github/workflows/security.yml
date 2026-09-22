@@ -58,7 +58,12 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      # packageManager lives in infra/package.json, not the repo root. Without
+      # this the action looks at a file that does not exist and exits before
+      # the audit can run.
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          package_json_file: infra/package.json
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -83,10 +88,22 @@ jobs:
           # gitleaks needs history to scan commits rather than just the tree.
           fetch-depth: 0
 
+      # gitleaks-action@v2 requires a paid GITLEAKS_LICENSE on organization
+      # repos. The binary itself is MIT and does the same scan, so we run that
+      # instead. Version and checksum are pinned together; the hash is the
+      # linux_x64 line from the matching gitleaks_*_checksums.txt release asset.
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
         env:
-          GITHUB_TOKEN: ${{ github.token }}
+          GITLEAKS_VERSION: "8.30.1"
+          GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+        run: |
+          set -euo pipefail
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "${tarball}" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${tarball}"
+          echo "${GITLEAKS_SHA256} ${tarball}" | sha256sum -c -
+          tar -xzf "${tarball}" gitleaks
+          ./gitleaks git --redact --verbose --exit-code 1 .
 
   codeql:
     name: CodeQL (${{ matrix.language }})
@@ -107,6 +124,7 @@ jobs:
         with:
           language: ${{ matrix.language }}
           queries: security-and-quality
+          config-file: .github/codeql/codeql-config.yml
 
       - name: Analyse
         uses: github/codeql-action/analyze@3ea06614dafe36dec890db3446326e0d40ce53d4 # v3
