@@ -68,7 +68,7 @@ class BrowserProviderPort(Protocol):
     @property
     def vendor(self) -> str:
         """Short id used in logs and usage records."""
-        raise NotImplementedError
+        ...
 
     async def launch(self, user_id: str) -> LaunchedBrowser:
         """Start a browser bound to `user_id`'s persisted state.
@@ -77,11 +77,11 @@ class BrowserProviderPort(Protocol):
         these carry cookies and logins, so one would hand one user's
         authenticated sessions to the next.
         """
-        raise NotImplementedError
+        ...
 
     async def release(self, browser_id: str) -> None:
         """Stop the browser, persisting its state. Safe to call more than once."""
-        pass
+        ...
 
 
 class ProviderUnavailableError(RuntimeError):
