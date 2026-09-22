@@ -8,11 +8,11 @@ CDP (Chrome DevTools Protocol) client for direct browser control.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from typing import Any
 
-import httpx
-
+from ..adapters.http import shared_client
 from ..settings import get_settings
 from ..utils.logging import get_logger
 
@@ -63,71 +63,76 @@ class BrowserUseClient:
         else:
             payload["proxyCountryCode"] = None
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            r = await client.post(
-                f"{BU_API_BASE}/browsers",
-                json=payload,
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            data = r.json()
-            logger.info(
-                "Created cloud browser: id=%s, liveUrl=%s",
-                data.get("id", "?")[:8],
-                (data.get("liveUrl") or "")[:60],
-            )
-            return data
+        client = shared_client()
+        r = await client.post(
+            f"{BU_API_BASE}/browsers",
+            json=payload,
+            headers=self._headers(),
+            timeout=30.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        logger.info(
+            "Created cloud browser: id=%s, liveUrl=%s",
+            data.get("id", "?")[:8],
+            (data.get("liveUrl") or "")[:60],
+        )
+        return data
 
     async def stop_browser(self, browser_id: str) -> dict[str, Any]:
         """Stop a cloud browser session (persists profile state)."""
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            r = await client.patch(
-                f"{BU_API_BASE}/browsers/{browser_id}",
-                json={"status": "stopped"},
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            logger.info("Stopped cloud browser: %s", browser_id[:8])
-            return r.json()
+        client = shared_client()
+        r = await client.patch(
+            f"{BU_API_BASE}/browsers/{browser_id}",
+            json={"status": "stopped"},
+            headers=self._headers(),
+            timeout=15.0,
+        )
+        r.raise_for_status()
+        logger.info("Stopped cloud browser: %s", browser_id[:8])
+        return r.json()
 
     async def get_browser(self, browser_id: str) -> dict[str, Any]:
         """Get browser session details."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                f"{BU_API_BASE}/browsers/{browser_id}",
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            return r.json()
+        client = shared_client()
+        r = await client.get(
+            f"{BU_API_BASE}/browsers/{browser_id}",
+            headers=self._headers(),
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        return r.json()
 
     # -- Profiles ------------------------------------------------------------
 
     async def create_profile(self, name: str) -> dict[str, Any]:
         """Create a browser profile for persistent auth state."""
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(
-                f"{BU_API_BASE}/profiles",
-                json={"name": name},
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            data = r.json()
-            logger.info("Created profile: id=%s name=%s", data.get("id", "?")[:8], name)
-            return data
+        client = shared_client()
+        r = await client.post(
+            f"{BU_API_BASE}/profiles",
+            json={"name": name},
+            headers=self._headers(),
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        data = r.json()
+        logger.info("Created profile: id=%s name=%s", data.get("id", "?")[:8], name)
+        return data
 
     async def list_profiles(self, query: str | None = None) -> list[dict[str, Any]]:
         """List profiles, optionally filtered by name query."""
         params: dict[str, Any] = {"pageSize": 20}
         if query:
             params["query"] = query
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.get(
-                f"{BU_API_BASE}/profiles",
-                params=params,
-                headers=self._headers(),
-            )
-            r.raise_for_status()
-            return r.json().get("items", [])
+        client = shared_client()
+        r = await client.get(
+            f"{BU_API_BASE}/profiles",
+            params=params,
+            headers=self._headers(),
+            timeout=10.0,
+        )
+        r.raise_for_status()
+        return r.json().get("items", [])
 
     async def get_or_create_profile(self, user_id: str) -> str:
         """Get existing profile for a user, or create one. Returns profile_id."""
@@ -140,6 +145,66 @@ class BrowserUseClient:
         # Create new
         profile = await self.create_profile(name=user_id)
         return profile["id"]
+
+
+class BrowserUseProvider:
+    """Rents Browser Use Cloud browsers bound to a user's named profile.
+
+    A thin adapter over `BrowserUseClient` so this vendor and Browserbase can
+    be swapped behind `BrowserProviderPort`. Profiles are addressed by name, so
+    unlike Browserbase there is nothing to persist on our side: the user id is
+    the handle.
+    """
+
+    def __init__(self, api_key: str | None = None, *, client: BrowserUseClient | None = None):
+        self._client = client or BrowserUseClient(api_key=api_key)
+
+    @property
+    def vendor(self) -> str:
+        from .providers import BROWSER_USE
+
+        return BROWSER_USE
+
+    async def launch(self, user_id: str) -> Any:
+        from .providers import LaunchedBrowser
+
+        if not (user_id or "").strip():
+            # Profiles persist cookies and logins by design, so a shared
+            # "anonymous" default would leak them between users.
+            raise ValueError("a browser session needs a real user id")
+
+        try:
+            profile_id = await self._client.get_or_create_profile(user_id)
+        except Exception as e:
+            logger.warning("Profile lookup failed, continuing without profile: %s", e)
+            profile_id = None
+
+        browser = await self._client.create_browser(
+            profile_id=profile_id,
+            timeout_minutes=15,
+        )
+        browser_id = browser.get("id") if isinstance(browser, dict) else None
+        if not browser_id:
+            raise RuntimeError("Browser Use Cloud did not return a browser id")
+
+        cdp_url = browser.get("cdpUrl") or ""
+        if not cdp_url:
+            # Nothing can drive this browser, and it is already billing.
+            await self.release(browser_id)
+            raise RuntimeError("Browser Use Cloud did not return a cdpUrl")
+
+        return LaunchedBrowser(
+            browser_id=browser_id,
+            vendor=self.vendor,
+            live_url=browser.get("liveUrl") or "",
+            cdp_http_url=cdp_url,
+            persistence_id=profile_id or "",
+        )
+
+    async def release(self, browser_id: str) -> None:
+        if not browser_id:
+            return
+        await self._client.stop_browser(browser_id)
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +224,10 @@ class CDPConnection:
         self._msg_id: int = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        # Set only when we attached to a page through a browser-level endpoint
+        # (`connect_ws`). Every command then has to carry it, or it is answered
+        # by the browser target, where Page/Input/Runtime do not exist.
+        self._session_id: str | None = None
 
     async def connect(self, cdp_url: str) -> None:
         """Connect to the CDP endpoint.
@@ -167,12 +236,34 @@ class CDPConnection:
             cdp_url: The HTTP CDP URL (e.g. https://cdp-xxx.browser-use.com).
                      We resolve the WS debugger URL from /json/version.
         """
-        import websockets
-
         # Resolve WebSocket URL from /json/version
         ws_url = await self._resolve_ws_url(cdp_url)
-        logger.info("Connecting to CDP WebSocket: %s", ws_url[:80])
+        await self._open(ws_url)
 
+    async def connect_ws(self, ws_url: str, *, attach_to_page: bool = True) -> None:
+        """Connect straight to a WebSocket CDP endpoint.
+
+        Vendors differ in what they hand out. Browser Use Cloud exposes an HTTP
+        CDP base whose `/json/list` names a page target; Browserbase gives a
+        single `connectUrl` -- the *browser* endpoint, the one Puppeteer's
+        `connectOverCDP` takes -- and no HTTP discovery at all. On a browser
+        endpoint `Page.enable` fails with "'Page' wasn't found", so we attach to
+        a page target and address it by session id from then on.
+
+        Args:
+            ws_url: The ws:// or wss:// CDP URL.
+            attach_to_page: Attach to (or create) a page target after
+                connecting. Pass False when the URL is already a page endpoint.
+        """
+        await self._open(ws_url)
+        if attach_to_page:
+            await self._attach_to_page_target()
+
+    async def _open(self, ws_url: str) -> None:
+        """Open the socket and start the reader loop."""
+        import websockets
+
+        logger.info("Connecting to CDP WebSocket: %s", ws_url[:80])
         self._ws = await websockets.connect(
             ws_url,
             max_size=10 * 1024 * 1024,  # 10 MB for screenshots
@@ -181,63 +272,92 @@ class CDPConnection:
         self._reader_task = asyncio.create_task(self._reader_loop())
         logger.info("CDP WebSocket connected")
 
+    async def _attach_to_page_target(self) -> None:
+        """Attach to a page target on a browser-level connection.
+
+        Uses flat mode (`flatten=True`), where the page is addressed by putting
+        `sessionId` on each command rather than by wrapping every call in
+        `Target.sendMessageToTarget`. Flat mode is what lets the existing
+        `id`-keyed reader loop stay exactly as it is.
+        """
+        targets = (await self.send("Target.getTargets")).get("targetInfos", [])
+        page = next(
+            (t for t in targets if t.get("type") == "page" and t.get("targetId")),
+            None,
+        )
+        target_id = page.get("targetId") if page else ""
+
+        if not target_id:
+            created = await self.send("Target.createTarget", url="about:blank")
+            target_id = created.get("targetId", "")
+        if not target_id:
+            raise ValueError("CDP endpoint exposed no page target and would not create one")
+
+        attached = await self.send("Target.attachToTarget", targetId=target_id, flatten=True)
+        session_id = attached.get("sessionId", "")
+        if not session_id:
+            raise ValueError(f"Could not attach to page target {target_id[:12]}")
+
+        self._session_id = session_id
+        logger.info("Attached to CDP page target %s", target_id[:12])
+
     async def _resolve_ws_url(self, cdp_url: str) -> str:
         """Resolve the WebSocket debugger URL for a page target.
 
         We must connect to a *page* target (not the browser target) so that
         Page.*, Runtime.*, and Input.* domains are available.
         """
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            # Try /json/list first — gives us page-level targets
-            try:
-                r = await client.get(f"{cdp_url}/json/list")
-                r.raise_for_status()
-                targets = r.json()
-                # Find the first "page" type target
-                for target in targets:
-                    if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
-                        ws_url = target["webSocketDebuggerUrl"]
-                        logger.debug("Resolved page target: %s", ws_url[:80])
-                        return ws_url
-            except Exception as e:
-                logger.debug("/json/list failed, trying /json/version: %s", e)
-
-            # Fallback: get browser-level WS and use Target.createTarget
-            r = await client.get(f"{cdp_url}/json/version")
+        client = shared_client()
+        # Try /json/list first — gives us page-level targets
+        try:
+            r = await client.get(f"{cdp_url}/json/list", timeout=15.0)
             r.raise_for_status()
-            data = r.json()
-            browser_ws = data.get("webSocketDebuggerUrl", "")
-            if not browser_ws:
-                raise ValueError("No webSocketDebuggerUrl in /json/version response")
-
-            # Connect to browser target temporarily to create a page
-            import websockets
-
-            async with websockets.connect(browser_ws, close_timeout=5) as browser_conn:
-                create_msg = json.dumps(
-                    {
-                        "id": 1,
-                        "method": "Target.createTarget",
-                        "params": {"url": "about:blank"},
-                    }
-                )
-                await browser_conn.send(create_msg)
-                resp = json.loads(await asyncio.wait_for(browser_conn.recv(), timeout=10))
-                target_id = resp.get("result", {}).get("targetId", "")
-
-            if not target_id:
-                raise ValueError("Failed to create a page target via Target.createTarget")
-
-            # Now resolve the page target WS URL
-            r2 = await client.get(f"{cdp_url}/json/list")
-            r2.raise_for_status()
-            for target in r2.json():
-                if target.get("id") == target_id and target.get("webSocketDebuggerUrl"):
+            targets = r.json()
+            # Find the first "page" type target
+            for target in targets:
+                if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
                     ws_url = target["webSocketDebuggerUrl"]
-                    logger.debug("Created and resolved page target: %s", ws_url[:80])
+                    logger.debug("Resolved page target: %s", ws_url[:80])
                     return ws_url
+        except Exception as e:
+            logger.debug("/json/list failed, trying /json/version: %s", e)
 
-            raise ValueError(f"Could not find page target {target_id} in /json/list")
+        # Fallback: get browser-level WS and use Target.createTarget
+        r = await client.get(f"{cdp_url}/json/version", timeout=15.0)
+        r.raise_for_status()
+        data = r.json()
+        browser_ws = data.get("webSocketDebuggerUrl", "")
+        if not browser_ws:
+            raise ValueError("No webSocketDebuggerUrl in /json/version response")
+
+        # Connect to browser target temporarily to create a page
+        import websockets
+
+        async with websockets.connect(browser_ws, close_timeout=5) as browser_conn:
+            create_msg = json.dumps(
+                {
+                    "id": 1,
+                    "method": "Target.createTarget",
+                    "params": {"url": "about:blank"},
+                }
+            )
+            await browser_conn.send(create_msg)
+            resp = json.loads(await asyncio.wait_for(browser_conn.recv(), timeout=10))
+            target_id = resp.get("result", {}).get("targetId", "")
+
+        if not target_id:
+            raise ValueError("Failed to create a page target via Target.createTarget")
+
+        # Now resolve the page target WS URL
+        r2 = await client.get(f"{cdp_url}/json/list", timeout=15.0)
+        r2.raise_for_status()
+        for target in r2.json():
+            if target.get("id") == target_id and target.get("webSocketDebuggerUrl"):
+                ws_url = target["webSocketDebuggerUrl"]
+                logger.debug("Created and resolved page target: %s", ws_url[:80])
+                return ws_url
+
+        raise ValueError(f"Could not find page target {target_id} in /json/list")
 
     async def _reader_loop(self) -> None:
         """Read incoming WebSocket messages and resolve pending futures."""
@@ -261,7 +381,11 @@ class CDPConnection:
 
         self._msg_id += 1
         msg_id = self._msg_id
-        msg = {"id": msg_id, "method": method, "params": params}
+        msg: dict[str, Any] = {"id": msg_id, "method": method, "params": params}
+        # Target.* is answered by the browser itself; everything else has to be
+        # routed to the page we attached to, when there is one.
+        if self._session_id and not method.startswith("Target."):
+            msg["sessionId"] = self._session_id
 
         future: asyncio.Future = asyncio.get_event_loop().create_future()
         self._pending[msg_id] = future
@@ -282,17 +406,17 @@ class CDPConnection:
         """Close the CDP WebSocket connection."""
         if self._reader_task and not self._reader_task.done():
             self._reader_task.cancel()
-            try:
+            # CancelledError is a BaseException, so it needs naming separately
+            # from Exception -- the point here is that a reader task going down
+            # however it likes must not stop us closing the socket.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._reader_task
-            except (asyncio.CancelledError, Exception):
-                pass
         if self._ws:
-            try:
+            with contextlib.suppress(Exception):
                 await self._ws.close()
-            except Exception:
-                pass
             self._ws = None
         self._pending.clear()
+        self._session_id = None
         logger.debug("CDP connection closed")
 
     @property

@@ -1,10 +1,10 @@
 #!/bin/sh
 set -eu
 
-uv run python /app/health.py &
+python /app/health.py &
 HEALTH_PID=$!
 
-uv run python -m src.main start &
+python -m src.main start &
 AGENT_PID=$!
 
 shutdown() {

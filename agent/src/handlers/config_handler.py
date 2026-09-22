@@ -3,14 +3,22 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from livekit.agents.voice.agent import find_function_tools
 
 from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..memory import create_memory
-from ..utils.logging import get_logger, log_error
+from ..tools.limits import enforce_tool_limit
+from ..utils.logging import get_logger
 from ..utils.provider import detect_provider_change, strip_model_prefix
+from .realtime import (
+    REALTIME_PIPELINE,
+    has_realtime_keys,
+    requested_pipeline,
+    switch_pipeline,
+    update_realtime,
+)
 
 if TYPE_CHECKING:
     from livekit.agents import AgentSession
@@ -80,19 +88,19 @@ async def handle_full_config(
         # "voice" key, which used to raise and drop the entire config message.
         voice_data = section(message, "voice")
 
-        # Pipeline selection. Without this the realtime branch in
-        # runtime/pipeline.py was unreachable from the frontend: `pipelineType`
-        # and every `realtime*` key were simply never read, so the entire
-        # realtime path existed only in a test-only preset.
-        pipeline_type_in = text(voice_data, "pipelineType", "pipeline_type")
-        if pipeline_type_in in ("standard", "realtime"):
-            new_config.voice.pipeline_type = pipeline_type_in
-        elif pipeline_type_in:
-            logger.warning(
-                "Ignoring unknown pipelineType %r; keeping %s",
-                pipeline_type_in,
-                new_config.voice.pipeline_type,
-            )
+        # Pipeline selection. Reading only `pipelineType` with the values
+        # `standard`/`realtime` meant reading a spelling no client sends: the
+        # SDK's wire field is `voice.type`, with `stt-llm-tts`/`realtime`. So
+        # choosing the realtime pipeline in the app left `pipeline_type` at its
+        # default and built an STT+LLM+TTS agent, while the realtime settings
+        # below were parsed into fields nothing would go on to read.
+        # `requested_pipeline` accepts every spelling either side uses.
+        pipeline_type_in = requested_pipeline(voice_data)
+        if pipeline_type_in is not None:
+            # normalize_pipeline_type only ever returns one of the two Literal
+            # members or None; an unrecognised spelling is rejected upstream
+            # rather than passed through.
+            new_config.voice.pipeline_type = cast(Literal["standard", "realtime"], pipeline_type_in)
 
         realtime_data = section(voice_data, "realtime")
         realtime_provider_in = text(realtime_data, "provider") or text(
@@ -164,19 +172,29 @@ async def handle_full_config(
         kwami_id = message.get("kwamiId") or state.user_identity
         if kwami_id:
             new_config.kwami_id = kwami_id
-            logger.info(f"Using kwami_id for memory: {kwami_id}")
+            logger.info("Using kwami_id for memory: %s", kwami_id)
             # Update user_identity for usage reporting (may be None at session start)
             if not state.user_identity:
                 state.user_identity = kwami_id
-                logger.info(f"Set user_identity from config: {kwami_id}")
+                logger.info("Set user_identity from config: %s", kwami_id)
         if message.get("kwamiName"):
             new_config.kwami_name = message["kwamiName"]
+
+        # Where the user actually is. Optional: an older app that does not send
+        # these still works, and `get_current_time` then labels its answer UTC
+        # instead of pretending the container's clock is the user's.
+        timezone_in = text(message, "timezone", "timeZone", "tz")
+        if timezone_in:
+            new_config.timezone = timezone_in
+        locale_in = text(message, "locale", "lang")
+        if locale_in:
+            new_config.locale = locale_in
 
         # Tools (client-side executable tools sent from the frontend)
         tools_data = message.get("tools")
         if tools_data and isinstance(tools_data, list):
             new_config.tools = tools_data
-            logger.info(f"Loaded {len(tools_data)} client tools from config")
+            logger.info("Loaded %s client tools from config", len(tools_data))
 
         # Soul (supports legacy "persona" key during migration)
         soul_data = message.get("soul") or message.get("persona", {})
@@ -192,6 +210,14 @@ async def handle_full_config(
         conversation_style = _value_from_keys(soul_data, "conversationStyle", "conversation_style")
         if conversation_style:
             new_config.soul.conversation_style = conversation_style
+
+        # What the model *writes*, as opposed to `voice.stt.language`, which is
+        # what it hears. The field existed and was read by nothing, so a soul
+        # configured for Spanish was transcribed and spoken in Spanish while the
+        # replies themselves stayed English.
+        soul_language = _value_from_keys(soul_data, "language", "lang")
+        if soul_language:
+            new_config.soul.language = soul_language
         response_length = _value_from_keys(soul_data, "responseLength", "response_length")
         if response_length:
             new_config.soul.response_length = response_length
@@ -245,11 +271,13 @@ async def handle_full_config(
             state.greeting_delivered = True
 
         logger.info(
-            f"Reconfigured agent: {new_config.voice.llm_provider}/{new_config.voice.tts_provider}"
+            "Reconfigured agent: %s/%s",
+            new_config.voice.llm_provider,
+            new_config.voice.tts_provider,
         )
 
-    except Exception as e:
-        log_error(logger, "Failed to process full config", e)
+    except Exception:
+        logger.exception("Failed to process full config")
 
 
 async def handle_config_update(
@@ -280,6 +308,18 @@ async def handle_config_update(
     try:
         if update_type == "voice":
             await update_voice(session, state, current_agent, config_payload, vad, create_agent_fn)
+        elif update_type == "pipeline":
+            target = requested_pipeline(config_payload) or requested_pipeline(message)
+            if target is None:
+                logger.warning("pipeline update carried no usable pipeline type")
+            elif target != current_agent.kwami_config.voice.pipeline_type:
+                await switch_pipeline(
+                    session, state, current_agent, config_payload, vad, create_agent_fn, target
+                )
+            else:
+                await update_voice(
+                    session, state, current_agent, config_payload, vad, create_agent_fn
+                )
         elif update_type == "llm":
             await update_llm(session, state, current_agent, config_payload, vad, create_agent_fn)
         elif update_type == "memory":
@@ -289,8 +329,8 @@ async def handle_config_update(
         elif update_type == "tools":
             await update_tools(current_agent, config_payload)
 
-    except Exception as e:
-        log_error(logger, f"Error updating {update_type}", e)
+    except Exception:
+        logger.exception("Error updating %s", update_type)
 
 
 async def update_voice(
@@ -301,7 +341,13 @@ async def update_voice(
     vad: Any,
     create_agent_fn: Any,
 ) -> None:
-    """Update voice/TTS configuration, switching providers if needed.
+    """Update voice configuration, switching pipeline or provider if needed.
+
+    One `updateType: "voice"` message carries three different kinds of change,
+    because that is what the frontend SDK sends: a pipeline switch, a realtime
+    voice/model change, and a TTS/STT change. They are dispatched here in that
+    order of specificity. Before this, only the last of the three was read, so
+    `updateRealtimeLive()` was a no-op on the wire.
 
     Args:
         session: The LiveKit agent session.
@@ -311,6 +357,23 @@ async def update_voice(
         vad: Voice Activity Detection instance.
         create_agent_fn: Function to create a new agent from config.
     """
+    current_pipeline = agent.kwami_config.voice.pipeline_type
+    target_pipeline = requested_pipeline(config)
+
+    if target_pipeline is not None and target_pipeline != current_pipeline:
+        await switch_pipeline(session, state, agent, config, vad, create_agent_fn, target_pipeline)
+        return
+
+    # Realtime keys are meaningless to the standard pipeline; routing on the
+    # live pipeline type (not on key presence alone) keeps a stale realtime_*
+    # field in a mixed payload from hijacking a TTS update.
+    if current_pipeline == REALTIME_PIPELINE:
+        if has_realtime_keys(config):
+            await update_realtime(session, state, agent, config, vad, create_agent_fn)
+        else:
+            logger.debug("Ignoring TTS/STT voice update while on the realtime pipeline")
+        return
+
     current_provider = agent.kwami_config.voice.tts_provider
     new_model = config.get("tts_model")
     new_voice = config.get("tts_voice")
@@ -330,7 +393,7 @@ async def update_voice(
             provider_changed = new_provider != current_provider
 
     if provider_changed:
-        logger.info(f"Auto-detected provider change: {current_provider} -> {new_provider}")
+        logger.info("Auto-detected provider change: %s -> %s", current_provider, new_provider)
 
     # Some providers don't support live speed updates via update_options and need agent recreation.
     # Only trigger recreation if speed actually changed from current value.
@@ -344,7 +407,7 @@ async def update_voice(
 
     if provider_changed or speed_changed:
         reason = "provider change" if provider_changed else f"speed change ({current_provider})"
-        logger.info(f"Switching TTS: {current_provider} -> {new_provider} ({reason})")
+        logger.info("Switching TTS: %s -> %s (%s)", current_provider, new_provider, reason)
 
         # Full agent switch needed for provider change
         new_voice_config = replace(agent.kwami_config.voice)
@@ -373,7 +436,7 @@ async def update_voice(
 
         new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
         state.update_agent(session, new_agent)
-        logger.info(f"Switched to {new_provider} TTS")
+        logger.info("Switched to %s TTS", new_provider)
     else:
         # Same provider - just update options if supported
         await _update_tts_options(agent, config, new_voice, is_elevenlabs)
@@ -392,7 +455,9 @@ async def _update_tts_options(
     if not hasattr(agent, "tts") or not agent.tts:
         return
 
-    updates = {}
+    # Heterogeneous on purpose: this is **-splatted into `update_options`,
+    # where voice is a str and speed a float.
+    updates: dict[str, Any] = {}
 
     # Detect TTS provider from module or passed parameter
     tts_provider = getattr(agent.tts, "provider", "").lower()
@@ -417,8 +482,9 @@ async def _update_tts_options(
 
             if new_voice not in OpenAIVoices.STANDARD:
                 logger.warning(
-                    f"Voice '{new_voice}' not valid for current OpenAI TTS, skipping voice update. "
-                    f"Valid: {', '.join(sorted(OpenAIVoices.STANDARD))}"
+                    "Voice '%s' not valid for current OpenAI TTS, skipping voice update. Valid: %s",
+                    new_voice,
+                    ", ".join(sorted(OpenAIVoices.STANDARD)),
                 )
                 new_voice = None  # Skip this update
 
@@ -444,9 +510,9 @@ async def _update_tts_options(
                 agent.kwami_config.voice.tts_voice = new_voice
             if speed_in is not None:
                 agent.kwami_config.voice.tts_speed = speed_in
-            logger.info(f"Updated TTS options: {updates}")
+            logger.info("Updated TTS options: %s", updates)
         except Exception as e:
-            logger.warning(f"Failed to update TTS options: {e}")
+            logger.warning("Failed to update TTS options: %s", e)
 
 
 async def _update_stt_if_needed(
@@ -470,7 +536,7 @@ async def _update_stt_if_needed(
         # STT provider/model change requires agent recreation
         current_stt = agent.kwami_config.voice.stt_provider
         new_stt = config.get("stt_provider", current_stt)
-        logger.info(f"Switching STT: {current_stt} -> {new_stt}")
+        logger.info("Switching STT: %s -> %s", current_stt, new_stt)
 
         new_voice_config = replace(agent.kwami_config.voice)
         if config.get("stt_provider"):
@@ -486,15 +552,25 @@ async def _update_stt_if_needed(
 
         new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
         state.update_agent(session, new_agent)
-        logger.info(f"Switched to {new_voice_config.stt_provider} STT")
+        logger.info("Switched to %s STT", new_voice_config.stt_provider)
     elif hasattr(agent, "stt") and agent.stt:
         # Just update STT options (language only)
         updates = {}
-        if config.get("stt_language"):
-            updates["language"] = config["stt_language"]
+        language_in = config.get("stt_language")
+        if language_in:
+            updates["language"] = language_in
         if updates and hasattr(agent.stt, "update_options"):
             agent.stt.update_options(**updates)
-            logger.info(f"Updated STT options: {updates}")
+            # Write back, exactly as `_update_tts_options` does above. This
+            # branch pushed the language to the live STT and stopped there, so
+            # the next rebuild reconstructed STT from `kwami_config.voice` and
+            # put the session back into the old language. The TTS sibling ten
+            # lines up always did this; the two were meant to match.
+            #
+            # `language_in` is necessarily truthy here -- it is the only thing
+            # that puts anything in `updates` -- so no second guard.
+            agent.kwami_config.voice.stt_language = language_in
+            logger.info("Updated STT options: %s", updates)
 
 
 async def update_llm(
@@ -515,6 +591,25 @@ async def update_llm(
         vad: Voice Activity Detection instance.
         create_agent_fn: Function to create a new agent from config.
     """
+    # On the realtime pipeline there is no separate LLM: "the model" IS the
+    # realtime model. The models panel sends provider/model under updateType
+    # "llm" regardless of pipeline, so translate rather than rebuild a standard
+    # pipeline underneath a realtime session.
+    if agent.kwami_config.voice.pipeline_type == REALTIME_PIPELINE:
+        await update_realtime(
+            session,
+            state,
+            agent,
+            {
+                "realtime_provider": text(config, "provider"),
+                "realtime_model": text(config, "model"),
+                "temperature": number(config, "temperature"),
+            },
+            vad,
+            create_agent_fn,
+        )
+        return
+
     new_config = clone_config(agent.kwami_config)
     new_voice = replace(new_config.voice)
 
@@ -564,6 +659,9 @@ async def update_soul(
     if "traits" in config:
         soul.traits = config["traits"]
         updated = True
+    if "language" in config or "lang" in config:
+        soul.language = _value_from_keys(config, "language", "lang")
+        updated = True
     if "conversationStyle" in config or "conversation_style" in config:
         soul.conversation_style = _value_from_keys(
             config, "conversationStyle", "conversation_style"
@@ -594,7 +692,7 @@ async def update_soul(
         # Rebuild and update instructions through the session
         new_instructions = agent._build_system_prompt(memory_text)
         await agent.update_instructions(new_instructions)
-        logger.info(f"Updated soul: {soul.name} - {(soul.personality or '')[:50]}...")
+        logger.info("Updated soul: %s - %s...", soul.name, (soul.personality or "")[:50])
 
 
 async def update_tools(
@@ -635,15 +733,20 @@ async def update_tools(
         # agent evaluates `realtime_llm_session`, which raises when there is no
         # running activity.
         builtin_tools = find_function_tools(type(agent))
-        await agent.update_tools(builtin_tools + client_tools)
+        # Capped at the provider's ceiling: the frontend decides how many client
+        # tools arrive, and one over the limit is a 400 on every turn rather
+        # than one missing feature.
+        combined = enforce_tool_limit(builtin_tools, client_tools)
+        await agent.update_tools(combined)
 
         logger.info(
-            "update_tools: registered %d client tools alongside %d built-in tools",
+            "update_tools: registered %d client tools alongside %d built-in tools (%d total)",
             len(client_tools),
             len(builtin_tools),
+            len(combined),
         )
-    except Exception as e:
-        log_error(logger, "update_tools: failed to register client tools", e)
+    except Exception:
+        logger.exception("update_tools: failed to register client tools")
 
 
 async def update_memory(

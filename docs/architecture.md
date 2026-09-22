@@ -226,15 +226,30 @@ updates cannot race on `session.update_agent`.
 
 On swap the session:
 
-1. Closes the old agent's STT / LLM / TTS connections.
-2. Closes the old Zep client **only** if the new agent does not share it.
-3. Hands the live cloud browser to the new agent (otherwise it keeps billing).
-4. Transfers unresolved client-tool futures so in-flight UI calls do not time out.
-5. Re-attaches `usage_tracker` and `room`.
+1. Carries the conversation onto the new agent. Generation reads
+   `Agent._chat_ctx`, a fresh agent starts with an empty one, and nothing in
+   the framework copies it across — so before this, every voice, model or
+   pipeline change silently erased the session's history.
+2. Closes the old agent's STT / LLM / TTS connections, **after** waiting for the
+   framework to release that agent. The old activity is drained and closed in a
+   task of the framework's own, so closing its TTS the moment a replacement is
+   prepared can land mid-drain.
+3. Closes the old Zep client **only** if the new agent does not share it.
+4. Hands the live cloud browser to the new agent (otherwise it keeps billing).
+5. Transfers unresolved client-tool futures so in-flight UI calls do not time out.
+6. Re-attaches `usage_tracker` and `room`.
 
-Soul and memory-knob updates can happen without a swap
-(`update_soul`, `update_memory`). TTS/STT provider changes and every LLM change
-recreate the agent.
+There are two ways an agent is replaced and only one is ours.
+`SessionState.update_agent` does the bookkeeping and then swaps. When a
+*function tool* returns an `Agent`, the framework swaps instead, after the
+tool's output has been collected — which is what lets the sentence explaining a
+model switch survive the switch. `prepare_handoff` is the shared half, so that
+path keeps the bookkeeping without swapping twice.
+
+Soul and memory-knob updates happen without a swap (`update_soul`,
+`update_memory`), as do realtime voice, speed and temperature, which are pushed
+over the open socket. A provider, model or pipeline-type change decides which
+object was constructed, so it rebuilds.
 
 ## Agent hooks
 
@@ -267,16 +282,37 @@ Important constraints, all learned the hard way:
 Built-in tools live on `AgentToolsMixin`. Client-side tools are registered from
 the frontend and executed over the data channel (see [Protocol](./protocol.md)).
 
-| Group | Tools |
+| Mixin | Tools |
 | --- | --- |
-| Identity / voice | `get_kwami_info`, `get_current_time`, `change_voice`, `change_speaking_speed`, `change_language`, `get_current_voice_settings` |
-| Memory | `remember_fact`, `recall_memories`, `get_memory_status` |
-| Search | `web_search`, `product_search`, `dismiss_search_result` |
-| Browser | `navigate_to`, `go_back_in_browser`, `go_forward_in_browser`, `close_navigation`, `click_in_navigation`, `type_in_navigation`, `press_key_in_navigation`, `scroll_navigation`, `run_js_in_navigation`, `read_navigation_page` |
+| `AgentToolsMixin` — identity / voice | `get_kwami_info`, `get_current_time`, `change_voice`, `change_speaking_speed`, `change_language`, `get_current_voice_settings` |
+| `AgentToolsMixin` — memory | `remember_fact`, `recall_memories`, `get_memory_status` |
+| `AgentToolsMixin` — search | `web_search`, `product_search`, `dismiss_search_result` |
+| `AgentToolsMixin` — browser | `navigate_to`, `go_back_in_browser`, `go_forward_in_browser`, `close_navigation`, `click_in_navigation`, `type_in_navigation`, `press_key_in_navigation`, `scroll_navigation`, `run_js_in_navigation`, `read_navigation_page` |
+| `PipelineControlMixin` | `change_ai_model`, `switch_pipeline_mode`, `change_realtime_voice`, `list_available_models`, `list_available_voices`, `list_model_providers`, `get_pipeline_status` |
+| `KnowledgeToolsMixin` | `deep_research`, `get_market_quote` |
+| `MediaToolsMixin` | `play_media`, `control_playback`, `set_playback_volume`, `get_now_playing` |
+| `TradingToolsMixin` | `prepare_trade`, `open_trade_ticket`, `submit_trade`, `cancel_prepared_trade`, `get_prepared_trade` |
 
-Client tools such as `set_ui_control` / `list_ui_controls` are **not** defined
-here. System-prompt guidance that names them is emitted only when the frontend
-actually registered those tools.
+`PipelineControlMixin` reaches the session runtime through `AgentDeps.reconfigure`,
+which is what lets the agent rebuild its own pipeline from inside a tool call.
+It returns the new agent rather than installing it; see the swap section above.
+
+`MediaToolsMixin` runs a fixed set of audited scripts in the page, selected by
+name. That is deliberately not `run_js_in_navigation`, which executes
+model-authored code and stays behind `KWAMI_ALLOW_BROWSER_JS`.
+
+`TradingToolsMixin` is a three-step machine and the steps cannot be collapsed:
+`prepare_trade` prices and reads an order back without sending it,
+`open_trade_ticket` puts the user's own broker on screen, and `submit_trade`
+requires a confirmation code **derived from the order** — so a code the model
+invents, a code spoken for a different order, and a code that predates an edit
+all fail closed.
+
+Client tools such as `set_ui_control` are **not** defined here; they arrive from
+the frontend. System-prompt guidance is assembled per session from the tools
+actually registered (`domain/capabilities.py`), one block per capability, so the
+model is never told about a tool that is absent — and, just as importantly, is
+told about every one that is present.
 
 Tools resolve the room through `AgentDeps` on `AgentSession.userdata`, which
 the framework threads into every `RunContext`. There is no process-wide
@@ -292,15 +328,15 @@ agent/src/
 ├── settings.py             # Frozen env → Settings
 ├── runtime_bootstrap.py    # Telephony kwami_id + runtime config fetch
 ├── constants.py            # Provider / voice catalogues, timeouts
-├── domain/                 # Pure: config, parsing, prompt, usage, errors
+├── domain/                 # Pure: config, parsing, prompt, capabilities, models, usage, errors
 ├── ports/                  # Protocols: memory, search, browser, publisher, billing, HTTP
 ├── adapters/               # LiveKit publisher, pooled httpx client
-├── runtime/                # dispatch, lifecycle, pipeline, AgentDeps
+├── runtime/                # dispatch, lifecycle, pipeline, reconfigure, AgentDeps
 ├── factories/              # STT, LLM, TTS, VAD, realtime
-├── handlers/               # config, config_update, tool_result
+├── handlers/               # config, config_update, realtime/pipeline switching, tool_result
 ├── memory/                 # Zep manager, context, search, ontology
-├── tools/                  # Built-in mixin + ClientToolManager
-├── browser/                # Browser Use Cloud, CDP, URL safety
+├── tools/                  # Built-in mixins, ClientToolManager, provider tool budget
+├── browser/                # Browserbase / Browser Use Cloud, CDP, URL safety
 ├── usage/                  # Credits API reporter
 └── utils/                  # Logging, room, provider, validation
 ```

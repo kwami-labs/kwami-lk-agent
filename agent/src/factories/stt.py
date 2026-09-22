@@ -1,25 +1,9 @@
 from livekit.agents import inference
-from livekit.plugins import deepgram, openai
 
-try:
-    from livekit.plugins import assemblyai
-except ImportError:
-    assemblyai = None  # type: ignore
-
-try:
-    from livekit.plugins import google
-except ImportError:
-    google = None  # type: ignore
-
-try:
-    from livekit.plugins import elevenlabs
-except ImportError:
-    elevenlabs = None  # type: ignore
-
-try:
-    from livekit.plugins import cartesia
-except ImportError:
-    cartesia = None  # type: ignore
+# cartesia, deepgram, elevenlabs and openai are mandatory dependencies (see
+# pyproject [project.dependencies]), so guarding their import would be dead
+# code. assemblyai and google are genuinely optional and are guarded.
+from livekit.plugins import cartesia, deepgram, openai
 
 from ..constants import (
     DeepgramModels,
@@ -29,8 +13,14 @@ from ..constants import (
 from ..domain import KwamiVoiceConfig
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
+from .optional import optional_plugin
 
 logger = get_logger("stt")
+
+# Genuinely optional extras: absent means the provider falls back, not that
+# the session fails.
+assemblyai = optional_plugin("assemblyai")
+google = optional_plugin("google")
 
 
 def create_stt(config: KwamiVoiceConfig):
@@ -40,7 +30,7 @@ def create_stt(config: KwamiVoiceConfig):
     # Strip provider prefix from model name (e.g. "deepgram/nova-2" -> "nova-2")
     model = strip_model_prefix(config.stt_model or "", provider)
 
-    logger.info(f"🎤 Creating STT: provider={provider}, model={model or config.stt_model}")
+    logger.info("🎤 Creating STT: provider=%s, model=%s", provider, model or config.stt_model)
 
     try:
         if provider == STTProviders.DEEPGRAM:
@@ -55,7 +45,14 @@ def create_stt(config: KwamiVoiceConfig):
         elif provider == STTProviders.OPENAI:
             return openai.STT(
                 model=model or OpenAIModels.WHISPER_1,
-                language=config.stt_language if config.stt_language != "multi" else None,
+                # The plugin annotates this `str` with a default of "en", but
+                # Whisper auto-detects when the field is absent, and None is how
+                # that reaches the request body. Omitting the argument would
+                # pin every "multi" session to English instead, so the narrower
+                # annotation is overridden deliberately rather than obeyed.
+                language=config.stt_language  # type: ignore[arg-type]
+                if config.stt_language != "multi"
+                else None,
             )
 
         elif provider == STTProviders.ASSEMBLYAI and assemblyai is not None:
@@ -76,7 +73,7 @@ def create_stt(config: KwamiVoiceConfig):
             if not stt_model.startswith("scribe"):
                 stt_model = "scribe_v2_realtime"
             model_string = f"elevenlabs/{stt_model}"
-            logger.info(f"🎤 Using LiveKit Inference for ElevenLabs STT: {model_string}")
+            logger.info("🎤 Using LiveKit Inference for ElevenLabs STT: %s", model_string)
             return inference.STT(
                 model=model_string,
                 language=config.stt_language or "en",
@@ -90,15 +87,15 @@ def create_stt(config: KwamiVoiceConfig):
 
         else:
             logger.warning(
-                f"Unknown or unavailable STT provider '{provider}', falling back to Deepgram"
+                "Unknown or unavailable STT provider '%s', falling back to Deepgram", provider
             )
             return deepgram.STT(
                 model=DeepgramModels.DEFAULT_STT,
                 language="en",
             )
 
-    except Exception as e:
-        logger.error(f"Failed to create {provider} STT: {e}, falling back to Deepgram")
+    except Exception:
+        logger.exception("Failed to create %s STT; falling back to Deepgram", provider)
         return deepgram.STT(
             model=DeepgramModels.DEFAULT_STT,
             language="en",

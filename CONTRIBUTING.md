@@ -52,6 +52,14 @@ Do not add `Co-authored-by` trailers for coding agents.
 User-facing changes belong under `## [Unreleased]` in [CHANGELOG.md](./CHANGELOG.md):
 Added / Changed / Deprecated / Removed / Fixed / Security.
 
+### Releases
+
+A release is a `v*` tag on `main`. The tag must match `version` in
+`agent/pyproject.toml`, and that version must have its own changelog section --
+`.github/workflows/release.yml` checks both, re-runs the full gate, and publishes
+the GitHub Release from the changelog. Steps are in
+[docs/deployment.md](./docs/deployment.md#versioning).
+
 ## What a good change looks like
 
 - New I/O has a `ports/` protocol and a test fake, not a `MagicMock` of LiveKit or Zep.
@@ -61,8 +69,10 @@ Added / Changed / Deprecated / Removed / Fixed / Security.
 - URLs the model can open go through `validate_url_async`.
 - Background tasks are retained (`SessionState.spawn` or an equivalent set).
 - Config work stays under `state.run_serialized`.
-- The coverage floor in `pyproject.toml` does not go down. Raise it when you
-  add tests.
+- The coverage floor in `pyproject.toml` does not go down. Raise it by adding
+  tests, never by lowering it to meet the tree. What may be excluded, and the
+  two cases where `# pragma: no cover` is allowed, are in
+  [docs/testing.md](./docs/testing.md#what-may-be-excluded).
 
 ## Tests you should add
 

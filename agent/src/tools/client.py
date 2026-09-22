@@ -69,7 +69,7 @@ class ClientToolManager:
             description = func_def.get("description", "")
             parameters = func_def.get("parameters", {})
 
-            logger.info(f"Registering client tool: {tool_name}")
+            logger.info("Registering client tool: %s", tool_name)
 
             # Create the tool using function_tool with raw_schema
             tool = self._create_client_tool(tool_name, description, parameters)
@@ -110,7 +110,7 @@ class ClientToolManager:
         async def tool_handler(raw_arguments: dict, context: RunContext) -> str:
             tool_call_id = str(uuid.uuid4())
             logger.info(
-                f"Calling client tool '{tool_name}' (id: {tool_call_id}) args: {raw_arguments}"
+                "Calling client tool '%s' (id: %s) args: %s", tool_name, tool_call_id, raw_arguments
             )
 
             room = (
@@ -150,12 +150,12 @@ class ClientToolManager:
                     result = await asyncio.wait_for(result_future, timeout=30.0)
                     return result
                 except TimeoutError:
-                    logger.warning(f"Tool call timed out: {tool_name} ({tool_call_id})")
+                    logger.warning("Tool call timed out: %s (%s)", tool_name, tool_call_id)
                     return "Error: Tool execution timed out"
 
             except Exception as e:
-                logger.error(f"Error executing client tool: {e}")
-                return f"Error executing tool: {str(e)}"
+                logger.exception("Error executing client tool")
+                return f"Error executing tool: {e!s}"
             finally:
                 self.pending_calls.pop(tool_call_id, None)
 
@@ -176,12 +176,12 @@ class ClientToolManager:
             error: Optional error message.
         """
         if tool_call_id not in self.pending_calls:
-            logger.warning(f"Received result for unknown tool call: {tool_call_id}")
+            logger.warning("Received result for unknown tool call: %s", tool_call_id)
             return
 
         future = self.pending_calls[tool_call_id]
         if future.done():
-            logger.warning(f"Tool call already completed: {tool_call_id}")
+            logger.warning("Tool call already completed: %s", tool_call_id)
             return
 
         # Everything here lands straight in the LLM context. The frontend is

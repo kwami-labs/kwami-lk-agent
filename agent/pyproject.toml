@@ -1,6 +1,6 @@
 [project]
 name = "kwami-lk-agent"
-version = "0.1.0"
+version = "1.0.0"
 description = "LiveKit Cloud agent for Kwami AI"
 requires-python = ">=3.11"
 dependencies = [
@@ -19,6 +19,13 @@ dependencies = [
     "aiohttp>=3.9.0",
     "httpx>=0.27.0",
     "websockets>=13.0",
+    # Tracing. These arrive transitively through livekit-agents today, and
+    # `src/telemetry.py` imports them directly -- so they are declared here
+    # rather than left to a resolution that a livekit-agents release could
+    # change without this repo noticing.
+    "opentelemetry-api>=1.30.0,<2.0.0",
+    "opentelemetry-sdk>=1.30.0,<2.0.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.30.0,<2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -41,8 +48,39 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "N", "W", "UP"]
-ignore = ["E501"]
+# Beyond the original E/F/I/N/W/UP: rules that catch classes of bug the test
+# suite cannot. `G` settles a logging style that was split 99-to-122 across the
+# tree and makes structured logging possible later; `TRY400` turns a bare
+# `logger.error` in an `except` into `logger.exception`, which is the difference
+# between a one-line symptom and a traceback; `DTZ` caught a real bug
+# (`get_current_time` answering in container-local time); `ASYNC`, `S` and `B`
+# are small and specific.
+select = ["E", "F", "I", "N", "W", "UP", "ASYNC", "B", "DTZ", "G", "PERF", "RUF", "S", "SIM", "TRY"]
+ignore = [
+    "E501",
+    # Demands a custom exception class per raise site rather than a message.
+    # 102 hits across the tree, and the messages here are already specific --
+    # this would trade readable raises for a wall of one-line exception types.
+    "TRY003",
+    # `try: ... return x` becomes `else: return x`. A style preference, and the
+    # early-return shape reads better in the I/O wrappers that dominate here.
+    "TRY300",
+    # Flags any async def taking a `timeout` parameter, on the assumption it is
+    # reimplementing `asyncio.timeout`. Here every one forwards straight to
+    # httpx or aiohttp, which implement the timeout themselves and distinguish
+    # connect from read -- wrapping those in `asyncio.timeout` would be a second,
+    # coarser deadline racing the first.
+    "ASYNC109",
+    # Wants `__all__` sorted alphabetically. Both of ours are grouped by section
+    # with comments -- config, wire parsing, prompt, errors -- which says more
+    # about the package than alphabetical order does.
+    "RUF022",
+]
+# `ARG` is deliberately not selected. In `src/` its 34 hits are almost entirely
+# the `context: RunContext` parameter that every `@function_tool` must accept
+# and most never read -- the framework owns that signature, so the finding is
+# unactionable. In `tests/` its 288 hits are pytest fixtures, which are used by
+# name rather than by reference.
 
 [tool.ruff.lint.per-file-ignores]
 # load_dotenv() must run before the livekit imports so plugins see the
@@ -52,6 +90,24 @@ ignore = ["E501"]
 # Lazily-imported SDK classes are bound to local names that are legitimately
 # PascalCase (AsyncZep, ZepMessage).
 "src/memory/manager.py" = ["N806"]
+# A catalogue module: thirteen namespace classes holding sets, dicts and lists
+# of provider, model and voice names. RUF012 guards against a mutable default
+# being shared across instances, and none of these classes is ever instantiated
+# -- verified, no `ClassName(` anywhere in src/ or tests/. Annotating all
+# nineteen with ClassVar would document a hazard that cannot occur here.
+"src/constants.py" = ["RUF012"]
+# A test suite is 2188 asserts by design (S101), and `pytest.raises(Exception)`
+# is the right assertion when the point is that *something* is refused (B017).
+# Test doubles bind their own local SDK-style names (N806) and raise plain
+# errors on purpose (TRY301).
+#   S104   - `0.0.0.0` appears because a test asserts the URL validator refuses it
+#   RUF001 - en/em dashes appear because a test feeds them to the title splitter
+#   RUF012 - test doubles collect calls on a class attribute on purpose
+#   RUF059 - `ctx, _ = _wire(...)` reads worse than ignoring the unused half
+"tests/**" = ["S101", "B017", "N806", "TRY301", "S104", "RUF001", "RUF012", "RUF059"]
+# conftest imports `src.settings` after a sys.path insert, which E402 flags and
+# which is the only way to import the package without installing it.
+"tests/conftest.py" = ["E402"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
@@ -71,41 +127,47 @@ omit = []
 [tool.coverage.report]
 show_missing = true
 skip_covered = false
-# Ratcheted upward each phase; reaches 100 in Phase 6. See the plan.
-fail_under = 43
+# Reached 100 in Phase 6 and is now blocking: a line that is not exercised
+# does not merge. This only ever moves by adding tests -- see the exclusion
+# rules below for the two things that may be left out, and docs/testing.md
+# for why lowering it to meet the tree is the wrong move.
+fail_under = 100
+# Categorical exclusions live here so they are auditable in one place.
 exclude_also = [
     "if TYPE_CHECKING:",
     "@overload",
 ]
+# `# pragma: no cover` is allowed at a call site only for these two cases, and
+# only with the reason written on the same line:
+#
+#   1. An import guard whose branch is decided by the installed environment and
+#      not by our code: an optional extra that is absent, or a symbol that may
+#      move between versions of a dependency we do ship. A locked environment
+#      always resolves those one way, so a test that forces the other branch is
+#      testing its own monkeypatch.
+#      Check before adding one: if the package is genuinely absent here, the
+#      `except` branch *runs* and is already covered -- a pragma there excludes
+#      a covered line and only misleads. Where the *call* into such a plugin is
+#      worth pinning, use a strict stand-in with explicit keyword signatures
+#      instead, and say in the docstring that what is verified is our call
+#      shape and not the SDK's.
+#   2. The process entry point (`if __name__ == "__main__":`).
+#
+# Not allowed: a branch our own composition happens not to take. A mixin that is
+# always combined, a guard around a mandatory dependency -- those are reachable
+# from a test, or they are dead code to delete.
+#
+# Anything else that cannot be covered is a design problem, not an exclusion.
 
 [tool.mypy]
 python_version = "3.11"
 files = ["src"]
-# Starts permissive and is tightened per-module as the rework lands; the point
-# today is to catch the None-handling and dict-shape classes of bug.
+# Every module under src/ is checked -- there is no exemption list any more.
+# The 13 modules that used to be exempt carried 81 errors between them; they
+# were cleared rather than re-listed, so a new module cannot be added to a
+# list that no longer exists. The next ratchet is `strict = true`, which is
+# 244 errors today, 85 of them missing generic parameters.
 ignore_missing_imports = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_unreachable = true
-
-# Modules that do not type-check yet. This list only shrinks: each phase clears
-# the modules it touches and deletes them from here, so the gate covers more of
-# the codebase over time without ever going red in between. The remaining 23
-# modules under src/ are checked today.
-[[tool.mypy.overrides]]
-module = [
-    "src.agent",
-    "src.browser.browser_session",
-    "src.factories.llm",
-    "src.factories.stt",
-    "src.factories.tts",
-    "src.handlers.config_handler",
-    "src.main",
-    "src.memory.context",
-    "src.memory.manager",
-    "src.memory.ontology",
-    "src.memory.search",
-    "src.session",
-    "src.tools.builtin",
-]
-ignore_errors = true

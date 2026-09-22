@@ -14,26 +14,16 @@ from ..domain import KwamiVoiceConfig
 from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
+from .optional import optional_plugin
 
 logger = get_logger("llm")
 
 # Each of these is a separate `livekit-plugins-*` distribution, declared as an
 # optional extra. When one is absent the provider falls back to OpenAI with a
 # warning rather than raising -- see the module docstring.
-try:
-    from livekit.plugins import google
-except ImportError:
-    google = None  # type: ignore[assignment]
-
-try:
-    from livekit.plugins import anthropic
-except ImportError:
-    anthropic = None  # type: ignore[assignment]
-
-try:
-    from livekit.plugins import groq
-except ImportError:
-    groq = None  # type: ignore[assignment]
+google = optional_plugin("google")
+anthropic = optional_plugin("anthropic")
+groq = optional_plugin("groq")
 
 # OpenAI models that only accept the default temperature; others support 0..2.
 _OPENAI_TEMPERATURE_FIXED_MODELS = ("gpt-5.1", "o1-", "o3-")

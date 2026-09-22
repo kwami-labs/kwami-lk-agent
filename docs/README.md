@@ -19,7 +19,7 @@ and then read [Architecture](./architecture.md).
 | [Billing](./billing.md) | Usage tracking, credit reporting, and identity resolution |
 | [Development](./development.md) | Local setup, Makefile, layout, and coding conventions |
 | [Testing](./testing.md) | Unit, contract, integration, and live e2e layers |
-| [Deployment](./deployment.md) | Docker image, LiveKit Cloud, CI, and telephony bootstrap |
+| [Deployment](./deployment.md) | Docker image, LiveKit Cloud, Cloudflare Workers, CI, telephony, releases |
 
 ## Project
 
