@@ -30,7 +30,7 @@ jobs:
     name: Python dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
         uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
@@ -56,7 +56,7 @@ jobs:
     name: Worker dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # packageManager lives in infra/package.json, not the repo root. Without
       # this the action looks at a file that does not exist and exits before
@@ -83,7 +83,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # gitleaks needs history to scan commits rather than just the tree.
           fetch-depth: 0
@@ -117,7 +117,7 @@ jobs:
         # `python` covers agent/, `javascript-typescript` covers infra/.
         language: [python, javascript-typescript]
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Initialise CodeQL
         uses: github/codeql-action/init@3ea06614dafe36dec890db3446326e0d40ce53d4 # v3
