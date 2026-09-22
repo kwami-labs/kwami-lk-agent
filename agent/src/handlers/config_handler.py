@@ -100,9 +100,7 @@ async def handle_full_config(
             # normalize_pipeline_type only ever returns one of the two Literal
             # members or None; an unrecognised spelling is rejected upstream
             # rather than passed through.
-            new_config.voice.pipeline_type = cast(
-                Literal["standard", "realtime"], pipeline_type_in
-            )
+            new_config.voice.pipeline_type = cast(Literal["standard", "realtime"], pipeline_type_in)
 
         realtime_data = section(voice_data, "realtime")
         realtime_provider_in = text(realtime_data, "provider") or text(
