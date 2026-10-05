@@ -62,10 +62,11 @@ htmlcov/
 # =============================================================================
 # Environment & Secrets
 # =============================================================================
-.env
+# `.env` is tracked and encrypted with git-crypt. Overrides stay ignored.
 .env.*
 .env.*.*
 !.env.sample
+!.env.example
 !infra/.dev.vars.example
 *.pem
 *.key
