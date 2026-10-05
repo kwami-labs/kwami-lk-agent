@@ -8,8 +8,15 @@ Two layers:
 
 ## Environment
 
-Copy `.env.sample` to `.env`. Every variable the agent reads is listed there
-and on `Settings`.
+`.env` is committed with git-crypt. The blob is ciphertext; the working tree
+is plaintext after unlock. On a new machine, install git-crypt and run once:
+
+```bash
+git-crypt unlock ~/.config/git-crypt/kwami.io/kwami-lk-agent.key
+```
+
+The key file is outside the repo. [`.env.sample`](../.env.sample) lists every
+variable `Settings` reads. Plaintext `.env.*` overrides stay gitignored.
 
 ### Required for a local voice session
 
