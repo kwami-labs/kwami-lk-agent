@@ -356,7 +356,7 @@ async def test_no_template_id_skips_straight_to_the_fallback() -> None:
 
     assert context.context_block is None
     assert context.summary == "SUMMARY"
-    assert client.thread.context_calls[0]["mode"] == "summary"
+    assert client.thread.context_calls[0] == {"thread_id": "s"}
 
 
 async def test_a_failing_template_falls_back_to_the_summary(caplog) -> None:
