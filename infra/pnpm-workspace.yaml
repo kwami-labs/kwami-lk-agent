@@ -16,3 +16,10 @@ minimumReleaseAgeExclude:
   - miniflare
   - workerd
   - "@cloudflare/workerd-linux-64"
+
+# Transitive pins that fail `pnpm audit` and have no parent release yet.
+# source-map-js <1.2.2 can stall the event loop (GHSA-68fv-2mgg-jv7q).
+# sharp <0.35.5 bundles a vulnerable librsvg (GHSA-wq5f-xc86-pv6w).
+overrides:
+  sharp: 0.35.5
+  source-map-js: 1.2.2

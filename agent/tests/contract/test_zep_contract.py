@@ -84,14 +84,16 @@ def test_the_zep_client_can_actually_be_closed(client: AsyncZep) -> None:
 
 
 def test_get_user_context_supports_the_template_free_call(client: AsyncZep) -> None:
-    """The dead `thread.get_context` fallback has a direct replacement.
+    """The fallback calls `get_user_context` with only a thread id.
 
-    `get_user_context` takes an optional `template_id`, so the fallback path can
-    be repaired rather than deleted.
+    Zep 3.30 removed `min_rating` and `mode`. `template_id` stays optional so
+    the template path and the fallback share one method.
     """
     import inspect
 
     params = inspect.signature(client.thread.get_user_context).parameters
+    assert "thread_id" in params
     assert "template_id" in params
     assert params["template_id"].default is None
-    assert "min_rating" in params
+    assert "min_rating" not in params
+    assert "mode" not in params
