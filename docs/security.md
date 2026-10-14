@@ -56,7 +56,9 @@ never prints secret values.
 
 Do **not**:
 
-- Commit `.env` (gitignored; only `.env.sample` is tracked)
+- Commit the git-crypt key, or a plaintext `.env`. The tracked `.env` blob is
+  ciphertext; `.env.sample` is the plaintext name list. On a new machine:
+  `git-crypt unlock ~/.config/git-crypt/kwami.io/kwami-lk-agent.key`
 - Log request headers that carry `X-Kwami-API-Key` / `X-API-Key`
 - Put keys in LiveKit room metadata or data-channel payloads
 - Read `os.environ` in feature code — take `Settings` instead

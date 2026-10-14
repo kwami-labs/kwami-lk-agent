@@ -13,12 +13,14 @@ This repo uses **uv**, not pnpm/npm. `agent/uv.lock` is the source of truth.
 ## First run
 
 ```bash
-cp .env.sample .env
-# fill LIVEKIT_* and at least OPENAI_API_KEY, DEEPGRAM_API_KEY
+git-crypt unlock ~/.config/git-crypt/kwami.io/kwami-lk-agent.key
 
 make install    # cd agent && uv sync --extra dev
 make dev        # cd agent && uv run python -m src.main dev
 ```
+
+That unlock is once per machine. The key file is not in the repo. The working
+tree `.env` stays plaintext; the committed blob is ciphertext.
 
 `make dev` starts the LiveKit agents CLI in dev mode against `LIVEKIT_URL`.
 Join a room from the playground or SDK; the worker logs
