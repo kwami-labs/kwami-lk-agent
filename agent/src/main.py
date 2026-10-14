@@ -3,10 +3,11 @@
 import asyncio
 from pathlib import Path
 
-from dotenv import load_dotenv
+from .envfile import load_unlocked_dotenv
 
-# Load .env from the root directory
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
+# Load .env from the root directory. A git-crypt locked file is left alone so
+# CI, which has no key, can still import this module.
+load_unlocked_dotenv(Path(__file__).parent.parent.parent / ".env")
 
 from livekit import rtc
 from livekit.agents import (
