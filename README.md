@@ -18,9 +18,8 @@ the Kwami frontend over the LiveKit data channel.
 ## Quick Start
 
 ```bash
-# Copy and configure environment
-cp .env.sample .env
-# Edit .env with your credentials
+# Unlock the shared .env (git-crypt). The key file is not in the repo.
+git-crypt unlock ~/.config/git-crypt/kwami.io/kwami-lk-agent.key
 
 # Install dependencies (including dev tools)
 make install
@@ -205,7 +204,8 @@ Details: [docs/deployment.md](./docs/deployment.md).
 
 ## Environment Variables
 
-Copy `.env.sample` to `.env` — it documents every variable the agent reads.
+`.env` is tracked with git-crypt (ciphertext in git, plaintext after unlock).
+`.env.sample` documents every variable the agent reads.
 The minimum for a working local run:
 
 ```env
