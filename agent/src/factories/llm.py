@@ -8,6 +8,9 @@ that as an agent that joins the room and never speaks, with nothing in the logs
 connecting the two.
 """
 
+import re
+
+from livekit.agents import inference
 from livekit.plugins import openai
 
 from ..domain import KwamiVoiceConfig
@@ -29,7 +32,22 @@ groq = optional_plugin("groq")
 _OPENAI_TEMPERATURE_FIXED_MODELS = ("gpt-5.1", "o1-", "o3-")
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+#: The provider name for models served by LiveKit Inference ("google/...").
+INFERENCE_PROVIDER = "inference"
+DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
 MISTRAL_BASE_URL = "https://api.mistral.ai/v1"
+
+# Claude models that still take `temperature`. From Opus 4.7 on the API answers
+# 400 "`temperature` is deprecated for this model" (measured 2026-10-18 across
+# every model the account lists), so this is an allowlist of the old families:
+# a model newer than this file must not inherit a parameter it rejects.
+_ANTHROPIC_TEMPERATURE_MODELS = re.compile(r"^claude-(3|(opus|sonnet|haiku)-4(-[0-6])?(-\d{8})?$)")
+
+
+def _anthropic_temperature(config: KwamiVoiceConfig, model: str) -> dict[str, float]:
+    if _ANTHROPIC_TEMPERATURE_MODELS.match(model):
+        return {"temperature": config.llm_temperature}
+    return {}
 
 
 def _openai_temperature(config: KwamiVoiceConfig, model: str) -> float:
@@ -74,15 +92,32 @@ def _fallback_to_openai(config: KwamiVoiceConfig, provider: str, reason: str):
 
 def _build(config: KwamiVoiceConfig, provider: str, model: str):
     """Construct the requested provider, or return None if it is unavailable."""
+    if provider == INFERENCE_PROVIDER:
+        # LiveKit Inference: "google/gemini-2.5-flash", billed to the LiveKit
+        # project instead of a provider key -- so a free-tier Google quota
+        # does not apply (measured 0.69 s to the first token, 2026-10-20).
+        if not model or "/" not in model:
+            return None
+        return inference.LLM(model=model, extra_kwargs={"temperature": config.llm_temperature})
+
     if provider == "openai":
         return _openai_llm(config, model or DEFAULT_OPENAI_MODEL)
 
     if provider == "google":
         if google is None:
             return None
+        model = model or "gemini-2.0-flash"
+        # The voice LLM talks and delegates (brain/); deep reasoning is the
+        # brain's job. Gemini 3 thinks by default, which measured 7.3 s for a
+        # one-sentence spoken reply (2026-10-09), so it is turned down to the
+        # minimum here. Older models take a token budget instead of a level.
+        thinking: dict[str, str] = (
+            {"thinking_level": "minimal"} if model.startswith("gemini-3") else {}
+        )
         return google.LLM(
-            model=model or "gemini-2.0-flash",
+            model=model,
             temperature=config.llm_temperature,
+            **({"thinking_config": thinking} if thinking else {}),
         )
 
     if provider == "anthropic":
@@ -91,9 +126,14 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         # package, installed via the `anthropic` extra.
         if anthropic is None:
             return None
+        model = model or DEFAULT_ANTHROPIC_MODEL
+        # The plugin marks every tool strict by default, and Anthropic accepts
+        # at most 20 strict tools: with the agent's 44 every request was a 400
+        # ("Too many strict tools") on LiveKit Cloud, 2026-10-18.
         return anthropic.LLM(
-            model=model or "claude-3-5-sonnet-latest",
-            temperature=config.llm_temperature,
+            model=model,
+            _strict_tool_schema=False,
+            **_anthropic_temperature(config, model),
         )
 
     if provider == "groq":
@@ -101,8 +141,10 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         # `openai.LLM.with_groq`.
         if groq is None:
             return None
+        # Groq retired every Llama 3 model; gpt-oss is what it serves now
+        # (listed 2026-10-18).
         return groq.LLM(
-            model=model or "llama-3.1-70b-versatile",
+            model=model or "openai/gpt-oss-120b",
             temperature=config.llm_temperature,
         )
 

@@ -33,6 +33,10 @@ from src.domain.capabilities import build_capability_guidance as guidance
 #: it from the app when the app happens to be checked out alongside.
 APP_TOOL_NAMES = frozenset(
     {
+        # The charter's user profile (useCharterAgentTools.ts).
+        "remember_about_user",
+        "forget_about_user",
+        "read_user_profile",
         "set_ui_control",
         "open_workspace_panel",
         "close_workspace_panel",

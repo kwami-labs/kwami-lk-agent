@@ -8,13 +8,25 @@ dependencies = [
     # provider-specific helpers, so a major bump must be an explicit, tested
     # decision rather than a silent resolution. An unpinned `zep-cloud>=3.0.0`
     # is how five now-nonexistent Zep methods stayed in the code unnoticed.
-    "livekit-agents>=1.3.12,<2.0.0",
+    # 1.8.8: FallbackAdapter(sticky=...), which the voice fallback relies on.
+    "livekit-agents>=1.8.8,<2.0.0",
     "livekit-plugins-openai>=1.3.12,<2.0.0",
     "livekit-plugins-deepgram>=1.3.12,<2.0.0",
     "livekit-plugins-cartesia>=1.3.12,<2.0.0",
     "livekit-plugins-elevenlabs>=1.3.12,<2.0.0",
     "livekit-plugins-silero>=1.3.12,<2.0.0",
+    # Every provider the app offers is a core dependency. As extras they were
+    # absent from the image (`uv sync --no-dev` installs none), and a missing
+    # plugin is not an error: the factories fall back to OpenAI or Deepgram, so
+    # choosing Gemini, Claude, Groq or AssemblyAI silently ran something else.
+    "livekit-plugins-google>=1.3.12,<2.0.0",
+    "livekit-plugins-anthropic>=1.3.12,<2.0.0",
+    "livekit-plugins-groq>=1.3.12,<2.0.0",
+    "livekit-plugins-assemblyai>=1.3.12,<2.0.0",
     "python-dotenv>=1.0.0",
+    # Windows ships no IANA database, so ZoneInfo("Europe/Madrid") raised and
+    # the clock fell back to UTC. Linux images have it; this is a no-op there.
+    "tzdata>=2024.1",
     "zep-cloud>=3.16.0,<4.0.0",
     "aiohttp>=3.9.0",
     "httpx>=0.27.0",
@@ -26,6 +38,8 @@ dependencies = [
     "opentelemetry-api>=1.30.0,<2.0.0",
     "opentelemetry-sdk>=1.30.0,<2.0.0",
     "opentelemetry-exporter-otlp-proto-http>=1.30.0,<2.0.0",
+    "anthropic>=0.116,<1",
+    "claude-agent-sdk>=0.2.165",
 ]
 
 [project.optional-dependencies]
@@ -37,6 +51,8 @@ dev = [
     "mypy>=1.13.0",
     "ruff>=0.8.0",
 ]
+# Kept so existing `uv sync --extra google` invocations still resolve; the
+# packages themselves are core dependencies now.
 elevenlabs = ["livekit-plugins-elevenlabs>=1.3.12,<2.0.0"]
 google = ["livekit-plugins-google>=1.3.12,<2.0.0"]
 anthropic = ["livekit-plugins-anthropic>=1.3.12,<2.0.0"]

@@ -402,7 +402,9 @@ async def test_cleanup_with_no_agent_still_reports_usage() -> None:
         def __init__(self) -> None:
             self.calls: list[str] = []
 
-        async def report(self, *, user_id: str, session_id: str, tracker: Any) -> bool:
+        async def report(
+            self, *, user_id: str, session_id: str, tracker: Any, kwami_id: Any = None
+        ) -> bool:
             self.calls.append(user_id)
             return True
 

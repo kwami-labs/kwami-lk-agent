@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-from .prompt import LANGUAGE_NAMES
+from .prompt import language_name
 
 #: Facts whose only content is the user's name are skipped when choosing a topic
 #: to open with -- "your name is Ada" is not a conversation starter.
@@ -60,6 +60,20 @@ class GreetingFacts:
     recent_context_summary: str | None = None
     recent_topics: list[str] = field(default_factory=list)
     language: str | None = None
+    #: The soul carries a written persona (`system_prompt`). Its greeting then
+    #: says what to open with and leaves the how to the character.
+    persona: bool = False
+    #: The charter's greeting style, or None when there is no charter. With
+    #: one, the user is already known by a form of address and is never asked
+    #: their name. "none" means do not greet at all.
+    charter_greeting: str | None = None
+    address_as: str = ""
+    pending: list[str] = field(default_factory=list)
+    #: Brain tasks that finished after the last call ended: "title: summary".
+    brain_results: list[str] = field(default_factory=list)
+    #: "morning" / "afternoon" / "evening" / "night" in the user's zone, so a
+    #: greeting can say "buenas tardes" without guessing the hour.
+    time_of_day: str = ""
 
 
 def extract_name_from_facts(facts: list[str], *, agent_name: str = "") -> str | None:
@@ -101,16 +115,87 @@ def _language_clause(language: str | None) -> str:
     Spanish-configured agent opened the conversation in English and only
     switched once the user replied.
     """
-    code = (language or "").strip().lower()
-    if code not in LANGUAGE_NAMES:
-        code = code.split("-", 1)[0]
-    name = LANGUAGE_NAMES.get(code)
-    if not name or code == "en":
+    name = language_name(language)
+    if not name:
         return ""
     return f" Greet them in {name}."
 
 
-def build_greeting_instructions(facts: GreetingFacts) -> str:
+#: Closes every greeting for a written persona. The default wording below is a
+#: style of its own -- "Hey there!", "keep it chill" -- and handed to a formal
+#: character it wins: the butler opened every session like a flatmate.
+PERSONA_GREETING_STYLE = (
+    " Do it in your own character, register and form of address, exactly as your "
+    "instructions define them. One or two short sentences."
+)
+
+
+def _persona_greeting(facts: GreetingFacts, agent_name: str) -> str:
+    """The same four cases, stating only what to open with."""
+    if facts.user_name:
+        user_name = facts.user_name
+        if facts.recent_topics:
+            topics = "; ".join(facts.recent_topics[:MAX_GREETING_TOPICS])
+            content = (
+                f"Greet {user_name} by name and open with something you remember. "
+                f"Recent topics: {topics}. Pick ONE topic and ask about it naturally - "
+                "don't list everything you remember."
+            )
+        elif facts.recent_context_summary:
+            content = (
+                f"Greet {user_name} by name. Here's a summary of your past conversations: "
+                f"{facts.recent_context_summary}. Refer to it only if something fits naturally."
+            )
+        else:
+            content = f"Greet {user_name} by name. Don't repeat the same greeting every time."
+    elif facts.is_returning_user:
+        content = (
+            "Greet the user as someone you have spoken with before but whose name you "
+            "can't remember, and ask for it."
+        )
+    else:
+        content = f"Introduce yourself as {agent_name} and ask the user's name."
+    return content + PERSONA_GREETING_STYLE
+
+
+def time_of_day(hour: int) -> str:
+    """The part of the day a greeting names, from a local hour (0-23)."""
+    if 6 <= hour < 14:
+        return "morning"
+    if 14 <= hour < 21:
+        return "afternoon"
+    if 21 <= hour < 24:
+        return "evening"
+    return "night"
+
+
+def _charter_greeting(facts: GreetingFacts) -> str:
+    """A chief of staff's opening: short, in character, never asking a name.
+
+    `brief_pending` names how many things are waiting and the first one;
+    `briefing` offers a rundown; `brief` is the salutation alone.
+    """
+    address = f", addressing the user as '{facts.address_as}'" if facts.address_as else ""
+    when = f" It is {facts.time_of_day} for the user." if facts.time_of_day else ""
+    content = (
+        f"Greet the user in one short sentence, in your own character{address}.{when} "
+        "Do not ask for their name and do not ask how you can help."
+    )
+    if facts.charter_greeting == "brief_pending" and facts.pending:
+        content += (
+            f" Then say that {len(facts.pending)} thing(s) are pending and name the "
+            f"first: {facts.pending[0]}."
+        )
+    elif facts.charter_greeting == "briefing":
+        content += " Then offer, in one sentence, a quick rundown of anything pending."
+        if facts.pending:
+            content += " Pending: " + "; ".join(facts.pending[:MAX_GREETING_TOPICS]) + "."
+    elif facts.recent_topics:
+        content += f" If it fits, mention one thing you remember: {facts.recent_topics[0]}."
+    return content
+
+
+def _base_greeting(facts: GreetingFacts) -> str:
     """The instruction handed to `generate_reply` for the opening turn.
 
     Four cases, in decreasing order of what is known: a named user with things
@@ -119,6 +204,12 @@ def build_greeting_instructions(facts: GreetingFacts) -> str:
     """
     language = _language_clause(facts.language)
     agent_name = facts.agent_name or "Kwami"
+
+    if facts.charter_greeting is not None:
+        return _charter_greeting(facts) + language if facts.charter_greeting != "none" else ""
+
+    if facts.persona:
+        return _persona_greeting(facts, agent_name) + language
 
     if facts.user_name:
         user_name = facts.user_name
@@ -166,3 +257,25 @@ def build_greeting_instructions(facts: GreetingFacts) -> str:
         "Keep it short, friendly, and natural. Don't be overly formal or give a long "
         f"introduction.{language}"
     )
+
+
+def build_greeting_instructions(facts: GreetingFacts) -> str:
+    """The opening instruction, plus any brain results owed from earlier calls.
+
+    The user asked that work finished after hanging up be told at the next
+    greeting, so those results are added even when the greeting is switched
+    off -- otherwise they would be lost.
+    """
+    base = _base_greeting(facts)
+    if not facts.brain_results:
+        return base
+    results = " | ".join(facts.brain_results[:MAX_GREETING_TOPICS])
+    note = (
+        " Then, briefly and in your own voice, report work your brain finished after the "
+        f"last call ended: {results}. Offer the detail."
+    )
+    if not base:
+        base = "Greet the user in one short sentence, in your own character." + _language_clause(
+            facts.language
+        )
+    return base + note

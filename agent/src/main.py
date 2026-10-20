@@ -1,13 +1,13 @@
 """Kwami Agent - Entry point for LiveKit Cloud agent sessions."""
 
 import asyncio
+import os
 from pathlib import Path
 
-from .envfile import load_unlocked_dotenv
+from .envfile import load_env_file
 
-# Load .env from the root directory. A git-crypt locked file is left alone so
-# CI, which has no key, can still import this module.
-load_unlocked_dotenv(Path(__file__).parent.parent.parent / ".env")
+# Load .env from the root directory (skipped while git-crypt keeps it locked)
+load_env_file(Path(__file__).parent.parent.parent / ".env")
 
 from livekit import rtc
 from livekit.agents import (
@@ -19,7 +19,9 @@ from livekit.agents import (
     room_io,
 )
 
-from .domain import KwamiConfig
+from .adapters.publisher import LiveKitRoomPublisher
+from .brain import Bridge
+from .factories.audio import prewarm_resampler
 from .factories.vad import prewarm_vad
 from .health import heartbeat_path, run_heartbeat, write_heartbeat
 from .runtime import (
@@ -29,9 +31,11 @@ from .runtime import (
     apply_runtime_config,
     decode_data_message,
     resolve_identity_on_join,
-    route_metrics,
 )
+from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
+from .runtime.recovery import install_realtime_rescue
+from .runtime.turn_taking import session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
@@ -42,7 +46,7 @@ from .utils.logging import (
     get_logger,
     session_context,
 )
-from .utils.room import resolve_user_identity
+from .utils.room import is_agent_participant, resolve_user_identity
 
 logger = get_logger()
 
@@ -55,7 +59,13 @@ configure_logging()
 configure_tracing()
 logger.info("Settings resolved: %s", get_settings().describe())
 
-server = AgentServer()
+# A delegated task still running when the call ends is finished, not dropped
+# (brain/bridge.py). on_session_end is where that waits, so it gets the time.
+BRAIN_DRAIN_SECONDS = 840.0
+server = AgentServer(session_end_timeout=BRAIN_DRAIN_SECONDS + 60.0)
+
+#: Bridges by room, for `on_session_end`, which only receives the JobContext.
+_bridges: dict[str, Bridge] = {}
 
 # Strong reference to the heartbeat task: the loop holds only a weak one, and a
 # collected heartbeat would read to the probe as a dead worker.
@@ -63,7 +73,8 @@ _heartbeat_task: asyncio.Task | None = None
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Prewarm the VAD model for faster startup."""
+    """Prewarm soxr's FFT cache and the VAD model before any session starts."""
+    prewarm_resampler()
     proc.userdata["vad"] = prewarm_vad()
 
 
@@ -100,7 +111,43 @@ def _on_worker_registered(*_args: object) -> None:
     logger.info("Health heartbeat started at %s", heartbeat_path())
 
 
-@server.rtc_session(agent_name="kwami-agent")
+#: How long to wait for the app's config before asking for it, and how often.
+CONFIG_REQUEST_AFTER_SECONDS = 4.0
+CONFIG_REQUEST_ATTEMPTS = 3
+
+
+async def _request_config_if_missing(state, room) -> None:
+    """Ask the app to resend its config if it has not arrived.
+
+    Telephony sessions (a kwami_id from the dispatch) get theirs from the API
+    instead and never reach this.
+    """
+    publisher = LiveKitRoomPublisher(room)
+    for attempt in range(CONFIG_REQUEST_ATTEMPTS):
+        await asyncio.sleep(CONFIG_REQUEST_AFTER_SECONDS)
+        if state.config_received:
+            return
+        logger.warning(
+            "No config from the app after %.0fs; asking for it (attempt %d)",
+            CONFIG_REQUEST_AFTER_SECONDS * (attempt + 1),
+            attempt + 1,
+        )
+        await publisher.publish({"type": "config_request"})
+
+
+async def _close_brain(ctx: JobContext) -> None:
+    bridge = _bridges.pop(ctx.room.name, None)
+    if bridge is not None:
+        await bridge.close(timeout=BRAIN_DRAIN_SECONDS)
+
+
+#: The dispatch name LiveKit routes calls by. A local worker for testing takes
+#: another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not compete with
+#: the deployed agent for real calls.
+AGENT_NAME = os.environ.get("KWAMI_AGENT_NAME", "").strip() or "kwami-agent"
+
+
+@server.rtc_session(agent_name=AGENT_NAME, on_session_end=_close_brain)
 async def entrypoint(ctx: JobContext) -> None:
     """Main entry point for Kwami agent sessions.
 
@@ -128,15 +175,24 @@ async def _run_session(ctx: JobContext) -> None:
     # Skip greeting -- this is a placeholder agent until the frontend sends
     # the real config via the "config" data message. The configured agent
     # will greet properly with the correct persona, voice, and memory.
-    config = KwamiConfig()
+    # Without an app (Console, phone) this IS the agent: its voice comes from
+    # the KWAMI_DEFAULT_* secrets and the job metadata (runtime/defaults.py).
+    config = placeholder_config(job_metadata=getattr(ctx.job, "metadata", None))
     initial_agent = create_agent_from_config(config, vad, skip_greeting=True)
 
     # Create session and state
     # Dependencies live on the session's userdata, which the framework threads
     # into every tool's RunContext. This is what replaces the ContextVar the
     # tools used to hunt the room through.
-    deps = AgentDeps(settings=get_settings(), room=ctx.room)
-    session = AgentSession(userdata=deps)
+    settings = get_settings()
+    deps = AgentDeps(settings=settings, room=ctx.room)
+    deps.bridge = Bridge(
+        keys=settings.provider_keys, tavily_key=settings.tavily_api_key, settings=settings
+    )
+    _bridges[ctx.room.name] = deps.bridge
+    # Turn-taking tuned for Spanish: multilingual end-of-turn detection,
+    # learned endpointing and early LLM generation (runtime/turn_taking.py).
+    session = AgentSession(userdata=deps, turn_handling=session_turn_handling())
     state = create_session_state(
         initial_agent=initial_agent,
         user_identity=user_identity,
@@ -156,10 +212,17 @@ async def _run_session(ctx: JobContext) -> None:
         create_agent_fn=create_agent_from_config,
     )
 
-    # Wire up metrics events for usage tracking
-    @session.on("metrics_collected")
-    def on_metrics(event):
-        route_metrics(state.usage_tracker, event.metrics)
+    # Usage tracking. `metrics_collected` is deprecated from livekit-agents 1.8;
+    # this event carries the session's running totals per model instead.
+    # A realtime model that dies for good moves the call to the standard
+    # pipeline instead of closing it (runtime/recovery.py).
+    install_realtime_rescue(
+        session, state, vad, create_agent_from_config, LiveKitRoomPublisher(ctx.room)
+    )
+
+    @session.on("session_usage_updated")
+    def on_usage(event):
+        state.usage_tracker.on_session_usage(event.usage)
 
     # Routing lives in runtime.dispatch so each branch is reachable from a test.
     router = DataMessageRouter(
@@ -208,12 +271,22 @@ async def _run_session(ctx: JobContext) -> None:
         room_options=room_io.RoomOptions(
             audio_input=True,
             audio_output=True,
+            # The camera or a shared screen, when the app publishes one, goes
+            # to a realtime model that can see (Gemini Live): the "Audio +
+            # Video" mode. A standard pipeline ignores it.
+            video_input=True,
         ),
     )
 
+    deps.bridge.attach(session, LiveKitRoomPublisher(ctx.room))
+
     # Now that the room is connected, the participant list is real.
+    participant_identity = resolve_user_identity(ctx.room)
     if not state.user_identity:
-        state.user_identity = resolve_user_identity(ctx.room)
+        state.user_identity = participant_identity
+    # The app's token names the participant after the Supabase user. The
+    # brain's ledger and file uploads are keyed on it.
+    deps.bridge.set_user(participant_identity or "")
     logger.info(
         "Room connected with %d remote participant(s); user identity: %s",
         len(ctx.room.remote_participants),
@@ -225,6 +298,8 @@ async def _run_session(ctx: JobContext) -> None:
         # A human can join after the agent; without this the session would
         # finish with no user_identity and its usage would never be billed.
         resolve_identity_on_join(state, participant)
+        if not is_agent_participant(participant):
+            deps.bridge.set_user(participant.identity or "")
 
     await apply_runtime_config(
         session,
@@ -236,6 +311,11 @@ async def _run_session(ctx: JobContext) -> None:
     )
 
     logger.info("Kwami session started")
+
+    # The app's config can be lost if it was sent before this agent was in the
+    # room. Rather than talk as the placeholder, ask for it again.
+    if not kwami_id:
+        state.spawn(_request_config_if_missing(state, ctx.room), name="config_request")
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

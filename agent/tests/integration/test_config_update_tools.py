@@ -49,7 +49,9 @@ async def test_registering_client_tools_keeps_every_builtin(
     assert len(after) == len(before) + 1
 
 
-async def test_repeated_updates_do_not_accumulate_or_drop_tools(agent: KwamiAgent) -> None:
+async def test_repeated_updates_do_not_accumulate_or_drop_tools(
+    all_tools_available, agent: KwamiAgent
+) -> None:
     """Re-registering replaces client tools without disturbing the built-ins."""
     await update_tools(agent, [CLIENT_TOOL])
     first = _tool_names(agent.tools)
@@ -64,7 +66,7 @@ async def test_repeated_updates_do_not_accumulate_or_drop_tools(agent: KwamiAgen
     assert len(first) == len(second)
 
 
-async def test_chat_context_is_retooled(agent: KwamiAgent) -> None:
+async def test_chat_context_is_retooled(all_tools_available, agent: KwamiAgent) -> None:
     """Going through Agent.update_tools is what keeps the chat context in step.
 
     Assigning `_tools` directly left `_chat_ctx` holding the old tool set, so

@@ -138,7 +138,10 @@ async def test_realtime_model_change_rebuilds(create_agent_fn, rebuilds) -> None
         agent,
         {
             "updateType": "voice",
-            "config": {"realtime_provider": "google", "realtime_model": "gemini-2.0-flash-exp"},
+            "config": {
+                "realtime_provider": "google",
+                "realtime_model": "gemini-3.1-flash-live-preview",
+            },
         },
         create_agent_fn,
     )
@@ -147,7 +150,7 @@ async def test_realtime_model_change_rebuilds(create_agent_fn, rebuilds) -> None
     assert len(rebuilds) == 1
     rebuilt = rebuilds[0]["config"].voice
     assert rebuilt.realtime_provider == "google"
-    assert rebuilt.realtime_model == "gemini-2.0-flash-exp"
+    assert rebuilt.realtime_model == "gemini-3.1-flash-live-preview"
     assert rebuilt.pipeline_type == "realtime"
 
 

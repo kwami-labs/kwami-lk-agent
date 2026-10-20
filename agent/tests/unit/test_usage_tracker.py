@@ -273,3 +273,54 @@ def test_realtime_summary_includes_every_populated_field(tracker: UsageTracker) 
         "text_output_tokens",
     ):
         assert key in entry
+
+
+# -- session_usage_updated: what is not metered, and realtime rates ----------------
+
+
+def test_a_snapshot_with_nothing_billable_records_nothing() -> None:
+    from livekit.agents.metrics.usage import (
+        AgentSessionUsage,
+        EOTModelUsage,
+        LLMModelUsage,
+        STTModelUsage,
+        TTSModelUsage,
+    )
+
+    tracker = UsageTracker()
+    tracker.on_session_usage(
+        AgentSessionUsage(
+            model_usage=[
+                LLMModelUsage(provider="openai", model="gpt-5.2"),
+                STTModelUsage(provider="deepgram", model="nova-3", audio_duration=0.0),
+                TTSModelUsage(provider="cartesia", model="sonic", characters_count=0),
+                # End-of-turn runs on LiveKit's inference: not ours to meter.
+                EOTModelUsage(provider="livekit", model="turn-detector"),
+            ]
+        )
+    )
+    assert tracker.get_usage_summary() == []
+
+
+def test_realtime_rates_follow_the_provider() -> None:
+    from livekit.agents.metrics.usage import AgentSessionUsage, LLMModelUsage, TTSModelUsage
+
+    tracker = UsageTracker()
+    tracker.on_session_usage(
+        AgentSessionUsage(
+            model_usage=[
+                # Gemini Live: 32 tokens a second each way, whatever the casing.
+                LLMModelUsage(provider="Google", model="gemini-live", input_audio_tokens=1920),
+                # Unknown provider: OpenAI's rates.
+                LLMModelUsage(provider="aws", model="nova-sonic", input_audio_tokens=600),
+                # Connected time, when reported, is what is charged.
+                LLMModelUsage(provider="openai", model="gpt-realtime", session_duration=120.0),
+                TTSModelUsage(provider="", model="", characters_count=10),
+            ]
+        )
+    )
+    by_model = {item["model_id"]: item for item in tracker.get_usage_summary()}
+    assert by_model["Google/gemini-live"]["audio_input_minutes"] == pytest.approx(1.0)
+    assert by_model["aws/nova-sonic"]["audio_input_minutes"] == pytest.approx(1.0)
+    assert by_model["openai/gpt-realtime"]["units_used"] == pytest.approx(2.0)
+    assert by_model["unknown"]["model_type"] == "tts"

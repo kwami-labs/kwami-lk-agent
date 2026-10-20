@@ -158,7 +158,7 @@ def test_todays_real_tool_count_is_under_the_limit(all_tools_available) -> None:
     agent = _agent_with(53)
 
     assert len(agent.tools) <= MAX_TOOLS_PER_REQUEST
-    assert len(agent.tools) == 93, (
+    assert len(agent.tools) == 97, (
         "the tool count moved; if it is climbing, the 128 ceiling is the thing to watch"
     )
 

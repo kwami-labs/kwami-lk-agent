@@ -212,21 +212,23 @@ class StrictLLMPlugin:
     def __init__(self) -> None:
         self.calls: list[dict] = []
 
-    def LLM(self, *, model: str, temperature: float):  # noqa: N802
-        self.calls.append({"model": model, "temperature": temperature})
+    def LLM(self, *, model: str, **kwargs: float):  # noqa: N802
+        assert set(kwargs) <= {"temperature", "_strict_tool_schema"}, kwargs
+        self.calls.append({"model": model, **kwargs})
         return f"llm:{model}"
 
 
 @pytest.mark.parametrize(
-    ("provider", "default_model"),
+    ("provider", "default_model", "sent"),
     [
-        ("google", "gemini-2.0-flash"),
-        ("anthropic", "claude-3-5-sonnet-latest"),
-        ("groq", "llama-3.1-70b-versatile"),
+        ("google", "gemini-2.0-flash", {"temperature": 0.25}),
+        # Claude 5 answers 400 to any temperature, so none is sent.
+        ("anthropic", "claude-haiku-5-5", {"_strict_tool_schema": False}),
+        ("groq", "openai/gpt-oss-120b", {"temperature": 0.25}),
     ],
 )
 def test_an_installed_plugin_receives_the_model_and_temperature(
-    provider: str, default_model: str, monkeypatch: pytest.MonkeyPatch
+    provider: str, default_model: str, sent: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     plugin = StrictLLMPlugin()
     monkeypatch.setattr(llm_module, provider, plugin)
@@ -234,7 +236,42 @@ def test_an_installed_plugin_receives_the_model_and_temperature(
     result = create_llm(voice(llm_provider=provider, llm_model="", llm_temperature=0.25))
 
     assert result == f"llm:{default_model}"
-    assert plugin.calls == [{"model": default_model, "temperature": 0.25}]
+    assert plugin.calls == [{"model": default_model, **sent}]
+
+
+@pytest.mark.parametrize(
+    ("model", "takes_temperature"),
+    [
+        ("claude-3-5-sonnet-latest", True),
+        ("claude-sonnet-4-20250514", True),
+        ("claude-opus-4-1-20250805", True),
+        ("claude-sonnet-4-6", True),
+        ("claude-haiku-4-5-20251001", True),
+        ("claude-opus-4-7", False),
+        ("claude-opus-4-8", False),
+        ("claude-sonnet-5-5", False),
+        ("claude-fable-5-1", False),
+    ],
+)
+def test_temperature_reaches_only_the_claude_models_that_accept_it(
+    model: str, takes_temperature: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = StrictLLMPlugin()
+    monkeypatch.setattr(llm_module, "anthropic", plugin)
+
+    create_llm(voice(llm_provider="anthropic", llm_model=model, llm_temperature=0.25))
+
+    assert ("temperature" in plugin.calls[0]) is takes_temperature
+
+
+def test_claude_tools_are_not_sent_strict(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Anthropic takes at most 20 strict tools and the agent has more, so a
+    strict schema turned every Claude request into a 400."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
+    result = create_llm(voice(llm_provider="anthropic", llm_model="claude-sonnet-5-5"))
+
+    assert result._opts.strict_tool_schema is False
 
 
 @pytest.mark.parametrize("provider", ["google", "anthropic", "groq"])
@@ -278,8 +315,22 @@ def test_installed_google_realtime_receives_model_voice_and_temperature(
         )
     )
 
-    assert result == "realtime:gemini-2.0-flash-exp"
-    assert plugin.calls == [{"model": "gemini-2.0-flash-exp", "voice": "Puck", "temperature": 0.6}]
+    assert result == "realtime:gemini-3.8-live"
+    assert plugin.calls == [{"model": "gemini-3.8-live", "voice": "Puck", "temperature": 0.6}]
+
+
+def test_an_openai_voice_on_gemini_falls_back_to_the_google_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Gemini Live closes the socket with 1007 for "alloy": a silent agent."""
+    plugin = StrictGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+
+    create_realtime_model(
+        voice(realtime_provider="google", realtime_model="", realtime_voice="alloy")
+    )
+
+    assert plugin.calls[0]["voice"] == "Charon"
 
 
 def test_a_realtime_construction_failure_is_logged_before_the_fallback(env_setting, caplog) -> None:
@@ -294,3 +345,12 @@ def test_a_realtime_construction_failure_is_logged_before_the_fallback(env_setti
         create_realtime_model(voice(realtime_provider="openai"))
 
     assert "Failed to create openai realtime model" in caplog.text
+
+
+def test_no_realtime_voice_uses_the_providers_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = StrictGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+
+    create_realtime_model(voice(realtime_provider="google", realtime_model="", realtime_voice=""))
+
+    assert plugin.calls[0]["voice"] == "Charon"

@@ -8,11 +8,10 @@ Provides comprehensive TTS creation with:
 - Caching support
 """
 
-from livekit.agents import inference
+import re
 
-# ElevenLabs is served through LiveKit Inference rather than its plugin, so it
-# is not imported here. google is a genuine extra and stays guarded.
-from livekit.plugins import cartesia, deepgram, openai
+from livekit.agents import NOT_GIVEN, inference
+from livekit.plugins import cartesia, deepgram, elevenlabs, openai
 
 from ..constants import (
     CartesiaVoices,
@@ -23,6 +22,7 @@ from ..constants import (
     OpenAIModels,
     OpenAIVoices,
     TTSProviders,
+    resolve_realtime_voice,
 )
 from ..domain import KwamiVoiceConfig
 from ..settings import get_settings
@@ -48,6 +48,7 @@ def _check_api_key(provider: str) -> bool:
         TTSProviders.CARTESIA: EnvVars.CARTESIA,
         TTSProviders.DEEPGRAM: EnvVars.DEEPGRAM,
         TTSProviders.GOOGLE: EnvVars.GOOGLE,
+        TTSProviders.GEMINI: EnvVars.GOOGLE,
     }
     env_vars = key_map.get(provider, [])
     if not env_vars:
@@ -108,6 +109,9 @@ def create_tts(config: KwamiVoiceConfig):
 
         elif provider == TTSProviders.RIME:
             return _create_rime_tts(config)
+
+        elif provider == TTSProviders.GEMINI:
+            return _create_gemini_tts(config)
 
         else:
             logger.warning("Unknown TTS provider '%s', falling back to OpenAI", provider)
@@ -174,8 +178,25 @@ def _create_openai_tts(config: KwamiVoiceConfig):
     )
 
 
+def session_language(config: KwamiVoiceConfig) -> str:
+    """The session's language as a bare code ("es-ES" -> "es"), or "" for multi."""
+    language = (config.stt_language or "").split("-")[0].lower()
+    return "" if language == "multi" else language
+
+
+def elevenlabs_key() -> str:
+    """The ElevenLabs key under either spelling, or "" when none is set."""
+    keys = get_settings().provider_keys
+    return next((keys[name] for name in EnvVars.ELEVENLABS if keys.get(name)), "")
+
+
 def _create_elevenlabs_tts(config: KwamiVoiceConfig):
-    """Create ElevenLabs TTS using LiveKit Inference (more reliable than direct plugin)."""
+    """ElevenLabs TTS: the plugin on our own key, LiveKit Inference without one.
+
+    Inference was the only path, so the agent's ELEVEN_API_KEY was never used,
+    and on 2026-10-18 Inference answered "model not found" for
+    elevenlabs/eleven_turbo_v2_5, which left the provider unusable.
+    """
     voice_id = config.tts_voice or ElevenLabsVoices.DEFAULT
 
     # ElevenLabs uses 20-char alphanumeric voice IDs (e.g. "21m00Tcm4TlvDq8ikWAM").
@@ -195,7 +216,16 @@ def _create_elevenlabs_tts(config: KwamiVoiceConfig):
     # Valid format: eleven_flash_v2_5, eleven_turbo_v2_5, etc.
     model = model.replace("-", "_").replace(".", "_")
 
-    # Use LiveKit Inference for ElevenLabs - more reliable than direct plugin
+    # Flash and Turbo v2.5 read every sentence as the language they guess
+    # unless told; a short Spanish reply then came out with English phonetics.
+    # Models without language enforcement ignore it.
+    language = session_language(config) or NOT_GIVEN
+
+    api_key = elevenlabs_key()
+    if api_key:
+        logger.info("🔊 Using the ElevenLabs plugin: %s:%s", model, voice_id)
+        return elevenlabs.TTS(voice_id=voice_id, model=model, api_key=api_key, language=language)
+
     # Format: "elevenlabs/model:voice_id"
     model_string = f"elevenlabs/{model}"
 
@@ -204,6 +234,7 @@ def _create_elevenlabs_tts(config: KwamiVoiceConfig):
     return inference.TTS(
         model=model_string,
         voice=voice_id,
+        language=language,
     )
 
 
@@ -246,12 +277,22 @@ def _create_cartesia_tts(config: KwamiVoiceConfig):
 
     model = strip_model_prefix(config.tts_model or "", "cartesia") or "sonic-2"
 
+    # Without it the plugin speaks English: a Spanish voice then reads Spanish
+    # text with English phonetics. Cartesia takes the bare code ("es").
+    language = session_language(config)
+
     return cartesia.TTS(
         model=model,
         voice=voice,
         speed=float(config.tts_speed or 1.0),
         encoding="pcm_s16le",
+        # The plugin's own default when there is no single language to pin.
+        language=language or "en",
     )
+
+
+#: A full Aura model id, voice and language included: aura-asteria-en, aura-2-thalia-en.
+_DEEPGRAM_TTS_MODEL = re.compile(r"^aura-(2-)?[a-z]+-[a-z]{2}$")
 
 
 def _create_deepgram_tts(config: KwamiVoiceConfig):
@@ -267,8 +308,13 @@ def _create_deepgram_tts(config: KwamiVoiceConfig):
         )
         voice = DeepgramVoices.DEFAULT
 
-    # Deepgram model includes voice (e.g., "aura-asteria-en")
-    model = strip_model_prefix(config.tts_model or "", "deepgram") or f"aura-{voice}-en"
+    # Deepgram model includes voice (e.g., "aura-asteria-en"). Anything else is
+    # not a Deepgram model: the config default is OpenAI's "tts-1" and the app
+    # sends the family "aura-1", and Deepgram answered 400 to both on LiveKit
+    # Cloud (2026-10-18).
+    model = strip_model_prefix(config.tts_model or "", "deepgram")
+    if not _DEEPGRAM_TTS_MODEL.match(model):
+        model = f"aura-{voice}-en"
 
     return deepgram.TTS(model=model)
 
@@ -279,11 +325,70 @@ def _create_google_tts(config: KwamiVoiceConfig):
         logger.warning("Google TTS plugin not installed, falling back to OpenAI")
         return _create_openai_tts(config)
 
+    # Cloud Text-to-Speech authenticates with a service account only. Without
+    # one the plugin fails later with an opaque auth error; GOOGLE_API_KEY is
+    # what Gemini TTS uses, and it does not count here.
+    if not get_settings().has_provider_key("GOOGLE_APPLICATION_CREDENTIALS"):
+        raise ValueError(
+            "Google Cloud TTS needs GOOGLE_APPLICATION_CREDENTIALS (a service account); "
+            "GOOGLE_API_KEY only serves the 'gemini' TTS provider"
+        )
+
     voice = config.tts_voice or GoogleVoices.DEFAULT
 
     return google.TTS(
-        voice=voice,
+        voice_name=voice,
         speaking_rate=float(config.tts_speed or 1.0),
+    )
+
+
+DEFAULT_GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+DEFAULT_GEMINI_TTS_VOICE = "Charon"
+
+
+def gemini_tts_instructions(direction: str) -> str | None:
+    """The direction in Google's prompt structure for Gemini TTS.
+
+    The plugin sends `f'{instructions}:\\n"{text}"'` for every sentence, so this
+    ends where the transcript begins. It is the structure the character
+    samples the user chose were generated with (audio profile, scene,
+    director's notes, transcript); a bare one-line style sounded flatter.
+    None leaves the plugin's own neutral instruction in place.
+    """
+    direction = direction.strip()
+    if not direction:
+        return None
+    return (
+        "# AUDIO PROFILE\n"
+        f"{direction}\n\n"
+        "## THE SCENE\n"
+        "La voz llega por el auricular del usuario, cercana y clara, mientras trabaja.\n\n"
+        "### DIRECTOR'S NOTES\n"
+        "Respeta exactamente el perfil, la entonación, el ritmo y la actitud descritos. "
+        "Lee el texto tal cual, sin añadir ni omitir palabras.\n\n"
+        "#### TRANSCRIPT"
+    )
+
+
+def _create_gemini_tts(config: KwamiVoiceConfig):
+    """Gemini TTS: a prebuilt Gemini voice steered by the character's direction."""
+    if google is None:
+        logger.warning("Google plugin not installed, falling back to OpenAI TTS")
+        return _create_openai_tts(config)
+
+    instructions = gemini_tts_instructions(config.tts_style)
+    model = strip_model_prefix(config.tts_model or "", "gemini")
+    # Only a Gemini model: the config default is OpenAI's "tts-1", which would
+    # otherwise ride along into a Gemini request and 404.
+    if not model.startswith("gemini-"):
+        model = DEFAULT_GEMINI_TTS_MODEL
+    # Likewise only a Gemini prebuilt voice (Live and TTS share them): the
+    # config default is OpenAI's "nova", which Gemini rejects.
+    voice = resolve_realtime_voice("google", config.tts_voice) or DEFAULT_GEMINI_TTS_VOICE
+    return google.beta.GeminiTTS(
+        model=model,
+        voice_name=voice,
+        **({"instructions": instructions} if instructions else {}),
     )
 
 
@@ -306,6 +411,7 @@ def get_available_providers() -> list[str]:
 
     if google is not None:
         providers.append(TTSProviders.GOOGLE)
+        providers.append(TTSProviders.GEMINI)
 
     return providers
 

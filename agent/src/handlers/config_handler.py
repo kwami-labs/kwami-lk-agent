@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 from livekit.agents.voice.agent import find_function_tools
 
 from ..domain import KwamiConfig, clone_config, integer, number, section, text
+from ..domain.charter import parse_charter
+from ..factories.fallback import primary_of
 from ..memory import create_memory
 from ..tools.limits import enforce_tool_limit
 from ..utils.logging import get_logger
@@ -15,6 +17,7 @@ from ..utils.provider import detect_provider_change, strip_model_prefix
 from .realtime import (
     REALTIME_PIPELINE,
     has_realtime_keys,
+    is_realtime_model,
     requested_pipeline,
     switch_pipeline,
     update_realtime,
@@ -26,6 +29,9 @@ if TYPE_CHECKING:
     from ..session import SessionState
 
 logger = get_logger("config_handler")
+
+#: A voice direction is a few sentences; anything longer is not one.
+MAX_VOICE_STYLE_CHARS = 1200
 
 
 def _reuse_existing_memory(state: SessionState, new_memory_config: Any) -> Any:
@@ -111,14 +117,23 @@ async def handle_full_config(
         realtime_model_in = text(realtime_data, "model") or text(
             voice_data, "realtimeModel", "realtime_model"
         )
-        if realtime_model_in:
-            provider = realtime_provider_in or new_config.voice.realtime_provider
+        provider = realtime_provider_in or new_config.voice.realtime_provider
+        if realtime_model_in and not is_realtime_model(provider, realtime_model_in):
+            logger.warning(
+                "Ignoring %r as the realtime model: it is not a realtime one", realtime_model_in
+            )
+        elif realtime_model_in:
             new_config.voice.realtime_model = strip_model_prefix(realtime_model_in, provider)
         realtime_voice_in = text(realtime_data, "voice") or text(
             voice_data, "realtimeVoice", "realtime_voice"
         )
         if realtime_voice_in:
             new_config.voice.realtime_voice = realtime_voice_in
+        realtime_style_in = text(realtime_data, "style") or text(
+            voice_data, "realtimeStyle", "realtime_style"
+        )
+        if realtime_style_in:
+            new_config.voice.realtime_style = realtime_style_in[:MAX_VOICE_STYLE_CHARS]
 
         # TTS. Numeric fields go through `number`, so an explicit 0 is honoured
         # rather than being read as "not provided".
@@ -134,6 +149,9 @@ async def handle_full_config(
         tts_voice_in = text(tts_data, "voice")
         if tts_voice_in:
             new_config.voice.tts_voice = tts_voice_in
+        tts_style_in = text(tts_data, "style")
+        if tts_style_in:
+            new_config.voice.tts_style = tts_style_in[:MAX_VOICE_STYLE_CHARS]
         tts_speed_in = number(tts_data, "speed")
         if tts_speed_in is not None:
             new_config.voice.tts_speed = tts_speed_in
@@ -227,6 +245,7 @@ async def handle_full_config(
         emotional_traits = _value_from_keys(soul_data, "emotionalTraits", "emotional_traits")
         if isinstance(emotional_traits, dict):
             new_config.soul.emotional_traits = emotional_traits
+        new_config.soul.charter = parse_charter(soul_data.get("charter"))
 
         # 2. Initialize Memory
         memory = None
@@ -269,6 +288,9 @@ async def handle_full_config(
         # Mark that we've handled the first config (greeting will be delivered by new agent)
         if not skip_greeting:
             state.greeting_delivered = True
+            deps = getattr(session, "userdata", None)
+            if deps is not None and hasattr(deps, "greeting_owed"):
+                deps.greeting_owed = True
 
         logger.info(
             "Reconfigured agent: %s/%s",
@@ -405,8 +427,33 @@ async def update_voice(
     speed_actually_changed = new_speed is not None and float(new_speed) != float(current_speed)
     speed_changed = speed_actually_changed and requires_recreate_for_speed
 
-    if provider_changed or speed_changed:
-        reason = "provider change" if provider_changed else f"speed change ({current_provider})"
+    # The TTS direction is fixed when the engine is built, so a new one means a
+    # new engine. Read with `in`: an empty string is how the app clears it.
+    new_style: str | None = None
+    for key in ("tts_style", "ttsStyle"):
+        if key in config and isinstance(config[key], str):
+            new_style = config[key].strip()[:MAX_VOICE_STYLE_CHARS]
+            break
+    style_changed = new_style is not None and new_style != agent.kwami_config.voice.tts_style
+
+    # The model is fixed when the engine is built too, and no plugin takes it
+    # in `update_options`: a new one on the same provider (ElevenLabs turbo to
+    # flash, OpenAI tts-1 to gpt-4o-mini-tts) used to be dropped, and the old
+    # model went on speaking -- and billing -- while the panel showed the new.
+    model_changed = bool(new_model) and (
+        strip_model_prefix(str(new_model), new_provider) != agent.kwami_config.voice.tts_model
+    )
+
+    if provider_changed or speed_changed or style_changed or model_changed:
+        reason = (
+            "provider change"
+            if provider_changed
+            else f"speed change ({current_provider})"
+            if speed_changed
+            else "model change"
+            if model_changed
+            else "voice direction change"
+        )
         logger.info("Switching TTS: %s -> %s (%s)", current_provider, new_provider, reason)
 
         # Full agent switch needed for provider change
@@ -430,6 +477,11 @@ async def update_voice(
         speed_in = number(config, "tts_speed")
         if speed_in is not None:
             new_voice_config.tts_speed = speed_in
+        if new_style is not None:
+            new_voice_config.tts_style = new_style
+        # `updateVoiceLive` sends TTS and STT in one message. Built from the
+        # old STT settings, the rebuild dropped the STT half.
+        _apply_stt_fields(new_voice_config, config)
 
         new_config = clone_config(agent.kwami_config)
         new_config.voice = new_voice_config
@@ -454,15 +506,17 @@ async def _update_tts_options(
     """Update TTS options without recreating the agent."""
     if not hasattr(agent, "tts") or not agent.tts:
         return
+    # The live voice belongs to the configured provider, not to its backups.
+    tts = primary_of(agent.tts)
 
     # Heterogeneous on purpose: this is **-splatted into `update_options`,
     # where voice is a str and speed a float.
     updates: dict[str, Any] = {}
 
     # Detect TTS provider from module or passed parameter
-    tts_provider = getattr(agent.tts, "provider", "").lower()
-    tts_module = type(agent.tts).__module__
-    tts_model = str(getattr(agent.tts, "_model", getattr(agent.tts, "model", ""))).lower()
+    tts_provider = getattr(tts, "provider", "").lower()
+    tts_module = type(tts).__module__
+    tts_model = str(getattr(tts, "_model", getattr(tts, "model", ""))).lower()
 
     # Check if TTS is using LiveKit Inference (ElevenLabs, Rime, etc.)
     is_inference_tts = "inference" in tts_module
@@ -473,6 +527,8 @@ async def _update_tts_options(
         or "elevenlabs" in tts_model
     )
     is_openai_tts = "openai" in tts_module and not is_inference_tts
+    # Gemini TTS names its voice `voice_name` and has no speed option.
+    is_gemini_tts = "gemini_tts" in tts_module
 
     if new_voice:
         # Validate voice against current TTS provider to avoid sending
@@ -494,17 +550,19 @@ async def _update_tts_options(
             # elevenlabs.TTS plugin uses "voice_id".
             if is_elevenlabs_tts and not is_inference_tts:
                 updates["voice_id"] = new_voice
+            elif is_gemini_tts:
+                updates["voice_name"] = new_voice
             else:
                 updates["voice"] = new_voice
 
     # LiveKit Inference TTS (ElevenLabs, Rime) doesn't support speed in update_options
     speed_in = number(config, "tts_speed")
-    if speed_in is not None and not is_inference_tts:
+    if speed_in is not None and not is_inference_tts and not is_gemini_tts:
         updates["speed"] = speed_in
 
-    if updates and hasattr(agent.tts, "update_options"):
+    if updates and hasattr(tts, "update_options"):
         try:
-            agent.tts.update_options(**updates)
+            tts.update_options(**updates)
             # Update stored config to reflect new values
             if new_voice:
                 agent.kwami_config.voice.tts_voice = new_voice
@@ -513,6 +571,17 @@ async def _update_tts_options(
             logger.info("Updated TTS options: %s", updates)
         except Exception as e:
             logger.warning("Failed to update TTS options: %s", e)
+
+
+def _apply_stt_fields(voice_config: Any, config: dict[str, Any]) -> None:
+    """Copy the STT half of a voice update onto a voice config being rebuilt."""
+    if config.get("stt_provider"):
+        voice_config.stt_provider = config["stt_provider"]
+    if config.get("stt_model"):
+        stt_provider = config.get("stt_provider") or voice_config.stt_provider
+        voice_config.stt_model = strip_model_prefix(config["stt_model"], stt_provider)
+    if config.get("stt_language"):
+        voice_config.stt_language = config["stt_language"]
 
 
 async def _update_stt_if_needed(
@@ -528,8 +597,15 @@ async def _update_stt_if_needed(
         config.get("stt_provider")
         and config["stt_provider"] != agent.kwami_config.voice.stt_provider
     )
-    stt_model_changed = (
-        config.get("stt_model") and config["stt_model"] != agent.kwami_config.voice.stt_model
+    # Compared without the provider prefix the app may send ("gemini/..."),
+    # which the stored model never has: comparing raw rebuilt the whole
+    # pipeline on every connect for nothing.
+    stt_model_changed = bool(config.get("stt_model")) and (
+        strip_model_prefix(
+            str(config["stt_model"]),
+            config.get("stt_provider") or agent.kwami_config.voice.stt_provider,
+        )
+        != agent.kwami_config.voice.stt_model
     )
 
     if stt_provider_changed or stt_model_changed:
@@ -539,13 +615,7 @@ async def _update_stt_if_needed(
         logger.info("Switching STT: %s -> %s", current_stt, new_stt)
 
         new_voice_config = replace(agent.kwami_config.voice)
-        if config.get("stt_provider"):
-            new_voice_config.stt_provider = config["stt_provider"]
-        if config.get("stt_model"):
-            stt_provider = config.get("stt_provider") or new_voice_config.stt_provider
-            new_voice_config.stt_model = strip_model_prefix(config["stt_model"], stt_provider)
-        if config.get("stt_language"):
-            new_voice_config.stt_language = config["stt_language"]
+        _apply_stt_fields(new_voice_config, config)
 
         new_config = clone_config(agent.kwami_config)
         new_config.voice = new_voice_config
@@ -559,8 +629,9 @@ async def _update_stt_if_needed(
         language_in = config.get("stt_language")
         if language_in:
             updates["language"] = language_in
-        if updates and hasattr(agent.stt, "update_options"):
-            agent.stt.update_options(**updates)
+        stt = primary_of(agent.stt)
+        if updates and hasattr(stt, "update_options"):
+            stt.update_options(**updates)
             # Write back, exactly as `_update_tts_options` does above. This
             # branch pushed the language to the live STT and stopped there, so
             # the next rebuild reconstructed STT from `kwami_config.voice` and
@@ -596,18 +667,24 @@ async def update_llm(
     # "llm" regardless of pipeline, so translate rather than rebuild a standard
     # pipeline underneath a realtime session.
     if agent.kwami_config.voice.pipeline_type == REALTIME_PIPELINE:
-        await update_realtime(
-            session,
-            state,
-            agent,
-            {
-                "realtime_provider": text(config, "provider"),
-                "realtime_model": text(config, "model"),
-                "temperature": number(config, "temperature"),
-            },
-            vad,
-            create_agent_fn,
-        )
+        # Only a model that speaks the realtime protocol can replace the live
+        # one. The app sends its *text* LLM here on every connect, whatever the
+        # pipeline; taken as the realtime model, gemini-3.5-flash made Gemini
+        # Live close with 1008 ("not supported for bidiGenerateContent") and
+        # the framework closed the whole session -- Live never answered.
+        provider_in = text(config, "provider")
+        model_in = text(config, "model")
+        realtime_update: dict[str, Any] = {"temperature": number(config, "temperature")}
+        if model_in and is_realtime_model(provider_in, model_in):
+            realtime_update["realtime_provider"] = provider_in
+            realtime_update["realtime_model"] = model_in
+        elif model_in:
+            logger.info(
+                "Keeping the realtime model: %s/%s is a text model, not a realtime one",
+                provider_in,
+                model_in,
+            )
+        await update_realtime(session, state, agent, realtime_update, vad, create_agent_fn)
         return
 
     new_config = clone_config(agent.kwami_config)
@@ -627,9 +704,36 @@ async def update_llm(
     if max_tokens_in is not None:
         new_voice.llm_max_tokens = max_tokens_in
 
+    current = agent.kwami_config.voice
+    if (new_voice.llm_provider, new_voice.llm_model) == (current.llm_provider, current.llm_model):
+        # The app resends the LLM it connected with right after connecting. A
+        # rebuild for that tore down STT, LLM and TTS mid-greeting, so the
+        # sampling knobs are applied in place instead.
+        _apply_llm_knobs_live(agent, new_voice)
+        return
+
     new_config.voice = new_voice
     new_agent = create_agent_fn(new_config, vad, agent._memory, skip_greeting=True)
     state.update_agent(session, new_agent)
+
+
+def _apply_llm_knobs_live(agent: Any, new_voice: Any) -> None:
+    """Temperature and token limit onto the running LLM, without a rebuild."""
+    current = agent.kwami_config.voice
+    current.llm_temperature = new_voice.llm_temperature
+    current.llm_max_tokens = new_voice.llm_max_tokens
+    opts = getattr(primary_of(getattr(agent, "llm", None)), "_opts", None)
+    if opts is None:
+        return
+    # Only knobs the client was built with: a model built without temperature
+    # (Claude from Opus 4.7 on) answers 400 to one.
+    if isinstance(getattr(opts, "temperature", None), (int, float)):
+        opts.temperature = new_voice.llm_temperature
+    for name in ("max_completion_tokens", "max_output_tokens", "max_tokens"):
+        if isinstance(getattr(opts, name, None), int):
+            setattr(opts, name, new_voice.llm_max_tokens)
+            break
+    logger.debug("Updated LLM sampling in place")
 
 
 async def update_soul(
@@ -678,6 +782,11 @@ async def update_soul(
         if isinstance(emotional_traits, dict):
             soul.emotional_traits = emotional_traits
             updated = True
+    if isinstance(config.get("charter"), dict):
+        # Layered on the current charter, so an update naming one field (the
+        # profile, after the agent learns something) leaves the rest alone.
+        soul.charter = parse_charter(config["charter"], base=soul.charter)
+        updated = True
     if updated:
         agent.kwami_config.soul = soul
 
@@ -732,7 +841,11 @@ async def update_tools(
         # Discover on the class, not the instance: inspect.getmembers on a live
         # agent evaluates `realtime_llm_session`, which raises when there is no
         # running activity.
-        builtin_tools = find_function_tools(type(agent))
+        builtin_tools = (
+            agent.available_builtin_tools()
+            if hasattr(agent, "available_builtin_tools")
+            else find_function_tools(type(agent))
+        )
         # Capped at the provider's ceiling: the frontend decides how many client
         # tools arrive, and one over the limit is a 400 on every turn rather
         # than one missing feature.

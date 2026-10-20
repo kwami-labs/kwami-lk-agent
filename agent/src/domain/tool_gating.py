@@ -29,6 +29,19 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
+#: Tools that change the voice or the voice engine. Withheld while a character
+#: voice is set: the user switches voices from the Voice panel only.
+VOICE_SWITCH_TOOLS: frozenset[str] = frozenset(
+    {"change_voice", "change_realtime_voice", "switch_pipeline_mode"}
+)
+
+#: Tools that search the web. Withheld while the brain can take the work: the
+#: voice listens and talks, every search goes through `delegate_task` (the
+#: user's rule, 2026-10-09). Offered both ways, the voice model kept searching
+#: itself -- slower, on its own Tavily credit, and with the conversation stalled
+#: while it read the results.
+BRAIN_SEARCH_TOOLS: frozenset[str] = frozenset({"web_search", "deep_research", "product_search"})
+
 
 @dataclass(frozen=True)
 class ToolRequirement:

@@ -40,6 +40,10 @@ export const CONTAINER_SECRET_KEYS = [
   // Settings reads both; only one of the two ever reached the container.
   "ELEVENLABS_API_KEY",
   "KWAMI_API_KEY",
+  // The user's own Supabase, written directly when there is no Kwami API.
+  // The secret key bypasses RLS.
+  "SUPABASE_URL",
+  "SUPABASE_SECRET_KEY",
   // Carries the trace backend's API key ("api-key=..."), so it is a secret
   // rather than a var even though the other OTEL_* settings are not.
   "OTEL_EXPORTER_OTLP_HEADERS",

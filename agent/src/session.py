@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING, Any
 
 from .adapters.http import aclose_shared
 from .domain import UsageTracker
-from .usage import UsageReporter
+from .usage import create_usage_reporter
 from .utils.logging import get_logger
 
 if TYPE_CHECKING:
     from livekit.agents import AgentSession
 
     from .agent import KwamiAgent
+    from .ports import UsageReporterPort
 
 logger = get_logger("session")
 
@@ -45,13 +46,16 @@ class SessionState:
     room: Any = None  # LiveKit room; set in entrypoint so tools (e.g. web_search) can publish
     vad: Any = None
     greeting_delivered: bool = False
+    #: Set when the app's full `config` message arrives. Without it the session
+    #: is still on the placeholder agent (default name and voice).
+    config_received: bool = False
     # Owned here, not on the agent: agents are swapped on every voice/LLM/soul
     # change, and a browser left on a discarded agent keeps running -- and
     # billing -- until its own idle timer fires, with the frontend still
     # pointing at it.
     browser_session: Any = None
     usage_tracker: UsageTracker = field(default_factory=UsageTracker)
-    usage_reporter: UsageReporter = field(default_factory=UsageReporter)
+    usage_reporter: UsageReporterPort = field(default_factory=create_usage_reporter)
     _cleanup_tasks: list = field(default_factory=list, repr=False)
     # Serializes config handling. Two config messages arriving close together
     # used to be handled concurrently: both built a Zep client and both called
@@ -347,6 +351,10 @@ class SessionState:
 
         logger.debug("Session cleanup complete")
 
+    def _kwami_id(self) -> str | None:
+        config = getattr(self.current_agent, "kwami_config", None)
+        return getattr(config, "kwami_id", None) or None
+
     async def _report_usage(self) -> None:
         """Send accumulated usage to the credits API, within a hard time bound."""
         if not (self.user_identity and self.room_name and self.usage_tracker.has_usage):
@@ -376,6 +384,7 @@ class SessionState:
                     user_id=credits_user_id,
                     session_id=self.room_name,
                     tracker=self.usage_tracker,
+                    kwami_id=self._kwami_id(),
                 ),
                 timeout=USAGE_REPORT_TIMEOUT_SECONDS,
             )

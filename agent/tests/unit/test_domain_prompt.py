@@ -201,7 +201,7 @@ def test_registering_only_the_email_tools_describes_only_email() -> None:
     """Guidance follows the registration, not an all-or-nothing switch."""
     prompt = build_system_prompt(soul(), client_tool_names=["read_emails", "send_email"])
 
-    assert "read_emails" in prompt
+    assert "send_email" in prompt
     assert "set_ui_control" not in prompt, "described a UI router the client never registered"
 
 
@@ -295,3 +295,75 @@ def test_a_default_language_soul_gets_no_language_line() -> None:
     prompt = build_system_prompt(KwamiConfig().soul)
 
     assert "Speak and write in" not in prompt
+
+
+def test_castilian_spanish_keeps_its_variant() -> None:
+    """`es-ES` collapsed to "Spanish" left the model on a neutral register."""
+    from src.domain.prompt import language_directive
+
+    directive = language_directive("es-ES")
+
+    assert "Castilian Spanish (Spain)" in directive
+    assert "distinguish the c/z sound from s" in directive
+    assert directive.count("Castilian") == 2, "named twice, explained once"
+
+
+def test_plain_spanish_gets_no_variant_note() -> None:
+    from src.domain.prompt import language_directive
+
+    assert "Castilian" not in language_directive("es")
+    assert "peninsular" not in language_directive("es-MX")
+
+
+# -- Guidance gated on withheld tools ------------------------------------------
+
+
+def test_nothing_withheld_keeps_the_full_guidance() -> None:
+    from src.domain.prompt import static_guidance
+
+    assert static_guidance(()) is STATIC_GUIDANCE
+
+
+def test_a_withheld_browser_drops_its_guidance() -> None:
+    from src.domain.tool_gating import BROWSER_TOOLS
+
+    prompt = build_system_prompt(soul(), unavailable_tools=BROWSER_TOOLS)
+
+    assert "navigate_to" not in prompt
+    assert "play_media" not in prompt
+    assert "ADVANCED NAVIGATION" not in prompt
+    assert "You are interacting via voice" in prompt, "the always-on block stays"
+
+
+def test_a_block_stays_while_any_of_its_tools_remains() -> None:
+    """Product guidance names web_search as the fallback for product_search."""
+    prompt = build_system_prompt(soul(), unavailable_tools={"product_search"})
+
+    assert "search_for_products=True" in prompt
+
+
+def test_every_gated_block_names_a_real_tool() -> None:
+    """A typo in a block's tool set would silently keep it forever."""
+    from src.domain.prompt import _GUIDANCE_BLOCKS
+
+    for tools, parts in _GUIDANCE_BLOCKS:
+        text = "\n".join(parts)
+        for tool in tools:
+            assert tool in text
+
+
+# -- Persona reminder ----------------------------------------------------------
+
+
+def test_a_written_persona_is_restated_at_the_end() -> None:
+    from src.domain.prompt import PERSONA_REMINDER
+
+    prompt = build_system_prompt(soul(system_prompt="Eres Jarvis."), memory_context="m")
+
+    assert prompt.endswith(PERSONA_REMINDER)
+
+
+def test_a_generated_opening_needs_no_reminder() -> None:
+    from src.domain.prompt import PERSONA_REMINDER
+
+    assert PERSONA_REMINDER not in build_system_prompt(soul(name="Ada"))

@@ -3,6 +3,42 @@
 # OpenAI TTS voice names
 OPENAI_VOICES = {"alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"}
 
+#: Gemini's prebuilt voices (Live and TTS share them).
+GEMINI_VOICES = frozenset(
+    {
+        "Achernar",
+        "Achird",
+        "Algenib",
+        "Algieba",
+        "Alnilam",
+        "Aoede",
+        "Autonoe",
+        "Callirrhoe",
+        "Charon",
+        "Despina",
+        "Enceladus",
+        "Erinome",
+        "Fenrir",
+        "Gacrux",
+        "Iapetus",
+        "Kore",
+        "Laomedeia",
+        "Leda",
+        "Orus",
+        "Puck",
+        "Pulcherrima",
+        "Rasalgethi",
+        "Sadachbia",
+        "Sadaltager",
+        "Schedar",
+        "Sulafat",
+        "Umbriel",
+        "Vindemiatrix",
+        "Zephyr",
+        "Zubenelgenubi",
+    }
+)
+
 # Known provider prefixes for model names
 KNOWN_PROVIDERS = (
     "elevenlabs",
@@ -55,7 +91,7 @@ def detect_tts_provider_from_model(model: str) -> str | None:
     model_lower = model.lower()
 
     # Check explicit provider prefix first (e.g. "elevenlabs/eleven-flash-v2.5")
-    for provider in ("elevenlabs", "openai", "cartesia", "deepgram", "google", "rime"):
+    for provider in ("elevenlabs", "openai", "cartesia", "deepgram", "google", "rime", "gemini"):
         if model_lower.startswith(f"{provider}/"):
             return provider
 
@@ -65,6 +101,9 @@ def detect_tts_provider_from_model(model: str) -> str | None:
 
     if model_lower.startswith("tts-") or model_lower.startswith("gpt-4o"):
         return "openai"
+
+    if model_lower.startswith("gemini-") and "tts" in model_lower:
+        return "gemini"
 
     if model_lower.startswith("sonic"):
         return "cartesia"
@@ -101,6 +140,10 @@ def detect_tts_provider_from_voice(voice: str) -> str | None:
     # OpenAI: Short lowercase names
     if voice.lower() in OPENAI_VOICES:
         return "openai"
+
+    # Gemini: its 30 prebuilt voices, capitalised star names ("Charon").
+    if voice in GEMINI_VOICES:
+        return "gemini"
 
     return None
 

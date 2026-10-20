@@ -173,7 +173,7 @@ async def get_context(
         template_id: Context template ID to use.
         kwami_name: Assistant name for filtering assistant-related facts.
         max_messages: Maximum recent messages to include.
-        min_relevance: Retained for callers. Zep 3.30 no longer accepts a rating filter.
+        min_relevance: Minimum relevance score for facts.
         include_facts: Whether to include facts in context.
 
     Returns:
@@ -198,12 +198,14 @@ async def get_context(
     if not context.context_block:
         # Get thread context (summary).
         # `thread.get_context` does not exist in zep-cloud; the real call is
-        # `get_user_context` with template_id omitted. Zep 3.30 removed
-        # `min_rating` and `mode`; the default context block is the summary.
+        # `get_user_context`, which is the same endpoint the template path uses
+        # with template_id omitted. The old name raised AttributeError on every
+        # call, so `summary` was always None and this whole fallback was dead.
         try:
-            thread_context = await client.thread.get_user_context(
-                thread_id=session_id,
-            )
+            # zep-cloud 3.28 dropped `min_rating` and `mode`; passing them raised
+            # TypeError here, which the except below logged and swallowed, so
+            # the summary was never loaded. Relevance is filtered on the facts.
+            thread_context = await client.thread.get_user_context(thread_id=session_id)
             if thread_context and thread_context.context:
                 context.summary = thread_context.context
         except Exception as e:

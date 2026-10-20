@@ -37,6 +37,12 @@ ALLOWED_ABSENT = {
     # in the container image, so forwarding the variable would point the Google
     # SDK at nothing. GOOGLE_API_KEY is the supported route on this target.
     "GOOGLE_APPLICATION_CREDENTIALS",
+    # Where the brain's executor works. Its "auto" default already picks the
+    # cloud mode in any container, which is the only mode that makes sense here.
+    "KWAMI_EXECUTOR_MODE",
+    # Where the agent keeps its state. This target forwards KWAMI_API_URL, and
+    # the "auto" default then uses the API, which is what this target is for.
+    "KWAMI_STORAGE",
 }
 
 

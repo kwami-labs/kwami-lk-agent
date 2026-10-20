@@ -192,3 +192,39 @@ def test_no_match_yields_none_rather_than_a_guess() -> None:
 
 def test_the_first_usable_name_wins() -> None:
     assert extract_name_from_facts(["is called The", "name is Marie"]) == "Marie"
+
+
+# -- Written persona -----------------------------------------------------------
+
+
+def test_a_persona_greeting_carries_no_casual_style() -> None:
+    """The casual wording won over a formal character: the butler said "Hey"."""
+    from src.domain.greeting import PERSONA_GREETING_STYLE
+
+    for facts in (
+        GreetingFacts(persona=True),
+        GreetingFacts(is_returning_user=True, persona=True),
+        GreetingFacts(user_name="Marie", persona=True),
+        GreetingFacts(user_name="Marie", recent_context_summary="x", persona=True),
+        GreetingFacts(user_name="Marie", recent_topics=["sails"], persona=True),
+    ):
+        instruction = build_greeting_instructions(facts)
+        assert PERSONA_GREETING_STYLE in instruction
+        for casual in ("Hey", "chill", "What's up"):
+            assert casual not in instruction
+
+
+def test_a_persona_greeting_keeps_what_it_knows() -> None:
+    instruction = build_greeting_instructions(
+        GreetingFacts(user_name="Marie", recent_topics=["is learning to sail"], persona=True)
+    )
+
+    assert "Marie" in instruction
+    assert "is learning to sail" in instruction
+    assert "Pick ONE topic" in instruction
+
+
+def test_a_persona_greeting_keeps_the_language() -> None:
+    instruction = build_greeting_instructions(GreetingFacts(persona=True, language="es-ES"))
+
+    assert instruction.endswith("Greet them in Castilian Spanish (Spain).")

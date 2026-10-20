@@ -8,30 +8,31 @@ OpenAI SDK. This module also follows the fallback-and-log shape of
 to a working default instead of taking the session down.
 """
 
+from typing import Any, cast
+
 from livekit.plugins import openai
 
-try:
-    from livekit.plugins import google  # type: ignore[attr-defined]
-except ImportError:
-    google = None
+from ..constants import resolve_realtime_voice
+from ..domain import KwamiVoiceConfig
+from ..utils.logging import get_logger
+from ..utils.provider import strip_model_prefix
+from .optional import optional_plugin
 
 try:
     from openai.types.beta.realtime.session import TurnDetection
 except ImportError:  # pragma: no cover - openai SDK is a hard dependency
     TurnDetection = None  # type: ignore
 
-from typing import Any, cast
-
-from ..domain import KwamiVoiceConfig
-from ..utils.logging import get_logger
-from ..utils.provider import strip_model_prefix
+# Guarded like the other factories: typed `Any`, so mypy accepts the None branch
+# whether or not the plugin happens to be installed where it runs.
+google = optional_plugin("google")
 
 logger = get_logger("factories")
 
 DEFAULT_OPENAI_REALTIME_MODEL = "gpt-realtime"
 DEFAULT_OPENAI_REALTIME_VOICE = "marin"
-DEFAULT_GOOGLE_REALTIME_MODEL = "gemini-2.0-flash-exp"
-DEFAULT_GOOGLE_REALTIME_VOICE = "Puck"
+DEFAULT_GOOGLE_REALTIME_MODEL = "gemini-3.8-live"
+DEFAULT_GOOGLE_REALTIME_VOICE = "Charon"
 
 
 def _server_vad(config: KwamiVoiceConfig):
@@ -44,6 +45,28 @@ def _server_vad(config: KwamiVoiceConfig):
         prefix_padding_ms=300,
         silence_duration_ms=int(config.vad_min_silence_duration * 1000),
     )
+
+
+def _realtime_voice(provider: str, voice: str | None, default: str) -> str:
+    """The provider's spelling of `voice`, or `default` if it doesn't offer it.
+
+    A voice saved for another provider (the config default is OpenAI's
+    "alloy") makes Gemini Live close the socket with 1007 at connect, which on
+    the realtime pipeline means a silent agent rather than an error the user
+    can see.
+    """
+    if not voice:
+        return default
+    resolved = resolve_realtime_voice(provider, voice)
+    if resolved is None:
+        logger.warning(
+            "Realtime voice '%s' is not available for provider '%s'; using '%s'.",
+            voice,
+            provider,
+            default,
+        )
+        return default
+    return resolved
 
 
 def _default_openai_realtime():
@@ -62,7 +85,9 @@ def create_realtime_model(config: KwamiVoiceConfig):
         if provider == "openai":
             return openai.realtime.RealtimeModel(
                 model=model or DEFAULT_OPENAI_REALTIME_MODEL,
-                voice=config.realtime_voice or DEFAULT_OPENAI_REALTIME_VOICE,
+                voice=_realtime_voice(
+                    provider, config.realtime_voice, DEFAULT_OPENAI_REALTIME_VOICE
+                ),
                 temperature=config.llm_temperature,
                 # Validated by the provider; the config carries plain strings.
                 modalities=cast(Any, config.realtime_modalities or ["text", "audio"]),
@@ -78,7 +103,9 @@ def create_realtime_model(config: KwamiVoiceConfig):
                 return _default_openai_realtime()
             return google.beta.realtime.RealtimeModel(
                 model=model or DEFAULT_GOOGLE_REALTIME_MODEL,
-                voice=config.realtime_voice or DEFAULT_GOOGLE_REALTIME_VOICE,
+                voice=_realtime_voice(
+                    provider, config.realtime_voice, DEFAULT_GOOGLE_REALTIME_VOICE
+                ),
                 temperature=config.llm_temperature,
             )
 

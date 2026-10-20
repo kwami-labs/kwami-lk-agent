@@ -173,6 +173,42 @@ def install_record_factory() -> None:
 
     factory._kwami_session_factory = True  # type: ignore[attr-defined]
     logging.setLogRecordFactory(factory)
+    _let_extra_win()
+
+
+def _let_extra_win() -> None:
+    """Let a call's own `extra` override a bound field instead of raising.
+
+    `Logger.makeRecord` raises KeyError for an `extra` key already on the
+    record, and the factory above has already put the bound fields there. The
+    SDK logs `extra={"room": ...}` in a dozen places -- among them the line in
+    room_io that closes the session when the user leaves, so that close never
+    happened (seen on LiveKit Cloud, 2026-10-18). Idempotent, like the factory.
+    """
+    original = logging.Logger.makeRecord
+    if getattr(original, "_kwami_extra_wins", False):
+        return
+
+    def make_record(
+        self, name, level, fn, lno, msg, args, exc_info, func=None, extra=None, sinfo=None
+    ):
+        bound = _session_fields.get() or {}
+        clashing = {
+            key: value
+            for key, value in (extra or {}).items()
+            if key in bound and key not in RESERVED_RECORD_FIELDS
+        }
+        if not clashing:
+            return original(self, name, level, fn, lno, msg, args, exc_info, func, extra, sinfo)
+        rest = {key: value for key, value in extra.items() if key not in clashing}
+        record = original(
+            self, name, level, fn, lno, msg, args, exc_info, func, rest or None, sinfo
+        )
+        record.__dict__.update(clashing)
+        return record
+
+    make_record._kwami_extra_wins = True  # type: ignore[attr-defined]
+    logging.Logger.makeRecord = make_record  # type: ignore[method-assign]
 
 
 class JsonFormatter(logging.Formatter):

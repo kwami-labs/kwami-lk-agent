@@ -1,33 +1,46 @@
 """Kwami Agent - Dynamic AI agent configured by the Kwami frontend library."""
 
 import asyncio
+from datetime import datetime
 from typing import Any
 
 from livekit.agents import Agent
+from livekit.agents.types import NOT_GIVEN
 from livekit.agents.voice.agent import find_function_tools
 
+from .brain.config import default_brain
+from .brain.router import can_delegate
 from .constants import Timeouts
 from .domain import KwamiConfig, build_system_prompt
+from .domain.charter import pending_items
+from .domain.clock import resolve_zone
 from .domain.greeting import (
     MAX_CONTEXT_SUMMARY_CHARS,
     GreetingFacts,
     build_greeting_instructions,
     extract_name_from_facts,
+    time_of_day,
     topics_from_facts,
 )
-from .domain.tool_gating import describe_gating, unavailable_builtin_tools
+from .domain.tool_gating import (
+    BRAIN_SEARCH_TOOLS,
+    VOICE_SWITCH_TOOLS,
+    describe_gating,
+    unavailable_builtin_tools,
+)
 from .memory import KwamiMemory
 from .runtime.container import room_from_context
 from .settings import get_settings
 from .tools import (
     AgentToolsMixin,
+    BrainToolsMixin,
     ClientToolManager,
     KnowledgeToolsMixin,
     MediaToolsMixin,
     PipelineControlMixin,
     TradingToolsMixin,
 )
-from .tools.limits import trim_client_tools
+from .tools.limits import enforce_tool_limit, trim_client_tools
 from .utils.logging import get_logger, redacted
 from .utils.room import should_disconnect_as_duplicate
 
@@ -48,6 +61,7 @@ class KwamiAgent(
     KnowledgeToolsMixin,
     MediaToolsMixin,
     TradingToolsMixin,
+    BrainToolsMixin,
 ):
     """Dynamic AI agent configured by the Kwami frontend library.
 
@@ -72,6 +86,7 @@ class KwamiAgent(
         llm: Any = None,
         tts: Any = None,
         skip_greeting: bool = False,
+        turn_handling: Any = NOT_GIVEN,
     ):
         """Initialize the Kwami agent.
 
@@ -82,6 +97,7 @@ class KwamiAgent(
             stt: Speech-to-Text instance.
             llm: Large Language Model instance.
             tts: Text-to-Speech instance.
+            turn_handling: Per-agent turn-taking overrides (runtime/turn_taking.py).
             skip_greeting: If True, skip the initial greeting (for reconfigurations).
         """
         self.kwami_config = config or KwamiConfig()
@@ -90,6 +106,10 @@ class KwamiAgent(
         self._skip_greeting = skip_greeting
         # Cached context from _inject_memory_context.
         self._last_memory_context: Any = None
+        # The memory text in the prompt, so a re-gated prompt keeps it.
+        self._memory_text = ""
+        # Whether searches go to the brain; decides tools and prompt alike.
+        self._delegating = self._brain_delegates()
 
         # Track current voice config for switching
         self._current_voice_config = self.kwami_config.voice
@@ -124,6 +144,7 @@ class KwamiAgent(
             tts=tts,
             vad=vad,
             tools=self._tools,
+            turn_handling=turn_handling,
         )
 
         # The framework sets `_tools = tools + find_function_tools(self)`, so
@@ -134,6 +155,77 @@ class KwamiAgent(
         # request of every session whether they work or not.
         self._withhold_unavailable_builtins()
 
+    def _brain_delegates(self) -> bool:
+        """Whether searches go to the brain instead of the voice's own tools.
+
+        The job's bridge decides once the agent is running. Before that -- in
+        `__init__`, where `self.session` raises -- the default roster on this
+        deployment's keys stands in for it, and `refresh_brain_gating` corrects
+        the guess on entry if the app had switched the brain off.
+        """
+        bridge = self._bridge()
+        if bridge is not None:
+            return bool(bridge.delegates())
+        return can_delegate(default_brain(), get_settings().provider_keys)
+
+    def _withheld_builtins(self) -> tuple[set[str], frozenset[str]]:
+        """Built-in names withheld: (missing a credential, kept back on purpose).
+
+        Kept back: the voice-switching tools while a character voice is set
+        (the voice is changed from the Voice panel), and the search tools while
+        the brain takes the searches.
+        """
+        missing = set(unavailable_builtin_tools(get_settings()))
+        locked = VOICE_SWITCH_TOOLS if self.kwami_config.voice.voice_locked else frozenset()
+        if getattr(self, "_delegating", False):
+            locked = locked | BRAIN_SEARCH_TOOLS
+        return missing, locked
+
+    def _unavailable_for_prompt(self) -> frozenset[str]:
+        """Tools the prompt must not describe: missing ones and delegated searches."""
+        missing = unavailable_builtin_tools(get_settings())
+        return missing | BRAIN_SEARCH_TOOLS if getattr(self, "_delegating", False) else missing
+
+    async def refresh_brain_gating(self) -> bool:
+        """Bring the search tools in line with the brain. True when they changed.
+
+        Runs on entry and whenever the app reconfigures the brain: switched off,
+        the voice gets its search tools back in the same call; switched on, it
+        loses them before the next turn.
+        """
+        delegating = self._brain_delegates()
+        if delegating == getattr(self, "_delegating", False):
+            return False
+        self._delegating = delegating
+        combined = enforce_tool_limit(
+            self.available_builtin_tools(), self.client_tools.create_client_tools()
+        )
+        await self.update_tools(combined)
+        await self.update_instructions(
+            self._build_system_prompt(getattr(self, "_memory_text", None) or None)
+        )
+        logger.info(
+            "Searches now %s", "delegated to the brain" if delegating else "done by the voice"
+        )
+        return True
+
+    def available_builtin_tools(self) -> list[Any]:
+        """This agent's built-in tools, bound to it, minus the withheld ones.
+
+        Discovered on the class -- `inspect.getmembers` on a live agent evaluates
+        `realtime_llm_session`, which raises without a running activity -- and
+        then bound with the descriptor protocol. Unbound, every tool keeps
+        `self` in its signature: Gemini Live let it pass, but the Gemini LLM of
+        the standard pipeline failed every turn with KeyError 'self' (2026-10-10).
+        """
+        missing, locked = self._withheld_builtins()
+        unavailable = missing | locked
+        return [
+            tool.__get__(self, type(self))
+            for tool in find_function_tools(type(self))
+            if _tool_name(tool) not in unavailable
+        ]
+
     def _withhold_unavailable_builtins(self) -> None:
         """Drop built-in tools this deployment has no credential for.
 
@@ -143,7 +235,8 @@ class KwamiAgent(
         `update_tools` later keeps the very first request correct; a tool
         withheld only after the greeting would already have been advertised.
         """
-        unavailable = unavailable_builtin_tools(get_settings())
+        missing, locked = self._withheld_builtins()
+        unavailable = missing | locked
         if not unavailable:
             return
 
@@ -154,10 +247,15 @@ class KwamiAgent(
         kept = [tool for tool in self._tools if _tool_name(tool) not in unavailable]
         self._tools = kept
         self._chat_ctx = self._chat_ctx.copy(tools=kept)
-        logger.info(
-            "%s",
-            describe_gating({_tool_name(t) for t in find_function_tools(type(self))} & unavailable),
-        )
+        builtins = {_tool_name(t) for t in find_function_tools(type(self))}
+        logger.info("%s", describe_gating(builtins & missing))
+        if locked & VOICE_SWITCH_TOOLS:
+            logger.info(
+                "Voice locked to the user's character: %s withheld",
+                sorted(locked & VOICE_SWITCH_TOOLS),
+            )
+        if locked & BRAIN_SEARCH_TOOLS:
+            logger.info("Searches go to the brain: %s withheld", sorted(BRAIN_SEARCH_TOOLS))
 
     def _build_system_prompt(self, memory_context: str | None = None) -> str:
         """Build the system prompt from soul configuration and memory context.
@@ -175,6 +273,14 @@ class KwamiAgent(
             self.kwami_config.soul,
             memory_context,
             client_tool_names=self._registered_client_tool_names(),
+            unavailable_tools=self._unavailable_for_prompt(),
+            # Only a realtime model speaks with its own voice; a TTS ignores it.
+            voice_style=(
+                self.kwami_config.voice.realtime_style
+                if self.kwami_config.voice.pipeline_type == "realtime"
+                else ""
+            ),
+            voice_locked=self.kwami_config.voice.voice_locked,
         )
 
     def _registered_client_tool_names(self) -> set[str]:
@@ -211,6 +317,7 @@ class KwamiAgent(
             memory_text = context.to_system_prompt_addition()
 
             if memory_text:
+                self._memory_text = memory_text
                 new_instructions = self._build_system_prompt(memory_text)
                 await self.update_instructions(new_instructions)
                 logger.info("Injected memory context into system prompt")
@@ -236,7 +343,13 @@ class KwamiAgent(
         my_identity = ""
         if room:
             self.room = room
-            my_identity = room.local_participant.identity if room.local_participant else ""
+            # `local_participant` raises (rather than returning None) until the
+            # room is connected, and on_enter can run before that.
+            try:
+                local = room.local_participant
+            except Exception:
+                local = None
+            my_identity = local.identity if local else ""
             logger.info("Agent %s entering room...", my_identity)
 
             # Quick check for duplicate agents (non-blocking)
@@ -249,6 +362,13 @@ class KwamiAgent(
             logger.warning("Agent entered with no room reference available")
 
         self._register_session_listeners()
+        self._sync_bridge_context()
+        # The search tools were gated in __init__ on a guess (no session yet);
+        # the bridge knows whether the app switched the brain off.
+        try:
+            await self.refresh_brain_gating()
+        except Exception:
+            logger.warning("Could not re-gate the search tools on entry", exc_info=True)
 
         logger.info(
             "Kwami agent '%s' (%s) entered room successfully",
@@ -274,20 +394,39 @@ class KwamiAgent(
         except Exception:
             logger.exception("Memory context failed; greeting without it.")
 
-        # Greet the user - but only once per session
-        if self._skip_greeting:
+        # Greet the user - but only once per session. A greeting cut off by an
+        # agent swap (the app's updates rebuild the agent right after connect)
+        # is still owed, and the next agent gives it.
+        deps = self._deps()
+        if self._skip_greeting and not getattr(deps, "greeting_owed", False):
             logger.debug("Skipping greeting (agent was reconfigured)")
+            return
+
+        # The app's post-connect updates can replace this agent while it was
+        # fetching memory. Greeting from an agent on its way out failed with
+        # "speech scheduling is draining" (twice: greeting and fallback), and
+        # the greeting is still owed, so the agent that replaces it gives it.
+        if self._superseded():
+            logger.debug("Agent replaced before greeting; its successor greets")
             return
 
         # Generate a natural, personalized greeting
         try:
             logger.info("Generating greeting for user...")
             greeting_instructions = await self._build_greeting_instructions()
-            self.session.generate_reply(
+            if not greeting_instructions:
+                # The charter asked for no greeting: wait for the user to speak.
+                logger.info("Greeting disabled by the charter")
+                return
+            handle = self.session.generate_reply(
                 instructions=greeting_instructions,
                 allow_interruptions=True,
             )
+            self._settle_greeting_when_heard(handle)
         except Exception:
+            if self._superseded():
+                logger.debug("Agent replaced while greeting; its successor greets")
+                return
             logger.exception("Failed to generate greeting")
             # Fall back to a simple greeting so the agent still speaks
             try:
@@ -297,6 +436,40 @@ class KwamiAgent(
                 )
             except Exception:
                 logger.exception("Failed to generate fallback greeting")
+
+    def _superseded(self) -> bool:
+        """True when the session has already moved on to another agent."""
+        try:
+            current = self.session.current_agent
+        except Exception:
+            return False
+        return current is not None and current is not self
+
+    def _deps(self) -> Any:
+        try:
+            return self.session.userdata
+        except Exception:
+            return None
+
+    def _settle_greeting_when_heard(self, handle: Any) -> None:
+        """The greeting counts once it played out, not once it was scheduled."""
+        deps = self._deps()
+        if deps is None or not hasattr(handle, "add_done_callback"):
+            return
+
+        def done(h: Any) -> None:
+            # Spoken means an assistant message came out of it. A greeting
+            # whose model died before saying a word (Gemini Live closing at
+            # connect) also ends uninterrupted, and must stay owed for the
+            # agent that takes over.
+            spoken = any(
+                getattr(item, "role", None) == "assistant"
+                for item in (getattr(h, "chat_items", None) or [])
+            )
+            if spoken and not getattr(h, "interrupted", False):
+                deps.greeting_owed = False
+
+        handle.add_done_callback(done)
 
     async def _build_greeting_instructions(self) -> str:
         """Gather what we know about the user, then hand it to the domain layer.
@@ -316,9 +489,17 @@ class KwamiAgent(
         """The I/O half: everything the greeting needs, fetched."""
         agent_name = self.kwami_config.soul.name or self.kwami_config.kwami_name or "Kwami"
         language = getattr(self.kwami_config.soul, "language", None)
+        persona = bool(getattr(self.kwami_config.soul, "system_prompt", ""))
+        base: dict[str, Any] = {
+            "agent_name": agent_name,
+            "language": language,
+            "persona": persona,
+            **self._charter_greeting_fields(),
+            "brain_results": await self._take_brain_results(),
+        }
 
         if not (self._memory and self._memory.is_initialized):
-            return GreetingFacts(agent_name=agent_name, language=language)
+            return GreetingFacts(**base)
 
         try:
             user_name = self._memory._cached_user_name
@@ -349,21 +530,71 @@ class KwamiAgent(
                     logger.info("Found user name from facts: %s", redacted(found, keep=1))
 
             return GreetingFacts(
-                agent_name=agent_name,
+                **base,
                 user_name=user_name,
                 is_returning_user=is_returning,
                 recent_context_summary=summary,
                 recent_topics=topics,
-                language=language,
             )
         except Exception as e:
             # Memory is an enhancement; the greeting is the product. A Zep
             # failure here means greeting as a stranger, not not greeting.
             logger.warning("Could not extract user info from memory: %s", e)
-            return GreetingFacts(agent_name=agent_name, language=language)
+            return GreetingFacts(**base)
+
+    def _bridge(self) -> Any:
+        try:
+            # `session` raises until the agent is active, and `userdata` raises
+            # on a session started without one.
+            userdata = self.session.userdata
+        except Exception:
+            return None
+        return getattr(userdata, "bridge", None)
+
+    def _sync_bridge_context(self) -> None:
+        """Tell the brain who it works for. Agents are rebuilt on every config
+        change, the bridge is not, so this runs on each entry."""
+        bridge = self._bridge()
+        if bridge is None:
+            return
+        soul = self.kwami_config.soul
+        charter = getattr(soul, "charter", None)
+        bridge.set_context(
+            kwami_id=self.kwami_config.kwami_id,
+            name=soul.name or self.kwami_config.kwami_name,
+            language=self.kwami_config.locale or getattr(soul, "language", "") or "",
+            timezone=self.kwami_config.timezone,
+            user_profile=charter.user_profile if charter is not None and charter.enabled else "",
+        )
+
+    async def _take_brain_results(self) -> list[str]:
+        bridge = self._bridge()
+        if bridge is None:
+            return []
+        kwami_id = self.kwami_config.kwami_id
+        # On the cloud the owed results live in Supabase; give the load that
+        # `_sync_bridge_context` started a moment to land.
+        await bridge.ready(kwami_id)
+        return [f"{r.title}: {r.summary[:400]}" for r in bridge.take_pending(kwami_id)]
+
+    def _charter_greeting_fields(self) -> dict[str, Any]:
+        """What the charter adds to the greeting, or nothing without one."""
+        charter = getattr(self.kwami_config.soul, "charter", None)
+        if charter is None or not charter.enabled:
+            return {}
+        zone, _ = resolve_zone(self.kwami_config.timezone)
+        return {
+            "charter_greeting": charter.greeting,
+            "address_as": charter.address_as,
+            "pending": pending_items(charter),
+            "time_of_day": time_of_day(datetime.now(zone).hour),
+        }
 
     async def on_user_turn_completed(self, turn_ctx: Any, new_message: Any) -> None:
         """Called when user finishes speaking.
+
+        Once the user has spoken the conversation is under way, and a greeting
+        cut off earlier is no longer owed.
 
         Buffers the user message so it can be sent together with the
         assistant's response in a single add_messages call. This produces
@@ -373,6 +604,9 @@ class KwamiAgent(
             turn_ctx: Turn context.
             new_message: The user's message.
         """
+        deps = self._deps()
+        if deps is not None:
+            deps.greeting_owed = False
         if self._memory and self._memory.is_initialized and new_message:
             try:
                 content = self._extract_message_content(new_message)
