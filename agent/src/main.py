@@ -1,7 +1,6 @@
 """Kwami Agent - Entry point for LiveKit Cloud agent sessions."""
 
 import asyncio
-import os
 from pathlib import Path
 
 from .envfile import load_env_file
@@ -141,13 +140,7 @@ async def _close_brain(ctx: JobContext) -> None:
         await bridge.close(timeout=BRAIN_DRAIN_SECONDS)
 
 
-#: The dispatch name LiveKit routes calls by. A local worker for testing takes
-#: another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not compete with
-#: the deployed agent for real calls.
-AGENT_NAME = os.environ.get("KWAMI_AGENT_NAME", "").strip() or "kwami-agent"
-
-
-@server.rtc_session(agent_name=AGENT_NAME, on_session_end=_close_brain)
+@server.rtc_session(agent_name=get_settings().agent_name, on_session_end=_close_brain)
 async def entrypoint(ctx: JobContext) -> None:
     """Main entry point for Kwami agent sessions.
 

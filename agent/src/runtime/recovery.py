@@ -37,7 +37,7 @@ def install_realtime_rescue(
 
     def on_error(event: Any) -> None:
         error = getattr(event, "error", None)
-        if getattr(error, "type", None) != "realtime_model_error":
+        if error is None or getattr(error, "type", None) != "realtime_model_error":
             return
         if getattr(error, "recoverable", True):
             return

@@ -72,6 +72,8 @@ PROVIDER_KEY_NAMES: tuple[str, ...] = (
 #:
 #: Both now derive from this tuple rather than restating it, and
 #: `tests/unit/test_settings_env_inventory.py` fails if it drifts from the code.
+DEFAULT_AGENT_NAME = "kwami-agent"
+
 ENV_VAR_NAMES: tuple[str, ...] = (
     "KWAMI_API_URL",
     "KWAMI_API_KEY",
@@ -93,6 +95,7 @@ ENV_VAR_NAMES: tuple[str, ...] = (
     "SUPABASE_SECRET_KEY",
     "KWAMI_STORAGE",
     "KWAMI_EXECUTOR_MODE",
+    "KWAMI_AGENT_NAME",
     *PROVIDER_KEY_NAMES,
 )
 
@@ -187,6 +190,10 @@ class Settings:
     #: to Storage. "auto" (default): cloud when there is no Documents folder,
     #: which is the case in every container and never on the user's PC.
     executor_mode: str = "auto"
+    #: The dispatch name LiveKit routes calls by. A local worker for testing
+    #: takes another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not
+    #: compete with the deployed agent for real calls.
+    agent_name: str = DEFAULT_AGENT_NAME
 
     # Provider credentials the livekit plugins read themselves. Mirrored here so
     # that "is this provider usable?" is answerable without touching os.environ.
@@ -223,6 +230,7 @@ class Settings:
             allow_browser_js=_env_bool("KWAMI_ALLOW_BROWSER_JS"),
             mistral_api_key=_env_str("MISTRAL_API_KEY"),
             executor_mode=_env_str("KWAMI_EXECUTOR_MODE", "auto").strip().lower(),
+            agent_name=_env_str("KWAMI_AGENT_NAME").strip() or DEFAULT_AGENT_NAME,
             provider_keys={
                 name: _env_str(name) for name in PROVIDER_KEY_NAMES if os.environ.get(name)
             },

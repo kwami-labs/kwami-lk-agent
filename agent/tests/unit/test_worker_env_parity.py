@@ -43,6 +43,9 @@ ALLOWED_ABSENT = {
     # Where the agent keeps its state. This target forwards KWAMI_API_URL, and
     # the "auto" default then uses the API, which is what this target is for.
     "KWAMI_STORAGE",
+    # A knob for a local test worker, so it does not answer real calls. A
+    # deployed worker must keep the default dispatch name the API routes to.
+    "KWAMI_AGENT_NAME",
 }
 
 
