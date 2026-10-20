@@ -15,6 +15,13 @@ from ..memory import create_memory
 from ..tools.limits import enforce_tool_limit
 from ..utils.logging import get_logger
 from ..utils.provider import detect_provider_change, strip_model_prefix
+from .listening import (
+    apply_listening,
+    apply_to_session,
+    copy_listening,
+    is_listening_only,
+    parse_listening,
+)
 from .realtime import (
     REALTIME_PIPELINE,
     has_realtime_keys,
@@ -281,10 +288,19 @@ async def handle_full_config(
         # killing its greeting before it completes. The reconfigured agent must
         # greet in that case.
         skip_greeting = state.greeting_delivered
+        # Listening settings the session already runs with survive a full
+        # config that does not restate them; the ones it does state win.
+        previous = state.current_agent
+        if previous is not None:
+            copy_listening(previous.kwami_config.voice, new_config.voice)
+        listening_changed = apply_listening(new_config.voice, parse_listening(voice_data))
         new_agent = create_agent_fn(new_config, vad, memory, skip_greeting=skip_greeting)
 
         # 4. Switch to new agent (state handles memory cleanup)
         state.update_agent(session, new_agent)
+        # The new agent was built with these VAD settings; the session-wide
+        # options are the ones still to bring in line.
+        apply_to_session(session, None, new_config.voice, listening_changed)
 
         # Mark that we've handled the first config (greeting will be delivered by new agent)
         if not skip_greeting:
@@ -380,6 +396,13 @@ async def update_voice(
         vad: Voice Activity Detection instance.
         create_agent_fn: Function to create a new agent from config.
     """
+    # Noise, turn-taking and interruption settings apply to either pipeline and
+    # need no rebuild. The panel sends them on their own, on every connect.
+    listening_changed = apply_listening(agent.kwami_config.voice, parse_listening(config))
+    apply_to_session(session, agent, agent.kwami_config.voice, listening_changed, vad)
+    if is_listening_only(config):
+        return
+
     current_pipeline = agent.kwami_config.voice.pipeline_type
     target_pipeline = requested_pipeline(config)
 
