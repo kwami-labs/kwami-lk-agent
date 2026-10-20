@@ -9,6 +9,7 @@ for, an uninstalled optional plugin -- not by patching the thing under test.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import pytest
 
@@ -289,14 +290,18 @@ def test_an_explicit_model_reaches_an_installed_plugin(
 class StrictGoogleRealtime:
     def __init__(self) -> None:
         self.calls: list[dict] = []
+        self.input_configs: list[Any] = []
         self.beta = self
 
     @property
     def realtime(self):
         return self
 
-    def RealtimeModel(self, *, model: str, voice: str, temperature: float):  # noqa: N802
+    def RealtimeModel(  # noqa: N802
+        self, *, model: str, voice: str, temperature: float, realtime_input_config: Any
+    ):
         self.calls.append({"model": model, "voice": voice, "temperature": temperature})
+        self.input_configs.append(realtime_input_config)
         return f"realtime:{model}"
 
 
@@ -354,3 +359,69 @@ def test_no_realtime_voice_uses_the_providers_default(monkeypatch: pytest.Monkey
     create_realtime_model(voice(realtime_provider="google", realtime_model="", realtime_voice=""))
 
     assert plugin.calls[0]["voice"] == "Charon"
+
+
+# =============================================================================
+# Realtime turn detection: noise must not count as the user talking
+# =============================================================================
+
+
+def test_openai_realtime_waits_for_meaning_not_loudness() -> None:
+    from src.factories.realtime import _server_vad
+
+    detection = _server_vad(voice())
+    assert detection.type == "semantic_vad"
+    assert detection.interrupt_response is True
+    assert _server_vad(voice(allow_interruptions=False)).interrupt_response is False
+
+
+def test_openai_server_vad_is_still_available_on_request() -> None:
+    from src.factories.realtime import _server_vad
+
+    detection = _server_vad(
+        voice(turn_detection="server_vad", vad_threshold=0.7, vad_min_silence_duration=0.6)
+    )
+    assert detection.type == "server_vad"
+    assert detection.threshold == 0.7
+    assert detection.silence_duration_ms == 600
+
+
+def test_none_leaves_the_providers_own_turn_detection() -> None:
+    from livekit.agents.types import NOT_GIVEN
+
+    from src.factories.realtime import _gemini_activity_detection, _server_vad
+
+    assert _server_vad(voice(turn_detection="none")) is NOT_GIVEN
+    assert _gemini_activity_detection(voice(turn_detection="none")) is NOT_GIVEN
+
+
+def test_gemini_live_needs_clear_speech_to_start_a_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    from google.genai import types
+
+    plugin = StrictGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+
+    create_realtime_model(voice(realtime_provider="google", realtime_model=""))
+
+    detection = plugin.input_configs[0].automatic_activity_detection
+    assert detection.start_of_speech_sensitivity == types.StartSensitivity.START_SENSITIVITY_LOW
+    assert detection.disabled is None, "disabled would mean manual turns: a silent agent"
+    assert (
+        plugin.input_configs[0].activity_handling
+        == types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS
+    )
+
+
+def test_gemini_live_honours_the_interruption_and_server_vad_choices() -> None:
+    from google.genai import types
+
+    from src.factories.realtime import _gemini_activity_detection
+
+    config = _gemini_activity_detection(
+        voice(turn_detection="server_vad", allow_interruptions=False)
+    )
+    assert (
+        config.automatic_activity_detection.start_of_speech_sensitivity
+        == types.StartSensitivity.START_SENSITIVITY_HIGH
+    )
+    assert config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
