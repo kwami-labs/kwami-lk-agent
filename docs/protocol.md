@@ -116,7 +116,7 @@ Partial update. `updateType` selects the branch.
 
 | `updateType` | Effect |
 | --- | --- |
-| `voice` | Dispatches on the live pipeline. A pipeline switch rebuilds; on `realtime`, voice and temperature go over the open socket and provider/model rebuild; otherwise TTS/STT options, with a rebuild on a provider change or a speed change the provider cannot apply live |
+| `voice` | Listening settings (`enhancements`, `vad`) are applied to the session first, on either pipeline and without a rebuild; a payload of only those stops there. Then dispatches on the live pipeline. A pipeline switch rebuilds; on `realtime`, voice and temperature go over the open socket and provider/model rebuild; otherwise TTS/STT options, with a rebuild on a provider change or a speed change the provider cannot apply live |
 | `pipeline` | Switches between `standard` and `realtime`, carrying any realtime fields in the same payload |
 | `llm` | Recreates the agent. On the `realtime` pipeline this retargets the **realtime** model rather than building a standard pipeline underneath the session |
 | `soul` / `persona` | Rebuilds instructions in place, preserves cached memory context |
