@@ -159,8 +159,26 @@ async def test_audio_input_and_output_are_both_enabled(fake_session, vad) -> Non
     await entrypoint(ctx)
 
     options = fake_session.instances[-1].started_with["room_options"]
-    assert options.audio_input is True
+    assert options.audio_input
     assert options.audio_output is True
+
+
+async def test_the_microphone_is_noise_cancelled_without_a_second_gain_stage(
+    fake_session, vad
+) -> None:
+    """Noise that reaches the VAD reads as the user talking and cuts the agent
+    off; the server-side gain stage lifted that noise in every pause."""
+    from livekit.agents.voice.room_io.types import NoiseCancellationParams
+    from livekit.rtc import NoiseCancellationOptions
+
+    ctx = FakeCtx(FakeRoom(), vad)
+
+    await entrypoint(ctx)
+
+    audio_input = fake_session.instances[-1].started_with["room_options"].audio_input
+    assert audio_input.auto_gain_control is False
+    selected = audio_input.noise_cancellation(NoiseCancellationParams(object(), object()))
+    assert isinstance(selected, NoiseCancellationOptions)
 
 
 async def test_the_dependencies_reach_the_session_userdata(fake_session, vad) -> None:

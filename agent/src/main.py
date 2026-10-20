@@ -34,7 +34,7 @@ from .runtime import (
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
-from .runtime.turn_taking import session_turn_handling
+from .runtime.turn_taking import noise_cancellation_selector, session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
@@ -262,7 +262,22 @@ async def _run_session(ctx: JobContext) -> None:
         agent=initial_agent,
         room=ctx.room,
         room_options=room_io.RoomOptions(
-            audio_input=True,
+            audio_input=room_io.AudioInputOptions(
+                # Noise and background voices out before the VAD, the turn
+                # detector, the STT or a realtime model hear them; otherwise
+                # they read as the user talking and cut the agent off.
+                noise_cancellation=noise_cancellation_selector(
+                    lambda: (
+                        state.current_agent.kwami_config.voice
+                        if state.current_agent is not None
+                        else None
+                    )
+                ),
+                # The browser already levels the microphone. A second gain
+                # stage here lifted the room's noise floor in every pause --
+                # exactly the audio that trips the VAD.
+                auto_gain_control=False,
+            ),
             audio_output=True,
             # The camera or a shared screen, when the app publishes one, goes
             # to a realtime model that can see (Gemini Live): the "Audio +

@@ -62,6 +62,8 @@ LANGUAGE_KEY = "language"
 _CHOICES: dict[str, tuple[str, ...]] = {
     "pipeline_type": ("standard", "realtime"),
     "turn_detection": ("server_vad", "semantic", "none"),
+    "turn_detector": ("model", "vad", "stt"),
+    "noise_cancellation_mode": ("bvc", "krisp"),
 }
 
 #: Setting the key on the left without the ones on the right clears those.

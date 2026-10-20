@@ -275,20 +275,45 @@ class KwamiVoiceConfig:
     realtime_modalities: list[str] = field(default_factory=lambda: ["text", "audio"])
 
     # =========================================================================
-    # Audio Enhancements
+    # Listening: noise, turn-taking and interruptions (runtime/turn_taking.py)
     # =========================================================================
+    # The defaults are the Spanish tuning; the app's Enhancements panel, and the
+    # `set_enhancement_control` tool the agent calls, override them per session.
 
-    # Enable browser echo cancellation
+    # Echo cancellation and gain control run in the browser, before the audio
+    # leaves the user's device. Kept so the app's values round-trip.
     echo_cancellation: bool = True
-
-    # Enable noise suppression
-    noise_suppression: bool = True
-
-    # Enable automatic gain control
     auto_gain_control: bool = True
 
-    # Turn detection mode: server_vad, semantic, or none
-    turn_detection: Literal["server_vad", "semantic", "none"] = "server_vad"
+    # Noise cancellation on the user's microphone, on the agent (LiveKit Cloud).
+    noise_suppression: bool = True
+
+    # "bvc" also removes voices in the background (a TV, people nearby), which
+    # otherwise read as the user talking and cut the agent off; "krisp" is the
+    # standard model and keeps them. Phone callers get BVC tuned for telephony.
+    noise_cancellation_mode: Literal["bvc", "krisp"] = "bvc"
+
+    # How the end of the user's turn is decided on the standard pipeline:
+    # LiveKit's multilingual end-of-turn "model", plain "vad" silence, or "stt".
+    turn_detector: Literal["model", "vad", "stt"] = "model"
+
+    # Silence before the turn may end; learned upwards from the minimum.
+    min_endpointing_delay: float = 0.4
+    max_endpointing_delay: float = 2.5
+
+    # Whether the user can cut the agent off, and how much speech it takes.
+    allow_interruptions: bool = True
+    min_interruption_duration: float = 0.4
+    min_interruption_words: int = 0
+
+    # The LLM starts on the interim transcript while the turn is still open.
+    preemptive_generation: bool = True
+
+    # Turn detection on a realtime model's own server. "semantic" waits for the
+    # user to finish a thought (OpenAI's semantic VAD; Gemini Live with low
+    # start-of-speech sensitivity); "server_vad" ends on silence alone and is
+    # what noise trips; "none" leaves the provider's default.
+    turn_detection: Literal["server_vad", "semantic", "none"] = "semantic"
 
 
 @dataclass
