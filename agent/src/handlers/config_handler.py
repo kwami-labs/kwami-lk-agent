@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -561,16 +562,36 @@ async def _update_tts_options(
         updates["speed"] = speed_in
 
     if updates and hasattr(tts, "update_options"):
+        # Each plugin takes its own options: ElevenLabs has no `speed` (a new
+        # speed rebuilds it, above), Deepgram no `voice` (its voice is the
+        # model). One option it does not take used to fail the whole call, so
+        # a new ElevenLabs voice mid-call never reached the TTS.
+        updates, dropped = _supported_options(tts.update_options, updates)
+        if dropped:
+            logger.debug("TTS %s takes no %s; not sent", type(tts).__name__, sorted(dropped))
+    if updates and hasattr(tts, "update_options"):
         try:
             tts.update_options(**updates)
             # Update stored config to reflect new values
-            if new_voice:
+            if "voice" in updates or "voice_id" in updates or "voice_name" in updates:
                 agent.kwami_config.voice.tts_voice = new_voice
-            if speed_in is not None:
+            if "speed" in updates:
                 agent.kwami_config.voice.tts_speed = speed_in
             logger.info("Updated TTS options: %s", updates)
         except Exception as e:
             logger.warning("Failed to update TTS options: %s", e)
+
+
+def _supported_options(method: Any, updates: dict[str, Any]) -> tuple[dict[str, Any], set[str]]:
+    """Split `updates` into what `method` accepts and what it does not."""
+    try:
+        params = inspect.signature(method).parameters
+    except (TypeError, ValueError):
+        return updates, set()
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return updates, set()
+    kept = {k: v for k, v in updates.items() if k in params}
+    return kept, set(updates) - set(kept)
 
 
 def _apply_stt_fields(voice_config: Any, config: dict[str, Any]) -> None:
