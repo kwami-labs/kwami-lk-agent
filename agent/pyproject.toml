@@ -64,6 +64,11 @@ elevenlabs = ["livekit-plugins-elevenlabs>=1.3.12,<2.0.0"]
 google = ["livekit-plugins-google>=1.3.12,<2.0.0"]
 anthropic = ["livekit-plugins-anthropic>=1.3.12,<2.0.0"]
 
+[tool.uv]
+# 0.6.4 has four high DoS CVEs in the BER/CER/DER decoders. Transitive via
+# google-auth; no parent release pins 0.6.5 yet.
+override-dependencies = ["pyasn1>=0.6.5"]
+
 [tool.ruff]
 line-length = 100
 # The floor, not the ceiling: local dev pins 3.11 (.python-version) while the
