@@ -422,7 +422,7 @@ async def transcribe(stt: Any, frames: list[Any]) -> tuple[float, str]:
     try:
         await asyncio.wait_for(read(), TIMEOUT)
     except TimeoutError:
-        pass
+        logging.debug("STT read timed out after %.2fs; using partial transcript", TIMEOUT)
     finally:
         feeder.cancel()
         await stream.aclose()
