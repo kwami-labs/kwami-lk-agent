@@ -39,6 +39,7 @@ import difflib
 import html
 import json
 import logging
+import math
 import statistics
 import sys
 import time
@@ -449,7 +450,7 @@ async def ask(llm: Any) -> tuple[float, float, str]:
 
 
 def median(values: list[float]) -> float | None:
-    clean = [v for v in values if v == v]  # drop NaN
+    clean = [v for v in values if not math.isnan(v)]  # drop NaN
     return statistics.median(clean) if clean else None
 
 
