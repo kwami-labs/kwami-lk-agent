@@ -537,6 +537,24 @@ def test_llm_knobs_write_the_ones_the_client_was_built_with() -> None:
     assert opts.max_tokens == 50
 
 
+def test_llm_knobs_leave_a_client_built_without_them_alone() -> None:
+    """Claude from Opus 4.7 on answers 400 to a temperature it was not built with."""
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    unset = object()  # a plugin's NOT_GIVEN sentinel
+    opts = SimpleNamespace(temperature=unset, max_tokens=unset)
+    voice = SimpleNamespace()
+    agent = SimpleNamespace(
+        kwami_config=SimpleNamespace(voice=voice),
+        llm=SimpleNamespace(_opts=opts),
+    )
+    _apply_llm_knobs_live(agent, SimpleNamespace(llm_temperature=0.1, llm_max_tokens=50))
+    assert opts.temperature is unset and opts.max_tokens is unset
+    assert (voice.llm_temperature, voice.llm_max_tokens) == (0.1, 50)
+
+
 def test_a_text_model_is_not_written_as_the_realtime_one() -> None:
     from src.handlers.realtime import apply_realtime_fields
 
