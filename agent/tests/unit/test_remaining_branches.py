@@ -21,6 +21,7 @@ import pytest
 import respx
 
 from src.agent import KwamiAgent
+from src.brain.config import default_brain
 from src.domain import KwamiConfig, KwamiSoulConfig, build_system_prompt
 from src.handlers.realtime import apply_realtime_fields
 from src.runtime.container import AgentDeps
@@ -499,3 +500,242 @@ async def test_opening_a_trade_ticket_without_the_navigation_mixin(
     result = await agent.open_trade_ticket(None, broker="trading212")
 
     assert "can't open the browser panel" in result
+
+
+# -- the last CI-missing branches -------------------------------------------
+
+
+def test_a_builtin_without_a_signature_keeps_every_option() -> None:
+    from src.handlers.config_handler import _supported_options
+
+    assert _supported_options(42, {"voice": "a"}) == ({"voice": "a"}, set())
+
+
+def test_llm_knobs_do_nothing_without_plugin_opts() -> None:
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    voice = SimpleNamespace()
+    agent = SimpleNamespace(kwami_config=SimpleNamespace(voice=voice), llm=None)
+    _apply_llm_knobs_live(agent, SimpleNamespace(llm_temperature=0.2, llm_max_tokens=64))
+    assert voice.llm_temperature == 0.2
+
+
+def test_llm_knobs_write_the_ones_the_client_was_built_with() -> None:
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=0.7, max_tokens=256)
+    agent = SimpleNamespace(
+        kwami_config=SimpleNamespace(voice=SimpleNamespace()),
+        llm=SimpleNamespace(_opts=opts),
+    )
+    _apply_llm_knobs_live(agent, SimpleNamespace(llm_temperature=0.1, llm_max_tokens=50))
+    assert opts.temperature == 0.1
+    assert opts.max_tokens == 50
+
+
+def test_a_text_model_is_not_written_as_the_realtime_one() -> None:
+    from src.handlers.realtime import apply_realtime_fields
+
+    voice = KwamiConfig().voice
+    voice.realtime_provider = "google"
+    voice.realtime_model = "gemini-3.1-flash-live-preview"
+
+    changed = apply_realtime_fields(voice, {"realtime_model": "gemini-3.5-flash"})
+
+    assert changed == set()
+    assert voice.realtime_model == "gemini-3.1-flash-live-preview"
+
+
+def test_an_unknown_provider_has_no_key() -> None:
+    from src.factories.fallback import _has_key
+
+    assert _has_key({}, "assemblyai") is False
+
+
+def test_a_backup_that_cannot_be_built_is_skipped(env_setting, caplog) -> None:
+    from src.factories.availability import STT_REQUIREMENTS
+    from src.factories.fallback import _chain
+
+    env_setting("ASSEMBLYAI_API_KEY", "test-key-not-real")
+
+    def build(provider: str, model: str) -> Any:
+        raise RuntimeError("plugin missing")
+
+    with caplog.at_level("WARNING"):
+        members = _chain(
+            "stt",
+            object(),
+            "deepgram",
+            (("assemblyai", "best"),),
+            STT_REQUIREMENTS,
+            build,
+        )
+    assert len(members) == 1
+    assert "Could not build" in caplog.text
+
+
+def test_stt_fallback_survives_an_adapter_that_will_not_build(
+    env_setting, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.factories.fallback import with_stt_fallback
+
+    env_setting("ASSEMBLYAI_API_KEY", "test-key-not-real")
+    env_setting("DEEPGRAM_API_KEY", "test-key-not-real")
+    voice = KwamiConfig().voice
+    voice.stt_provider = "deepgram"
+    primary = object()
+
+    def build(provider: str, model: str) -> Any:
+        return object()
+
+    def boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("no adapter")
+
+    monkeypatch.setattr("src.factories.fallback.lk_stt.FallbackAdapter", boom)
+    assert (
+        with_stt_fallback(primary, voice, lambda cfg: build(cfg.stt_provider, cfg.stt_model), None)
+        is primary
+    )
+
+
+async def test_rescue_stops_if_the_agent_is_gone() -> None:
+    from src.runtime.recovery import install_realtime_rescue
+
+    class Event:
+        def __init__(self, error: Any) -> None:
+            self.error = error
+
+    class ErrorStub:
+        def __init__(self) -> None:
+            self.type = "realtime_model_error"
+            self.recoverable = False
+            self.error = "dead"
+
+    class Agent:
+        def __init__(self) -> None:
+            self.kwami_config = KwamiConfig()
+            self.kwami_config.voice.pipeline_type = "realtime"
+
+    class State:
+        def __init__(self) -> None:
+            self.current_agent: Any = Agent()
+            self.spawned: list[Any] = []
+
+        def spawn(self, coro: Any, name: str = "") -> None:
+            self.spawned.append(coro)
+
+        async def run_serialized(self, coro: Any) -> None:
+            self.current_agent = None
+            await coro
+
+        def update_agent(self, session: Any, agent: Any) -> None:
+            raise AssertionError("must not rebuild once the agent is gone")
+
+    class Session:
+        def __init__(self) -> None:
+            self.handlers: dict[str, Any] = {}
+
+        def on(self, event: str) -> Any:
+            return lambda fn: self.handlers.update({event: fn})
+
+    session = Session()
+    state = State()
+    install_realtime_rescue(session, state, None, lambda *a, **k: None)
+    session.handlers["error"](Event(ErrorStub()))
+    import asyncio
+
+    await asyncio.gather(*state.spawned)
+
+
+async def test_a_failed_rebuild_is_logged_not_raised(caplog) -> None:
+    from src.runtime.recovery import install_realtime_rescue
+
+    class Event:
+        def __init__(self, error: Any) -> None:
+            self.error = error
+
+    class ErrorStub:
+        def __init__(self) -> None:
+            self.type = "realtime_model_error"
+            self.recoverable = False
+            self.error = "dead"
+
+    class Agent:
+        def __init__(self) -> None:
+            self.kwami_config = KwamiConfig()
+            self.kwami_config.voice.pipeline_type = "realtime"
+
+    class State:
+        def __init__(self) -> None:
+            self.current_agent: Any = Agent()
+            self.spawned: list[Any] = []
+
+        def spawn(self, coro: Any, name: str = "") -> None:
+            self.spawned.append(coro)
+
+        async def run_serialized(self, coro: Any) -> None:
+            await coro
+
+        def update_agent(self, session: Any, agent: Any) -> None:
+            raise RuntimeError("cannot swap")
+
+    class Session:
+        def __init__(self) -> None:
+            self.handlers: dict[str, Any] = {}
+
+        def on(self, event: str) -> Any:
+            return lambda fn: self.handlers.update({event: fn})
+
+    session = Session()
+    state = State()
+
+    def create_agent_fn(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("cannot build")
+
+    install_realtime_rescue(session, state, None, create_agent_fn)
+    session.handlers["error"](Event(ErrorStub()))
+    import asyncio
+
+    with caplog.at_level("ERROR"):
+        await asyncio.gather(*state.spawned)
+    assert "Could not move the call off the realtime model" in caplog.text
+
+
+async def test_a_resting_gemini_search_returns_the_tavily_rescue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.brain.bridge import BrainTask, Bridge
+    from src.brain.config import BrainModel
+    from src.brain.providers import BrainAnswer, BrainRequest
+
+    gemini = BrainModel("gemini-flash", "google", "gemini-3.5-flash", "simple")
+    rescued = (
+        BrainAnswer(text="from tavily", model_id="gemini-flash", model="gemini-3.5-flash"),
+        gemini,
+    )
+
+    class TinyBridge(Bridge):
+        def __init__(self) -> None:
+            self.config = default_brain()
+            self._keys = {"GOOGLE_API_KEY": "g"}
+            self._tavily_key = "tv"
+            self._resting = {"gemini-flash": 1e18}
+
+        def _resting_ids(self) -> set[str]:
+            return {"gemini-flash"}
+
+        async def _search_on_tavily(self, *args: Any, **kwargs: Any) -> Any:
+            return rescued
+
+    monkeypatch.setattr("src.brain.bridge.pick", lambda *a, **k: gemini)
+    task = BrainTask("t1", "T", "search something", "research", "simple")
+    request = BrainRequest(
+        task="search something", system="", difficulty="simple", native_search=True
+    )
+    answer, model = await TinyBridge()._ask_role(task, "research", "simple", request)
+    assert answer.text == "from tavily"
+    assert model is gemini

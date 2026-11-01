@@ -30,6 +30,8 @@ class FakeSession:
         self.replies: list[dict[str, Any]] = []
         self.handlers: dict[str, list] = {}
         self._fail_first = fail_first
+        self.current_agent: Any = None
+        self.userdata: Any = None
 
     def generate_reply(self, *, instructions: str, allow_interruptions: bool = True):
         if self._fail_first and not self.replies:
@@ -326,6 +328,54 @@ async def test_a_failing_greeting_falls_back_to_a_simple_one(caplog) -> None:
         await agent.on_enter()
 
     assert "Greet the user casually" in agent._fake_session.replies[-1]["instructions"]
+
+
+async def test_a_replaced_agent_does_not_greet() -> None:
+    """The successor greets; this one is already on its way out."""
+    agent = agent_with(skip_greeting=False)
+    agent.room = FakeRoom()
+    session = FakeSession()
+    session.current_agent = object()
+    agent._fake_session = session
+
+    await agent.on_enter()
+
+    assert session.replies == []
+
+
+async def test_a_replacement_during_greeting_skips_the_fallback() -> None:
+    """The first generate_reply failed because the session is draining."""
+    agent = agent_with(skip_greeting=False)
+    agent.room = FakeRoom()
+
+    class Draining(FakeSession):
+        def generate_reply(self, **kwargs: Any):
+            self.current_agent = object()
+            raise RuntimeError("speech scheduling is draining")
+
+    session = Draining()
+    agent._fake_session = session
+
+    await agent.on_enter()
+
+    assert session.replies == []
+
+
+def test_superseded_is_false_when_the_session_has_no_agent() -> None:
+    agent = agent_with(skip_greeting=True)
+
+    class Broken:
+        @property
+        def current_agent(self) -> Any:
+            raise RuntimeError("no activity")
+
+        @property
+        def userdata(self) -> Any:
+            return None
+
+    agent._fake_session = Broken()
+
+    assert agent._superseded() is False
 
 
 async def test_a_failing_fallback_greeting_is_logged_not_raised(

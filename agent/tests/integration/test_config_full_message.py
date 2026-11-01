@@ -472,6 +472,24 @@ async def test_sampling_knobs_alone_do_not_rebuild_the_pipeline(captured, create
     assert voice.llm_temperature == 0.3
 
 
+async def test_a_full_config_ignores_a_text_model_as_the_realtime_one(
+    captured, create_agent_fn
+) -> None:
+    """gemini-3.5-flash on Live closed the session with 1008."""
+    await run_config(
+        {
+            "voice": {
+                "type": "realtime",
+                "realtimeProvider": "google",
+                "realtimeModel": "gemini-3.5-flash",
+            }
+        },
+        create_agent_fn,
+    )
+
+    assert captured["config"].voice.realtime_model != "gemini-3.5-flash"
+
+
 async def test_a_text_model_never_replaces_the_realtime_model(captured, create_agent_fn) -> None:
     """gemini-3.5-flash as the Live model closed the session with 1008."""
     agent = FakeAgent()
