@@ -16,10 +16,10 @@
     "test:watch": "vitest"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.4.4",
+    "@cloudflare/vitest-plugin": "^1.4.11",
     "@types/node": "^26.6.5",
     "typescript": "^7.0.2",
-    "vitest": "^4.1.11",
+    "vitest": "^4.1.12",
     "wrangler": "4.151.1"
   },
   "dependencies": {
