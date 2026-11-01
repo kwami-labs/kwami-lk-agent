@@ -356,6 +356,7 @@ async def test_no_template_id_skips_straight_to_the_fallback() -> None:
 
     assert context.context_block is None
     assert context.summary == "SUMMARY"
+    # Only what zep-cloud 3.28 accepts; `mode`/`min_rating` raised TypeError.
     assert client.thread.context_calls[0] == {"thread_id": "s"}
 
 

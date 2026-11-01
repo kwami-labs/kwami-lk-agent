@@ -69,7 +69,7 @@ PROVIDER_ALIASES: dict[str, str] = {
 #: realtime pipeline has to be answered, not silently mistranslated.
 REALTIME_PROVIDER_DEFAULT_MODEL: dict[str, str] = {
     "openai": "gpt-realtime",
-    "google": "gemini-2.0-flash-exp",
+    "google": "gemini-3.8-live",
 }
 
 REALTIME_PROVIDER_ALIASES: dict[str, str] = {

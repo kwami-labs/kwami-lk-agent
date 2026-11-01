@@ -20,8 +20,11 @@ class TTSProviders:
     DEEPGRAM = "deepgram"
     GOOGLE = "google"
     RIME = "rime"
+    #: Gemini TTS through the Gemini API key (not Google Cloud TTS): the 30
+    #: prebuilt Gemini voices, steered by a spoken direction.
+    GEMINI = "gemini"
 
-    ALL = {OPENAI, ELEVENLABS, CARTESIA, DEEPGRAM, GOOGLE, RIME}
+    ALL = {OPENAI, ELEVENLABS, CARTESIA, DEEPGRAM, GOOGLE, RIME, GEMINI}
 
 
 class STTProviders:
@@ -31,8 +34,10 @@ class STTProviders:
     GOOGLE = "google"
     ELEVENLABS = "elevenlabs"
     CARTESIA = "cartesia"
+    #: Gemini live transcription through the Gemini API key.
+    GEMINI = "gemini"
 
-    ALL = {DEEPGRAM, OPENAI, ASSEMBLYAI, GOOGLE, ELEVENLABS, CARTESIA}
+    ALL = {DEEPGRAM, OPENAI, ASSEMBLYAI, GOOGLE, ELEVENLABS, CARTESIA, GEMINI}
 
 
 class LLMProviders:
@@ -121,7 +126,9 @@ class ElevenLabsVoices:
         CHRIS,
         BRIAN,
     }
-    DEFAULT = RACHEL
+    # Rachel is a library voice now, and the API refuses library voices on the
+    # free plan (402 paid_plan_required, 2026-10-18). George is still premade.
+    DEFAULT = GEORGE
 
 
 class CartesiaVoices:
@@ -221,21 +228,45 @@ class RealtimeVoices:
         "verse",
     }
     # Gemini Live voice names are capitalised and are matched case-insensitively
-    # by `resolve_realtime_voice`.
+    # by `resolve_realtime_voice`. All thirty prebuilt voices, as listed by
+    # livekit-plugins-google's `Voice` literal; the original eight rejected the
+    # deeper, calmer ones (Iapetus, Algieba, Sadaltager, Schedar...).
     GOOGLE = {
+        "Achernar",
+        "Achird",
+        "Algenib",
+        "Algieba",
+        "Alnilam",
         "Aoede",
+        "Autonoe",
+        "Callirrhoe",
         "Charon",
+        "Despina",
+        "Enceladus",
+        "Erinome",
         "Fenrir",
+        "Gacrux",
+        "Iapetus",
         "Kore",
+        "Laomedeia",
         "Leda",
         "Orus",
+        "Pulcherrima",
         "Puck",
+        "Rasalgethi",
+        "Sadachbia",
+        "Sadaltager",
+        "Schedar",
+        "Sulafat",
+        "Umbriel",
+        "Vindemiatrix",
         "Zephyr",
+        "Zubenelgenubi",
     }
 
     BY_PROVIDER = {"openai": OPENAI, "google": GOOGLE}
 
-    DEFAULTS = {"openai": "marin", "google": "Puck"}
+    DEFAULTS = {"openai": "marin", "google": "Charon"}
 
 
 def resolve_realtime_voice(provider: str, voice: str) -> str | None:

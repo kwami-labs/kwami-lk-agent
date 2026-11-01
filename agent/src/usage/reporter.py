@@ -2,18 +2,23 @@
 
 Called when a session ends to report AI resource consumption
 so the credits system can deduct from the user's balance.
+
+Without a Kwami API (LiveKit Cloud writing the user's Supabase directly),
+`SupabaseUsageReporter` records the same summary as rows in `agent_usage`:
+counted, not billed. `create_usage_reporter()` picks one.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
-from ..settings import get_settings
+from ..settings import Settings, get_settings
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
+    from ..adapters.supabase import SupabaseClient
     from ..domain import UsageTracker
 
 logger = get_logger("usage.reporter")
@@ -47,6 +52,8 @@ class UsageReporter:
         user_id: str,
         session_id: str,
         tracker: UsageTracker,
+        *,
+        kwami_id: str | None = None,
     ) -> bool:
         """Send usage report to the API.
 
@@ -115,3 +122,71 @@ class UsageReporter:
         except Exception:
             logger.exception("Failed to send usage report")
             return False
+
+
+#: Summary keys that become columns; the rest of each item goes to `details`.
+_COLUMN_KEYS = frozenset({"model_type", "model_id", "units_used"})
+
+
+def _split_model_id(model_id: str) -> tuple[str, str]:
+    """`"openai/gpt-5.2"` -> ("openai", "gpt-5.2"). No slash: no provider."""
+    provider, sep, model = model_id.partition("/")
+    return (provider, model) if sep and model else ("", model_id)
+
+
+class SupabaseUsageReporter:
+    """Records a session's usage in the user's `agent_usage` table.
+
+    One row per model, written once when the session ends. The owner is read
+    from the kwami's row when there is one: the participant identity this is
+    handed can be the kwami id itself (see `config_handler`), and a uuid that
+    is not a user would fail the foreign key and lose every row.
+    """
+
+    def __init__(self, store: SupabaseClient) -> None:
+        self._store = store
+
+    async def report(
+        self,
+        user_id: str,
+        session_id: str,
+        tracker: UsageTracker,
+        *,
+        kwami_id: str | None = None,
+    ) -> bool:
+        from ..adapters.supabase import as_user_id, kwami_owner
+
+        if not tracker.has_usage:
+            logger.info("No usage to record for session %s", session_id)
+            return True
+
+        owner = await kwami_owner(self._store, kwami_id) if kwami_id else None
+        rows: list[dict[str, Any]] = []
+        for item in tracker.get_usage_summary():
+            provider, model = _split_model_id(str(item.get("model_id") or "unknown"))
+            rows.append(
+                {
+                    "user_id": owner or as_user_id(user_id),
+                    "kwami_id": kwami_id or None,
+                    "session_id": session_id,
+                    "provider": provider,
+                    "model": model,
+                    "kind": item.get("model_type"),
+                    "units": float(item.get("units_used") or 0.0),
+                    "details": {k: v for k, v in item.items() if k not in _COLUMN_KEYS},
+                }
+            )
+        stored = await self._store.insert("agent_usage", rows, what="the session's usage")
+        if stored:
+            logger.info("Usage recorded in Supabase: %d row(s) for %s", len(rows), session_id)
+        return stored
+
+
+def create_usage_reporter(settings: Settings | None = None) -> Any:
+    """`agent_usage` in Supabase when there is no Kwami API, the API otherwise."""
+    from ..adapters.supabase import direct_supabase
+
+    store = direct_supabase(settings)
+    if store is not None:
+        return SupabaseUsageReporter(store)
+    return UsageReporter()

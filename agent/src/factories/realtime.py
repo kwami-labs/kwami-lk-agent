@@ -8,42 +8,113 @@ OpenAI SDK. This module also follows the fallback-and-log shape of
 to a working default instead of taking the session down.
 """
 
+from typing import Any, cast
+
+from livekit.agents.types import NOT_GIVEN
 from livekit.plugins import openai
 
-try:
-    from livekit.plugins import google  # type: ignore[attr-defined]
-except ImportError:
-    google = None
+from ..constants import resolve_realtime_voice
+from ..domain import KwamiVoiceConfig
+from ..utils.logging import get_logger
+from ..utils.provider import strip_model_prefix
+from .optional import optional_plugin
 
 try:
     from openai.types.beta.realtime.session import TurnDetection
 except ImportError:  # pragma: no cover - openai SDK is a hard dependency
     TurnDetection = None  # type: ignore
 
-from typing import Any, cast
+try:
+    from google.genai import types as genai_types
+except ImportError:  # pragma: no cover - arrives with livekit-plugins-google
+    genai_types = None  # type: ignore
 
-from ..domain import KwamiVoiceConfig
-from ..utils.logging import get_logger
-from ..utils.provider import strip_model_prefix
+# Guarded like the other factories: typed `Any`, so mypy accepts the None branch
+# whether or not the plugin happens to be installed where it runs.
+google = optional_plugin("google")
 
 logger = get_logger("factories")
 
 DEFAULT_OPENAI_REALTIME_MODEL = "gpt-realtime"
 DEFAULT_OPENAI_REALTIME_VOICE = "marin"
-DEFAULT_GOOGLE_REALTIME_MODEL = "gemini-2.0-flash-exp"
-DEFAULT_GOOGLE_REALTIME_VOICE = "Puck"
+DEFAULT_GOOGLE_REALTIME_MODEL = "gemini-3.8-live"
+DEFAULT_GOOGLE_REALTIME_VOICE = "Charon"
 
 
 def _server_vad(config: KwamiVoiceConfig):
-    """Build server-side VAD options, or None to let the provider default apply."""
-    if TurnDetection is None:
-        return None
+    """OpenAI's server-side turn detection, or NOT_GIVEN for the provider default.
+
+    It was always `server_vad` with the Silero settings -- a 0.5 threshold and
+    300 ms of silence -- which a door or a keyboard crosses: the model took the
+    noise for the user starting to talk, cut its own answer, and with nothing
+    said afterwards never replied. `semantic_vad` decides on what was said, not
+    on loudness, and still interrupts for real speech.
+    """
+    if TurnDetection is None or config.turn_detection == "none":
+        return NOT_GIVEN
+    if config.turn_detection == "server_vad":
+        return TurnDetection(
+            type="server_vad",
+            threshold=config.vad_threshold,
+            prefix_padding_ms=300,
+            silence_duration_ms=int(config.vad_min_silence_duration * 1000),
+        )
     return TurnDetection(
-        type="server_vad",
-        threshold=config.vad_threshold,
-        prefix_padding_ms=300,
-        silence_duration_ms=int(config.vad_min_silence_duration * 1000),
+        type="semantic_vad",
+        eagerness="auto",
+        create_response=True,
+        interrupt_response=config.allow_interruptions,
     )
+
+
+def _gemini_activity_detection(config: KwamiVoiceConfig) -> Any:
+    """Gemini Live's server-side turn detection, or NOT_GIVEN for its default.
+
+    Live's default start-of-speech sensitivity is high: background noise counts
+    as the user barging in, and Live drops the answer it was speaking. Low
+    sensitivity needs clearer speech to start a turn; the end of the turn is
+    left to Live's default, which does not cut Spanish pauses short.
+    """
+    if config.turn_detection == "none" or genai_types is None:
+        return NOT_GIVEN
+    start = (
+        genai_types.StartSensitivity.START_SENSITIVITY_HIGH
+        if config.turn_detection == "server_vad"
+        else genai_types.StartSensitivity.START_SENSITIVITY_LOW
+    )
+    return genai_types.RealtimeInputConfig(
+        automatic_activity_detection=genai_types.AutomaticActivityDetection(
+            start_of_speech_sensitivity=start,
+            prefix_padding_ms=300,
+        ),
+        activity_handling=(
+            genai_types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS
+            if config.allow_interruptions
+            else genai_types.ActivityHandling.NO_INTERRUPTION
+        ),
+    )
+
+
+def _realtime_voice(provider: str, voice: str | None, default: str) -> str:
+    """The provider's spelling of `voice`, or `default` if it doesn't offer it.
+
+    A voice saved for another provider (the config default is OpenAI's
+    "alloy") makes Gemini Live close the socket with 1007 at connect, which on
+    the realtime pipeline means a silent agent rather than an error the user
+    can see.
+    """
+    if not voice:
+        return default
+    resolved = resolve_realtime_voice(provider, voice)
+    if resolved is None:
+        logger.warning(
+            "Realtime voice '%s' is not available for provider '%s'; using '%s'.",
+            voice,
+            provider,
+            default,
+        )
+        return default
+    return resolved
 
 
 def _default_openai_realtime():
@@ -62,7 +133,9 @@ def create_realtime_model(config: KwamiVoiceConfig):
         if provider == "openai":
             return openai.realtime.RealtimeModel(
                 model=model or DEFAULT_OPENAI_REALTIME_MODEL,
-                voice=config.realtime_voice or DEFAULT_OPENAI_REALTIME_VOICE,
+                voice=_realtime_voice(
+                    provider, config.realtime_voice, DEFAULT_OPENAI_REALTIME_VOICE
+                ),
                 temperature=config.llm_temperature,
                 # Validated by the provider; the config carries plain strings.
                 modalities=cast(Any, config.realtime_modalities or ["text", "audio"]),
@@ -78,8 +151,11 @@ def create_realtime_model(config: KwamiVoiceConfig):
                 return _default_openai_realtime()
             return google.beta.realtime.RealtimeModel(
                 model=model or DEFAULT_GOOGLE_REALTIME_MODEL,
-                voice=config.realtime_voice or DEFAULT_GOOGLE_REALTIME_VOICE,
+                voice=_realtime_voice(
+                    provider, config.realtime_voice, DEFAULT_GOOGLE_REALTIME_VOICE
+                ),
                 temperature=config.llm_temperature,
+                realtime_input_config=_gemini_activity_detection(config),
             )
 
         logger.warning(

@@ -45,6 +45,12 @@ class AgentDeps:
     # is still a valid container; tools degrade to "not available here" rather
     # than raising.
     reconfigure: Any = None
+    #: The brain bridge (`brain/bridge.py`): owned by the job so delegated work
+    #: survives agent swaps and the end of the call.
+    bridge: Any = None
+    #: The configured agent owes the user a greeting until one is heard. A
+    #: rebuild right after connect cancels it; the next agent then gives it.
+    greeting_owed: bool = False
 
 
 def deps_from_context(context: Any) -> AgentDeps | None:

@@ -159,8 +159,26 @@ async def test_audio_input_and_output_are_both_enabled(fake_session, vad) -> Non
     await entrypoint(ctx)
 
     options = fake_session.instances[-1].started_with["room_options"]
-    assert options.audio_input is True
+    assert options.audio_input
     assert options.audio_output is True
+
+
+async def test_the_microphone_is_noise_cancelled_without_a_second_gain_stage(
+    fake_session, vad
+) -> None:
+    """Noise that reaches the VAD reads as the user talking and cuts the agent
+    off; the server-side gain stage lifted that noise in every pause."""
+    from livekit.agents.voice.room_io.types import NoiseCancellationParams
+    from livekit.rtc import NoiseCancellationOptions
+
+    ctx = FakeCtx(FakeRoom(), vad)
+
+    await entrypoint(ctx)
+
+    audio_input = fake_session.instances[-1].started_with["room_options"].audio_input
+    assert audio_input.auto_gain_control is False
+    selected = audio_input.noise_cancellation(NoiseCancellationParams(object(), object()))
+    assert isinstance(selected, NoiseCancellationOptions)
 
 
 async def test_the_dependencies_reach_the_session_userdata(fake_session, vad) -> None:
@@ -199,7 +217,10 @@ async def test_metrics_are_routed_to_the_usage_tracker(fake_session, vad) -> Non
 
     await entrypoint(ctx)
 
-    assert "metrics_collected" in fake_session.instances[-1].handlers
+    # session_usage_updated replaced the deprecated metrics_collected (1.8).
+    handlers = fake_session.instances[-1].handlers
+    assert "session_usage_updated" in handlers
+    assert "metrics_collected" not in handlers
 
 
 async def test_data_messages_are_routed(fake_session, vad) -> None:
@@ -335,11 +356,11 @@ async def test_the_identity_is_resolved_once_the_room_is_connected(fake_session,
 async def test_a_metrics_event_reaches_the_usage_tracker(fake_session, vad) -> None:
     ctx = FakeCtx(FakeRoom(), vad)
     await entrypoint(ctx)
-    handler = fake_session.instances[-1].handlers["metrics_collected"][0]
+    handler = fake_session.instances[-1].handlers["session_usage_updated"][0]
 
-    # A metrics object the router does not recognise must still not raise --
-    # metrics arrive from the framework on a hot path.
-    handler(type("Event", (), {"metrics": object()})())
+    # A usage object the tracker does not recognise must still not raise --
+    # usage arrives from the framework on a hot path.
+    handler(type("Event", (), {"usage": object()})())
 
 
 async def test_a_router_exception_does_not_escape_the_data_handler(
@@ -395,3 +416,44 @@ async def test_an_identity_already_resolved_is_not_overwritten(
     await entrypoint(ctx)
 
     assert captured[-1].user_identity == "already-known"
+
+
+# =============================================================================
+# The brain's bridge: one per room, closed when the session ends
+# =============================================================================
+
+USER_ID = "11111111-1111-4111-8111-111111111111"
+
+
+async def test_the_bridge_learns_the_user_but_not_other_agents(fake_session, vad) -> None:
+    from livekit import rtc
+
+    ctx = FakeCtx(FakeRoom("room-brain"), vad)
+    await entrypoint(ctx)
+    bridge = main_module._bridges["room-brain"]
+    handler = ctx.room.handlers["participant_connected"][0]
+
+    agent = type(
+        "P", (), {"identity": USER_ID, "kind": rtc.ParticipantKind.PARTICIPANT_KIND_AGENT}
+    )()
+    handler(agent)
+    assert bridge.user_id == ""
+
+    human = type(
+        "P", (), {"identity": USER_ID, "kind": rtc.ParticipantKind.PARTICIPANT_KIND_STANDARD}
+    )()
+    handler(human)
+    assert bridge.user_id == USER_ID
+    await main_module._close_brain(ctx)
+
+
+async def test_the_bridge_is_closed_once_when_the_session_ends(fake_session, vad) -> None:
+    ctx = FakeCtx(FakeRoom("room-close"), vad)
+    await entrypoint(ctx)
+    bridge = main_module._bridges["room-close"]
+
+    await main_module._close_brain(ctx)
+    assert "room-close" not in main_module._bridges
+    assert bridge._closed is True
+    # A second end-of-session callback finds nothing to close.
+    await main_module._close_brain(ctx)

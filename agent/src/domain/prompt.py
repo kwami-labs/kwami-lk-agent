@@ -14,6 +14,8 @@ from __future__ import annotations
 from typing import Any
 
 from .capabilities import build_capability_guidance
+from .charter import address_directive, build_charter_guidance
+from .tool_gating import BRAIN_SEARCH_TOOLS
 
 # Memory context is untrusted in length; cap what reaches the system prompt.
 MAX_SYSTEM_MEMORY_CONTEXT_CHARS = 2200
@@ -40,9 +42,50 @@ LANGUAGE_NAMES: dict[str, str] = {
     "ca": "Catalan",
 }
 
+#: Regional variants worth naming in full. Collapsing `es-ES` to "Spanish"
+#: leaves the model on its default, which for voice is a neutral or Latin
+#: American register -- the opposite of what someone choosing Spain asked for.
+#: Only variants whose difference the model can act on belong here.
+LANGUAGE_VARIANT_NAMES: dict[str, str] = {
+    "es-es": "Castilian Spanish (Spain)",
+}
+
+#: What the variant means in practice, said once after the directive. The name
+#: alone moves vocabulary; the pronunciation has to be asked for explicitly.
+LANGUAGE_VARIANT_NOTES: dict[str, str] = {
+    "es-es": (
+        "Use peninsular vocabulary and pronunciation: distinguish the c/z sound "
+        "from s, and never use Latin American forms such as computadora, celular "
+        "or ahorita."
+    ),
+}
+
 #: English is the model's default behaviour, so saying so adds prompt with no
 #: effect. Every other language needs an explicit instruction.
 DEFAULT_LANGUAGE = "en"
+
+
+def language_name(language: str | None) -> str | None:
+    """The name to put in a prompt for `language`, or None if unknown.
+
+    A known regional variant keeps its full name; any other variant resolves to
+    its base language. English, the default, resolves to None as well, because
+    naming it changes nothing.
+    """
+    code = (language or "").strip().lower()
+    if not code:
+        return None
+    if code in LANGUAGE_VARIANT_NAMES:
+        return LANGUAGE_VARIANT_NAMES[code]
+    # Clients send regional variants (`pt-BR`, `en-GB`). Resolve to the base
+    # language *before* comparing against the default, or `en-GB` earns a
+    # "Speak and write in English" line that says nothing the model does not
+    # already do.
+    if code not in LANGUAGE_NAMES:
+        code = code.split("-", 1)[0]
+    if code == DEFAULT_LANGUAGE:
+        return None
+    return LANGUAGE_NAMES.get(code)
 
 
 def language_directive(language: str | None) -> str:
@@ -57,25 +100,16 @@ def language_directive(language: str | None) -> str:
     Returns "" for English and for anything unrecognised, rather than guessing:
     an instruction naming a language the model cannot place is worse than none.
     """
-    code = (language or "").strip().lower()
-    if not code:
-        return ""
-    # Clients send regional variants (`pt-BR`, `en-GB`). Resolve to the base
-    # language *before* comparing against the default, or `en-GB` earns a
-    # "Speak and write in English" line that says nothing the model does not
-    # already do.
-    if code not in LANGUAGE_NAMES:
-        code = code.split("-", 1)[0]
-    if code == DEFAULT_LANGUAGE:
-        return ""
-    name = LANGUAGE_NAMES.get(code)
+    name = language_name(language)
     if not name:
         return ""
-    return (
+    directive = (
         f"\nSpeak and write in {name}. Keep to {name} for the whole conversation "
         "unless the user asks for another language, even if they write to you in "
         "a different one."
     )
+    note = LANGUAGE_VARIANT_NOTES.get((language or "").strip().lower())
+    return f"{directive} {note}" if note else directive
 
 
 RESPONSE_LENGTH_GUIDE: dict[str, str] = {
@@ -127,61 +161,128 @@ TRAIT_WEIGHTS: dict[str, float] = {
 TRAIT_MIN_MAGNITUDE = 10.0
 MAX_TRAIT_DIRECTIVES = 5
 
-_STATIC_GUIDANCE_PARTS: tuple[str, ...] = (
-    "\n\nYou are interacting via voice. Keep responses concise and conversational.",
-    "Do not use emojis, asterisks, markdown, or other special characters.",
-    "Speak naturally as if having a real conversation.",
-    "\nWhen users share their name, remember it and use it naturally in conversation.",
-    "Be genuinely interested in learning about who you're talking to.",
-    "\nYou can reconfigure yourself mid-conversation, and the conversation is kept: "
-    "change_voice or change_speaking_speed for how you sound, change_realtime_voice on the "
-    "realtime pipeline, change_ai_model to move to another model or provider (the user can "
-    "say a family name like Claude, Gemini or Groq, or an exact model id), "
-    "switch_pipeline_mode to move between the standard and realtime pipelines, and "
-    "change_language for the conversation language. Do it when asked rather than "
-    "describing which setting to open. Use get_pipeline_status, list_available_models or "
-    "list_available_voices when you need to know what you are running or could switch to.",
-    "\nWhen the user asks to find products, gifts, or things to buy (e.g. bags, clothes, items), use the product_search tool first so they see actual product cards with product image, name, and price—not store website links. If product_search says it is not configured, use web_search with search_for_products=True instead.",
-    "Remember what the user searched for; use your memory of past searches in follow-up answers.",
-    "If the user says to discard, remove, or dismiss a result (e.g. 'discard the first one', 'remove that card'), call dismiss_search_result with the 0-based index (first card = 0, second = 1).",
-    "If the user wants more like a specific result (e.g. 'find more like this', 'similar to that one'), run web_search with a query like 'similar to [that result title] buy' or 'products like [title]' and set search_for_products=True.",
-    "\nYou can browse the web for the user. Use navigate_to to open a website. "
-    "The page opens in a live browser panel embedded in the app. The user sees "
-    "everything you do in real time. Use read_navigation_page to see page content and interactive elements, then "
-    "click_in_navigation to click elements (prefer element_id like 'el-5'), "
-    "type_in_navigation to type text, press_key_in_navigation for keys like Enter, "
-    "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along.",
-    "\nWhen the user asks you to research, investigate, compare or explain something in "
-    "depth, use deep_research rather than web_search: it runs several angles at once and "
-    "comes back with a briefing. Summarise it conversationally in your own words and offer "
-    "to go deeper -- never read it out verbatim.",
-    "\nFor markets: get_market_quote gives an exact, current price for a stock, ETF, index, "
-    "currency or crypto, which a search snippet does not. Use deep_research for the story "
-    "behind a move. You give information, not financial advice -- say so if you are asked to "
-    "choose for them.",
-    "\nTo play music or video, use play_media with what the user asked for -- it opens the "
-    "service, picks the first result and starts it playing, which navigate_to alone cannot "
-    "do. Then control_playback (pause, resume, stop, mute, unmute, restart), "
-    "set_playback_volume and get_now_playing. Say what you are putting on.",
-    "\nTo trade, the order goes through three steps and they cannot be skipped. "
-    "prepare_trade validates it, prices it and gives you a confirmation code -- it sends "
-    "nothing. Read the order and the estimated value back to the user in full, then ask "
-    "them to say the code aloud. open_trade_ticket puts their own broker on screen. "
-    "submit_trade takes the code AS THE USER SPOKE IT; never pass a code you produced "
-    "yourself, and if you did not clearly hear the ticker, the side or the quantity, ask "
-    "again rather than preparing an order. cancel_prepared_trade drops it.",
-    "ADVANCED NAVIGATION STRATEGIES:\n"
-    "1. DIRECT SEARCHING: If the user asks you to search for something on a major site (YouTube, Google, Amazon, etc.), "
-    "DO NOT try to navigate to the homepage and click the search bar. Instead, navigate DIRECTLY to the search URL. "
-    "Example: for YouTube, use navigate_to('https://www.youtube.com/results?search_query=song+name').\n"
-    "2. COMPLEX DOMs: Modern sites (like YouTube) hide elements inside Shadow DOMs that read_navigation_page cannot see. "
-    "If you cannot find the element you need to click, use the run_js_in_navigation tool to execute JavaScript directly "
-    "to find and click the element (e.g., `document.querySelector('ytd-video-renderer a#video-title').click()`).\n"
-    "Use close_navigation when done.",
+#: The fixed guidance, as (tools, parts) blocks. A block whose tools are all
+#: withheld for missing credentials is left out: telling the model to browse
+#: when `navigate_to` is gone makes it offer what it cannot do, and on Gemini
+#: Live every withheld paragraph also dilutes the persona at the top. An empty
+#: tool set means the block always applies.
+_GUIDANCE_BLOCKS: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
+    (
+        frozenset(),
+        (
+            "\n\nYou are interacting via voice. Keep responses concise and conversational.",
+            "Do not use emojis, asterisks, markdown, or other special characters.",
+            "Speak naturally as if having a real conversation.",
+            "\nWhen users share their name, remember it and use it naturally in conversation.",
+            "Be genuinely interested in learning about who you're talking to.",
+            "\nYou can reconfigure yourself mid-conversation, and the conversation is kept: "
+            "change_voice or change_speaking_speed for how you sound, change_realtime_voice on the "
+            "realtime pipeline, change_ai_model to move to another model or provider (the user can "
+            "say a family name like Claude, Gemini or Groq, or an exact model id), "
+            "switch_pipeline_mode to move between the standard and realtime pipelines, and "
+            "change_language for the conversation language. Do it when asked rather than "
+            "describing which setting to open. Use get_pipeline_status, list_available_models or "
+            "list_available_voices when you need to know what you are running or could switch to.",
+        ),
+    ),
+    (
+        frozenset({"product_search", "web_search"}),
+        (
+            "\nWhen the user asks to find products, gifts, or things to buy (e.g. bags, clothes, items), use the product_search tool first so they see actual product cards with product image, name, and price—not store website links. If product_search says it is not configured, use web_search with search_for_products=True instead.",
+            "Remember what the user searched for; use your memory of past searches in follow-up answers.",
+            "If the user says to discard, remove, or dismiss a result (e.g. 'discard the first one', 'remove that card'), call dismiss_search_result with the 0-based index (first card = 0, second = 1).",
+            "If the user wants more like a specific result (e.g. 'find more like this', 'similar to that one'), run web_search with a query like 'similar to [that result title] buy' or 'products like [title]' and set search_for_products=True.",
+        ),
+    ),
+    (
+        frozenset({"navigate_to"}),
+        (
+            "\nYou can browse the web for the user. Use navigate_to to open a website. "
+            "The page opens in a live browser panel embedded in the app. The user sees "
+            "everything you do in real time. Use read_navigation_page to see page content and interactive elements, then "
+            "click_in_navigation to click elements (prefer element_id like 'el-5'), "
+            "type_in_navigation to type text, press_key_in_navigation for keys like Enter, "
+            "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along.",
+        ),
+    ),
+    (
+        frozenset({"deep_research"}),
+        (
+            "\nWhen the user asks you to research, investigate, compare or explain something in "
+            "depth, use deep_research rather than web_search: it runs several angles at once and "
+            "comes back with a briefing. Summarise it conversationally in your own words and offer "
+            "to go deeper -- never read it out verbatim.",
+        ),
+    ),
+    (
+        frozenset({"get_market_quote"}),
+        (
+            "\nFor markets: get_market_quote gives an exact, current price for a stock, ETF, index, "
+            "currency or crypto, which a search snippet does not. Use deep_research for the story "
+            "behind a move. You give information, not financial advice -- say so if you are asked to "
+            "choose for them.",
+        ),
+    ),
+    (
+        frozenset({"play_media"}),
+        (
+            "\nTo play music or video, use play_media with what the user asked for -- it opens the "
+            "service, picks the first result and starts it playing, which navigate_to alone cannot "
+            "do. Then control_playback (pause, resume, stop, mute, unmute, restart), "
+            "set_playback_volume and get_now_playing. Say what you are putting on.",
+        ),
+    ),
+    (
+        frozenset({"prepare_trade"}),
+        (
+            "\nTo trade, the order goes through three steps and they cannot be skipped. "
+            "prepare_trade validates it, prices it and gives you a confirmation code -- it sends "
+            "nothing. Read the order and the estimated value back to the user in full, then ask "
+            "them to say the code aloud. open_trade_ticket puts their own broker on screen. "
+            "submit_trade takes the code AS THE USER SPOKE IT; never pass a code you produced "
+            "yourself, and if you did not clearly hear the ticker, the side or the quantity, ask "
+            "again rather than preparing an order. cancel_prepared_trade drops it.",
+        ),
+    ),
+    (
+        frozenset({"navigate_to"}),
+        (
+            "ADVANCED NAVIGATION STRATEGIES:\n"
+            "1. DIRECT SEARCHING: If the user asks you to search for something on a major site (YouTube, Google, Amazon, etc.), "
+            "DO NOT try to navigate to the homepage and click the search bar. Instead, navigate DIRECTLY to the search URL. "
+            "Example: for YouTube, use navigate_to('https://www.youtube.com/results?search_query=song+name').\n"
+            "2. COMPLEX DOMs: Modern sites (like YouTube) hide elements inside Shadow DOMs that read_navigation_page cannot see. "
+            "If you cannot find the element you need to click, use the run_js_in_navigation tool to execute JavaScript directly "
+            "to find and click the element (e.g., `document.querySelector('ytd-video-renderer a#video-title').click()`).\n"
+            "Use close_navigation when done.",
+        ),
+    ),
+)
+
+_STATIC_GUIDANCE_PARTS: tuple[str, ...] = tuple(
+    part for _, block_parts in _GUIDANCE_BLOCKS for part in block_parts
 )
 
 # Joined once, at import, rather than rebuilt on every call.
 STATIC_GUIDANCE = "\n".join(_STATIC_GUIDANCE_PARTS)
+
+
+def static_guidance(unavailable_tools: Any = ()) -> str:
+    """The fixed guidance, minus the blocks for tools this deployment withholds.
+
+    With nothing withheld this is `STATIC_GUIDANCE` itself, so the common path
+    still does no work per call.
+    """
+    unavailable = frozenset(unavailable_tools or ())
+    if not unavailable:
+        return STATIC_GUIDANCE
+    return "\n".join(
+        part
+        for tools, block_parts in _GUIDANCE_BLOCKS
+        if not tools or tools - unavailable
+        for part in block_parts
+    )
+
 
 #: Client tools the *old* fixed UI block depended on. Kept as a name so the
 #: contract tests that assert "guidance is gated on registration" still have
@@ -189,6 +290,15 @@ STATIC_GUIDANCE = "\n".join(_STATIC_GUIDANCE_PARTS)
 #: `domain.capabilities`, because a single block naming four domains described
 #: about a sixth of what the app actually registers.
 UI_CONTROL_TOOL_NAMES = frozenset({"set_ui_control", "list_ui_controls"})
+
+#: Closes a prompt that opens with a written persona. Everything between the two
+#: is operational and in English, and a realtime model weighs the end of its
+#: instructions heavily: without this, a Spanish butler drifts into the
+#: assistant register of the tool notes by the third turn.
+PERSONA_REMINDER = (
+    "\nStay in the character, language and register set out at the start of these "
+    "instructions. The notes in between describe what you can do, not how you speak."
+)
 
 _MEMORY_HEADER_PARTS: tuple[str, ...] = (
     "\n\n## Your Memory\n",
@@ -246,10 +356,46 @@ def describe_emotional_traits(emotional_traits: Any) -> str | None:
     )
 
 
+#: The user picks the voice; the agent never switches it (2026-10-09).
+VOICE_LOCK_NOTE = (
+    "\nYour voice is fixed by the user. You cannot change your voice, its character "
+    "or the voice engine; if asked, say it is changed from the Voice panel."
+)
+
+
+#: The voice only talks; the brain works (user's rule, 2026-10-09). Placed
+#: after the static notes so it overrides "search the web yourself" habits.
+BRIDGE_GUIDANCE = (
+    "\nYou are the voice, not the worker: you listen, talk and turn your brain's results "
+    "into natural speech. Your brain is other models. Do no task yourself -- looking "
+    "something up, current facts, prices, news, analysis, drafting, calculations, "
+    "programming all go through delegate_task, with an honest difficulty (simple, "
+    "normal, hard). Never answer from memory what could have changed. Say in a few "
+    "words that you are on it and keep talking; the result arrives on its own at the "
+    "next pause. Set important=true for money, investments, security or hard "
+    "decisions: that convenes the council. Conversation, small talk, jokes, a curiosity, "
+    "opinions and what is already "
+    "in this conversation you answer yourself, and so is settled general knowledge that "
+    "cannot have changed (a capital, a definition, a historical date): delegating that "
+    "only makes the user wait. Until a delegated result arrives, never state or guess "
+    "any figure, name or fact it will contain -- say you are checking, nothing more."
+)
+
+#: Added when the voice has no search tool of its own: a model told to "look it
+#: up" with nothing to look it up with otherwise says it cannot browse.
+SEARCH_DELEGATION_NOTE = (
+    "\nYou have no search tool: every web search, product search or research is a "
+    "delegate_task (kind research). Never say you cannot search the internet."
+)
+
+
 def build_system_prompt(
     soul: Any,
     memory_context: str | None = None,
     client_tool_names: Any = (),
+    unavailable_tools: Any = (),
+    voice_style: str = "",
+    voice_locked: bool = False,
 ) -> str:
     """Build the full system prompt for a soul, optionally with memory context.
 
@@ -260,6 +406,11 @@ def build_system_prompt(
             Capability guidance is assembled from exactly these, so the model is
             never told to call something that does not exist -- and, just as
             importantly, is told about everything that does.
+        unavailable_tools: Built-in tools withheld for missing credentials. Their
+            guidance is left out for the same reason.
+        voice_style: How the realtime voice should sound (pace, pitch, diction).
+            Gemini Live has no custom voices, so this direction is how a
+            character's voice is shaped on top of a prebuilt one.
     """
     parts: list[str] = []
 
@@ -278,7 +429,22 @@ def build_system_prompt(
     if soul.conversation_style:
         parts.append(f"\nConversation style: {soul.conversation_style}")
 
-    if soul.response_length in RESPONSE_LENGTH_GUIDE:
+    if voice_style.strip():
+        # Near the top: on a realtime model the start of the prompt is what holds.
+        parts.append(f"\nHow your voice sounds when you speak: {voice_style.strip()}")
+
+    if voice_locked:
+        parts.append(VOICE_LOCK_NOTE)
+
+    charter = getattr(soul, "charter", None)
+    active_charter = charter if charter is not None and charter.enabled else None
+    charter_on = active_charter is not None
+
+    # An adaptive charter replaces the fixed length: "2-4 sentences" and "match
+    # the length to the question" in one prompt is a contradiction the model
+    # resolves differently every turn.
+    adaptive = active_charter is not None and active_charter.adaptive_length
+    if not adaptive and soul.response_length in RESPONSE_LENGTH_GUIDE:
         parts.append(f"\n{RESPONSE_LENGTH_GUIDE[soul.response_length]}")
 
     if soul.emotional_tone in EMOTIONAL_TONE_GUIDE:
@@ -288,7 +454,19 @@ def build_system_prompt(
     if emotion_profile:
         parts.append(emotion_profile)
 
-    parts.append(STATIC_GUIDANCE)
+    # Behaviour comes straight after the persona and before the tool notes: on a
+    # realtime model the top of the prompt is what holds.
+    charter_guidance = build_charter_guidance(charter, client_tool_names)
+    if charter_guidance:
+        parts.append(charter_guidance)
+
+    parts.append(static_guidance(unavailable_tools))
+
+    withheld = set(unavailable_tools or ())
+    if "delegate_task" not in withheld:
+        parts.append(BRIDGE_GUIDANCE)
+        if withheld >= BRAIN_SEARCH_TOOLS:
+            parts.append(SEARCH_DELEGATION_NOTE)
 
     capability_guidance = build_capability_guidance(client_tool_names)
     if capability_guidance:
@@ -297,5 +475,14 @@ def build_system_prompt(
     if memory_context:
         parts.append(MEMORY_HEADER)
         parts.append(memory_context[:MAX_SYSTEM_MEMORY_CONTEXT_CHARS])
+
+    if soul.system_prompt or charter_on:
+        parts.append(PERSONA_REMINDER)
+    if active_charter is not None:
+        # Repeated last because the form of address is the first thing a long
+        # tool section makes a model forget.
+        address = address_directive(active_charter)
+        if address:
+            parts.append(address)
 
     return "\n".join(parts)

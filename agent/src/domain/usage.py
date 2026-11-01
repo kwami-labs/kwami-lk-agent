@@ -94,6 +94,91 @@ def _get_float_metric(metrics: Any, *names: str) -> float:
     return 0.0
 
 
+#: Audio tokens per minute, (input, output), for realtime models whose usage
+#: only reports tokens. OpenAI bills a token per 100 ms heard and per 50 ms
+#: spoken; Gemini Live 32 tokens a second either way. Unknown providers get
+#: OpenAI's rates.
+_AUDIO_TOKENS_PER_MINUTE: dict[str, tuple[float, float]] = {
+    "openai": (600.0, 1200.0),
+    "google": (1920.0, 1920.0),
+    "gemini": (1920.0, 1920.0),
+}
+
+
+def _model_id(provider: str, model: str) -> str:
+    if provider and model:
+        return f"{provider}/{model}"
+    return model or provider or "unknown"
+
+
+def _audio_rates(provider: str) -> tuple[float, float]:
+    lowered = provider.lower()
+    for name, rates in _AUDIO_TOKENS_PER_MINUTE.items():
+        if name in lowered:
+            return rates
+    return _AUDIO_TOKENS_PER_MINUTE["openai"]
+
+
+def _entry_from_model_usage(item: Any) -> ModelUsage | None:
+    """One `ModelUsage` from a livekit `LLMModelUsage`/`STTModelUsage`/`TTSModelUsage`."""
+    kind = getattr(item, "type", None)
+    provider = str(getattr(item, "provider", "") or "")
+    model_id = _model_id(provider, str(getattr(item, "model", "") or ""))
+    if kind == "llm_usage":
+        input_tokens = _get_int_metric(item, "input_tokens")
+        output_tokens = _get_int_metric(item, "output_tokens")
+        audio_in = _get_int_metric(item, "input_audio_tokens")
+        audio_out = _get_int_metric(item, "output_audio_tokens")
+        connected = _get_float_metric(item, "session_duration")
+        if audio_in or audio_out or connected:
+            rate_in, rate_out = _audio_rates(provider)
+            minutes_in = audio_in / rate_in
+            minutes_out = audio_out / rate_out
+            return ModelUsage(
+                model_type="realtime",
+                model_id=model_id,
+                total_units=(connected / 60.0) or (minutes_in + minutes_out),
+                event_count=1,
+                audio_input_minutes=minutes_in,
+                audio_output_minutes=minutes_out,
+                text_input_tokens=_get_int_metric(item, "input_text_tokens"),
+                text_output_tokens=_get_int_metric(item, "output_text_tokens"),
+                cached_input_tokens=_get_int_metric(item, "input_cached_tokens"),
+            )
+        if input_tokens + output_tokens <= 0:
+            return None
+        return ModelUsage(
+            model_type="llm",
+            model_id=model_id,
+            total_units=float(input_tokens + output_tokens),
+            event_count=1,
+            prompt_tokens=input_tokens,
+            completion_tokens=output_tokens,
+            cached_input_tokens=_get_int_metric(item, "input_cached_tokens"),
+        )
+    if kind == "stt_usage":
+        minutes = _get_float_metric(item, "audio_duration") / 60.0
+        if minutes <= 0:
+            return None
+        return ModelUsage(
+            model_type="stt",
+            model_id=model_id,
+            total_units=minutes,
+            event_count=1,
+            audio_input_minutes=minutes,
+        )
+    if kind == "tts_usage":
+        characters = _get_int_metric(item, "characters_count")
+        if characters <= 0:
+            return None
+        return ModelUsage(
+            model_type="tts", model_id=model_id, total_units=float(characters), event_count=1
+        )
+    # Interruption and end-of-turn models run on LiveKit's own inference and
+    # are not ours to meter.
+    return None
+
+
 class UsageTracker:
     """Tracks AI resource consumption during a single agent session.
 
@@ -256,6 +341,33 @@ class UsageTracker:
             normalized_units,
             entry.total_units,
         )
+
+    # -----------------------------------------------------------------
+    # Session usage snapshots (livekit-agents >= 1.8)
+    # -----------------------------------------------------------------
+
+    def on_session_usage(self, usage: Any) -> None:
+        """Handle a `session_usage_updated` event's `AgentSessionUsage`.
+
+        `metrics_collected` is deprecated from livekit-agents 1.8. Its
+        replacement carries the session's running totals per provider and
+        model rather than one delta per request, so pipeline entries are
+        *replaced* from each snapshot, never added to. External and memory
+        entries are recorded separately and are left alone.
+
+        Realtime models arrive as LLM usage. They are told apart by audio
+        tokens, and their minutes (what the credits pricing charges by) are
+        derived from those tokens: the snapshot has no per-response duration.
+        """
+        snapshot: dict[str, ModelUsage] = {}
+        for item in getattr(usage, "model_usage", None) or []:
+            entry = _entry_from_model_usage(item)
+            if entry is not None:
+                snapshot[f"{entry.model_type}:{entry.model_id}"] = entry
+        if not snapshot:
+            return
+        with self._lock:
+            self._usage.update(snapshot)
 
     # -----------------------------------------------------------------
     # External service tracking

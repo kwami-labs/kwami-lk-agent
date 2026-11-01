@@ -762,3 +762,185 @@ def test_an_object_repr_is_filtered_rather_than_stored() -> None:
     agent = KwamiAgent()
 
     assert agent._extract_message_content(Unreadable()) == ""
+
+
+# =============================================================================
+# The brain, the charter and the greeting's lifecycle
+# =============================================================================
+
+
+class FakeBridge:
+    """The slice of `Bridge` the agent reaches through `session.userdata`."""
+
+    def __init__(self, owed: list[Any] | None = None) -> None:
+        self.contexts: list[dict[str, Any]] = []
+        self.readied: list[str] = []
+        self._owed = owed or []
+
+    def set_context(self, **kwargs: Any) -> None:
+        self.contexts.append(kwargs)
+
+    def delegates(self) -> bool:
+        return False
+
+    async def ready(self, kwami_id: str) -> None:
+        self.readied.append(kwami_id)
+
+    def take_pending(self, kwami_id: str) -> list[Any]:
+        owed, self._owed = self._owed, []
+        return owed
+
+
+class FakeHandle:
+    def __init__(self) -> None:
+        self.callbacks: list[Any] = []
+        self.interrupted = False
+
+    def add_done_callback(self, fn: Any) -> None:
+        self.callbacks.append(fn)
+
+
+class SessionWithDeps(FakeSession):
+    def __init__(self, deps: Any, handle: Any = None) -> None:
+        super().__init__()
+        self.userdata = deps
+        self._handle = handle
+
+    def generate_reply(self, *, instructions: str, allow_interruptions: bool = True):
+        super().generate_reply(instructions=instructions, allow_interruptions=allow_interruptions)
+        return self._handle
+
+
+class UnconnectedRoom:
+    """`local_participant` raises until the room is connected."""
+
+    remote_participants: dict[str, Any] = {}
+
+    @property
+    def local_participant(self) -> Any:
+        raise RuntimeError("not connected")
+
+    async def disconnect(self) -> None:
+        raise AssertionError("an unconnected room is not a duplicate")
+
+
+def _chartered(**charter: Any) -> KwamiConfig:
+    from src.domain.config import KwamiCharterConfig
+
+    soul = KwamiSoulConfig(name="Jarvis", charter=KwamiCharterConfig(enabled=True, **charter))
+    return KwamiConfig(kwami_id="k1", soul=soul, timezone="Europe/Madrid", locale="es-ES")
+
+
+async def test_entering_before_the_room_connects_still_proceeds() -> None:
+    agent = agent_with(skip_greeting=True)
+    agent.room = UnconnectedRoom()
+    agent._fake_session = FakeSession()
+
+    await agent.on_enter()
+
+    assert "conversation_item_added" in agent._fake_session.handlers
+
+
+async def test_a_failed_regating_on_entry_is_warned(caplog) -> None:
+    agent = agent_with(skip_greeting=True)
+    agent.room = FakeRoom()
+    agent._fake_session = FakeSession()
+
+    async def broken() -> bool:
+        raise RuntimeError("tools locked")
+
+    agent.refresh_brain_gating = broken  # type: ignore[method-assign]
+    with caplog.at_level(logging.WARNING):
+        await agent.on_enter()
+    assert "Could not re-gate the search tools on entry" in caplog.text
+
+
+async def test_the_bridge_learns_who_it_works_for_and_owed_results_are_greeted() -> None:
+    from src.brain.ledger import PendingResult
+
+    bridge = FakeBridge([PendingResult("t1", "Oro", "Sube un 2 %" + "." * 500, "")])
+    deps = SimpleNamespace(bridge=bridge, greeting_owed=True)
+    agent = agent_with(config=_chartered(user_profile="Vive en Madrid.", address_as="señor"))
+    agent.room = FakeRoom()
+    agent._fake_session = SessionWithDeps(deps)
+
+    await agent.on_enter()
+
+    assert bridge.contexts == [
+        {
+            "kwami_id": "k1",
+            "name": "Jarvis",
+            "language": "es-ES",
+            "timezone": "Europe/Madrid",
+            "user_profile": "Vive en Madrid.",
+        }
+    ]
+    assert bridge.readied == ["k1"]
+    greeting = agent._fake_session.replies[0]["instructions"]
+    assert "Oro: Sube un 2 %" in greeting
+    assert "." * 401 not in greeting
+
+
+async def test_a_charter_that_asks_for_no_greeting_is_obeyed(caplog) -> None:
+    agent = agent_with(config=_chartered(greeting="none"))
+    agent.room = FakeRoom()
+    agent._fake_session = FakeSession()
+
+    with caplog.at_level(logging.INFO):
+        await agent.on_enter()
+
+    assert agent._fake_session.replies == []
+    assert "Greeting disabled by the charter" in caplog.text
+
+
+async def test_the_greeting_is_owed_until_it_plays_out() -> None:
+    handle = FakeHandle()
+    deps = SimpleNamespace(greeting_owed=True)
+    agent = agent_with()
+    agent.room = FakeRoom()
+    agent._fake_session = SessionWithDeps(deps, handle)
+
+    await agent.on_enter()
+    (done,) = handle.callbacks
+
+    handle.chat_items = [SimpleNamespace(role="assistant")]
+    handle.interrupted = True
+    done(handle)
+    assert deps.greeting_owed is True
+    handle.interrupted = False
+    done(handle)
+    assert deps.greeting_owed is False
+
+
+async def test_a_greeting_that_never_spoke_stays_owed() -> None:
+    """Gemini Live dying at connect ends the greeting uninterrupted but silent."""
+    handle = FakeHandle()
+    deps = SimpleNamespace(greeting_owed=True)
+    agent = agent_with()
+    agent.room = FakeRoom()
+    agent._fake_session = SessionWithDeps(deps, handle)
+
+    await agent.on_enter()
+    (done,) = handle.callbacks
+    handle.chat_items = []
+    handle.interrupted = False
+    done(handle)
+
+    assert deps.greeting_owed is True
+
+
+async def test_a_greeting_handle_without_callbacks_is_left_alone() -> None:
+    deps = SimpleNamespace(greeting_owed=True)
+    agent = agent_with()
+    agent.room = FakeRoom()
+    agent._fake_session = SessionWithDeps(deps, handle=None)
+    await agent.on_enter()
+    assert deps.greeting_owed is True
+
+
+async def test_speaking_settles_the_greeting() -> None:
+    deps = SimpleNamespace(greeting_owed=True)
+    agent = agent_with()
+    agent._fake_session = SessionWithDeps(deps)
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="hola"))
+    assert deps.greeting_owed is False

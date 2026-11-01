@@ -14,8 +14,10 @@ from typing import Any
 from ..agent import KwamiAgent
 from ..domain import KwamiConfig
 from ..factories import create_llm, create_realtime_model, create_stt, create_tts
+from ..factories.fallback import with_llm_fallback, with_stt_fallback, with_tts_fallback
 from ..factories.vad import create_vad
 from ..utils.logging import get_logger
+from .turn_taking import agent_turn_handling
 
 logger = get_logger("pipeline")
 
@@ -72,8 +74,11 @@ def create_agent_from_config(
         config,
         vad=session_vad,
         memory=memory,
-        stt=create_stt(voice_config),
-        llm=create_llm(voice_config),
-        tts=create_tts(voice_config),
+        # Each stage falls back to another provider with a key when the chosen
+        # one fails (a spent quota, an outage): see factories/fallback.py.
+        stt=with_stt_fallback(create_stt(voice_config), voice_config, create_stt, session_vad),
+        llm=with_llm_fallback(create_llm(voice_config), voice_config, create_llm),
+        tts=with_tts_fallback(create_tts(voice_config), voice_config, create_tts),
         skip_greeting=skip_greeting,
+        turn_handling=agent_turn_handling(voice_config.pipeline_type),
     )
