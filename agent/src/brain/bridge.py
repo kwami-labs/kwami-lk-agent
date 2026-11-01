@@ -447,6 +447,9 @@ class Bridge:
     ) -> tuple[BrainAnswer, BrainModel | None]:
         """Run on the model the router picks, with one fallback on failure."""
         resting = self._resting_ids()
+        # Shared with the Tavily rescue, so a writer that just failed there is
+        # not asked again by the fallback below.
+        tried: set[str] = set(resting)
         if resting:
             # The search Gemini would have done goes straight to Tavily, the
             # cheap rescue, rather than to another model's paid web search.
@@ -458,12 +461,9 @@ class Bridge:
                 and request.native_search
                 and self._tavily_key
             ):
-                rescued = await self._search_on_tavily(
-                    brain_task, kind, difficulty, request, set(resting)
-                )
+                rescued = await self._search_on_tavily(brain_task, kind, difficulty, request, tried)
                 if rescued is not None:
                     return rescued
-        tried: set[str] = set(resting)
         answer: BrainAnswer | None = None
         model: BrainModel | None = None
         for _ in range(2):  # the chosen model, then one fallback

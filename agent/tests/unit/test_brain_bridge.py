@@ -479,6 +479,23 @@ async def test_a_model_out_of_quota_is_not_tried_again_for_a_while(tmp_path: Pat
     assert second.status == "done"
 
 
+async def test_a_failed_rescue_while_gemini_rests_is_not_asked_again(tmp_path: Path) -> None:
+    bridge = _bridge(
+        tmp_path,
+        {"gemini-flash": _out_of_quota("gemini-flash"), "claude-sonnet": _failed("claude-sonnet")},
+    )
+    bridge._tavily_key = "tv"
+    _run(bridge, kind="research", difficulty="simple")
+    await _finish(bridge)
+    task = _run(bridge, kind="research", difficulty="simple")
+    await _finish(bridge)
+
+    # The writer that just failed on Tavily is skipped; the fallback goes on.
+    assert task.models == ["Claude Sonnet 5.5 + Tavily", "Claude Haiku 5.5"]
+    assert task.status == "done"
+    assert task.result == "respuesta de claude-haiku"
+
+
 async def test_a_resting_model_is_skipped_for_tasks_without_a_search(tmp_path: Path) -> None:
     bridge = _bridge(tmp_path, {"gemini-flash": _out_of_quota("gemini-flash")})
     _run(bridge, kind="research", difficulty="simple")
