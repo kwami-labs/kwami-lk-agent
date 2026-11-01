@@ -18,15 +18,14 @@ from typing import Any
 
 import pytest
 
-from src.envfile import load_unlocked_dotenv
+from src.envfile import load_env_file
 
 # Load before any fixture runs, so the autouse `isolated_env` exemption for
 # `live` tests has real values to leave in place. The file lives at the repo
-# root, one level above the `agent/` package. A git-crypt locked file is
-# ciphertext; skip it instead of crashing collection.
+# root, one level above the `agent/` package.
 _HERE = Path(__file__).resolve()
 for _candidate in (_HERE.parents[3] / ".env", _HERE.parents[2] / ".env"):
-    if load_unlocked_dotenv(_candidate):
+    if load_env_file(_candidate):
         break
 
 # Cheapest model that still reliably drives tool calls.

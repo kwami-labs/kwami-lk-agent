@@ -64,6 +64,42 @@ class KwamiMemoryConfig:
 
 
 @dataclass
+class KwamiCharterConfig:
+    """The standing rules that turn a persona into a chief of staff.
+
+    A soul says how the agent sounds; the charter says how it behaves: how it
+    addresses the user, when it pushes back, how much initiative it takes and
+    what it may learn about them. Off by default, so a kwami that never opts in
+    keeps exactly the prompt it had. Option meanings live in `domain/charter.py`,
+    which is the only reader.
+    """
+
+    enabled: bool = False
+    #: How to address the user ("señor"). Empty means by name, as before.
+    address_as: str = ""
+    #: Formal second person (usted, vous, Sie) in languages that have one.
+    formal: bool = False
+    wit: Literal["none", "subtle", "marked"] = "subtle"
+    #: off: never objects. once: objects once, then complies without argument.
+    #: firm: waits for an explicit go-ahead after objecting.
+    pushback: Literal["off", "once", "firm"] = "once"
+    opinions: Literal["always", "on_request", "never"] = "always"
+    #: act: researches straight away. propose: offers first. wait: only when asked.
+    initiative: Literal["act", "propose", "wait"] = "act"
+    #: Areas the agent watches for risk. See `charter.WATCH_TOPICS`.
+    watch: list[str] = field(default_factory=list)
+    #: announce: notes what it learns and says so. silent: notes quietly. off.
+    learn: Literal["announce", "silent", "off"] = "announce"
+    greeting: Literal["brief_pending", "brief", "briefing", "none"] = "brief_pending"
+    #: Match answer length to the question instead of the soul's fixed length.
+    adaptive_length: bool = True
+    #: What the agent knows about the user, written by them and by the agent.
+    user_profile: str = ""
+    #: Things awaiting the user, mentioned in the greeting.
+    pending: list[str] = field(default_factory=list)
+
+
+@dataclass
 class KwamiSoulConfig:
     """Soul figuration from the Kwami frontend."""
 
@@ -85,6 +121,7 @@ class KwamiSoulConfig:
         "compassionate",
     ] = "warm"
     emotional_traits: dict[str, float] = field(default_factory=dict)
+    charter: KwamiCharterConfig = field(default_factory=KwamiCharterConfig)
 
 
 @dataclass
@@ -178,6 +215,23 @@ class KwamiVoiceConfig:
     # Speech speed multiplier (0.5 - 2.0)
     tts_speed: float = 1.0
 
+    # Spoken direction for TTS engines that take one (Gemini TTS): pace,
+    # pitch, diction, attitude. The same text a character uses on Gemini Live
+    # (`realtime_style`); here it goes to the TTS, not the LLM.
+    tts_style: str = ""
+
+    @property
+    def active_style(self) -> str:
+        """The voice direction of the pipeline in use."""
+        return self.realtime_style if self.pipeline_type == "realtime" else self.tts_style
+
+    @property
+    def voice_locked(self) -> bool:
+        """A character voice is set, so the voice changes only when the user picks
+        another one in the Voice panel -- never by the agent's own tools (the
+        user's rule, 2026-10-09: one voice on, the rest off)."""
+        return bool(self.active_style.strip())
+
     # =========================================================================
     # Voice Activity Detection (VAD) Configuration
     # =========================================================================
@@ -203,7 +257,7 @@ class KwamiVoiceConfig:
 
     # OpenAI models: gpt-4o-realtime-preview, gpt-4o-realtime-preview-2024-10-01,
     #                gpt-4o-realtime-preview-2024-12-17
-    # Google models: gemini-2.0-flash-exp
+    # Google models: gemini-3.8-live, gemini-3.1-flash-live-preview
     realtime_model: str = "gpt-4o-realtime-preview"
 
     # Realtime voice (provider-specific)
@@ -211,24 +265,55 @@ class KwamiVoiceConfig:
     # Google: Puck, Charon, Kore, Fenrir, Aoede
     realtime_voice: str = "alloy"
 
+    # How the realtime voice should sound: pace, pitch, diction, accent. Gemini
+    # Live only takes its 30 prebuilt voices, so a character's voice is a
+    # prebuilt one plus this direction, which native-audio models follow. Goes
+    # into the instructions (domain/prompt.py); empty means no direction.
+    realtime_style: str = ""
+
     # Modalities: ["text", "audio"] or ["text"] or ["audio"]
     realtime_modalities: list[str] = field(default_factory=lambda: ["text", "audio"])
 
     # =========================================================================
-    # Audio Enhancements
+    # Listening: noise, turn-taking and interruptions (runtime/turn_taking.py)
     # =========================================================================
+    # The defaults are the Spanish tuning; the app's Enhancements panel, and the
+    # `set_enhancement_control` tool the agent calls, override them per session.
 
-    # Enable browser echo cancellation
+    # Echo cancellation and gain control run in the browser, before the audio
+    # leaves the user's device. Kept so the app's values round-trip.
     echo_cancellation: bool = True
-
-    # Enable noise suppression
-    noise_suppression: bool = True
-
-    # Enable automatic gain control
     auto_gain_control: bool = True
 
-    # Turn detection mode: server_vad, semantic, or none
-    turn_detection: Literal["server_vad", "semantic", "none"] = "server_vad"
+    # Noise cancellation on the user's microphone, on the agent (LiveKit Cloud).
+    noise_suppression: bool = True
+
+    # "bvc" also removes voices in the background (a TV, people nearby), which
+    # otherwise read as the user talking and cut the agent off; "krisp" is the
+    # standard model and keeps them. Phone callers get BVC tuned for telephony.
+    noise_cancellation_mode: Literal["bvc", "krisp"] = "bvc"
+
+    # How the end of the user's turn is decided on the standard pipeline:
+    # LiveKit's multilingual end-of-turn "model", plain "vad" silence, or "stt".
+    turn_detector: Literal["model", "vad", "stt"] = "model"
+
+    # Silence before the turn may end; learned upwards from the minimum.
+    min_endpointing_delay: float = 0.4
+    max_endpointing_delay: float = 2.5
+
+    # Whether the user can cut the agent off, and how much speech it takes.
+    allow_interruptions: bool = True
+    min_interruption_duration: float = 0.4
+    min_interruption_words: int = 0
+
+    # The LLM starts on the interim transcript while the turn is still open.
+    preemptive_generation: bool = True
+
+    # Turn detection on a realtime model's own server. "semantic" waits for the
+    # user to finish a thought (OpenAI's semantic VAD; Gemini Live with low
+    # start-of-speech sensitivity); "server_vad" ends on silence alone and is
+    # what noise trips; "none" leaves the provider's default.
+    turn_detection: Literal["server_vad", "semantic", "none"] = "semantic"
 
 
 @dataclass
@@ -317,7 +402,7 @@ def get_preset_config(preset: str) -> KwamiVoiceConfig:
             llm_temperature=0.7,
             tts_provider="elevenlabs",
             tts_model="eleven_turbo_v2_5",
-            tts_voice="21m00Tcm4TlvDq8ikWAM",
+            tts_voice="JBFqnCBsd6RMkjVDRZzb",  # George; Rachel needs a paid plan
         ),
         "multilingual": KwamiVoiceConfig(
             stt_provider="deepgram",

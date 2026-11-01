@@ -14,7 +14,7 @@ import pytest
 from src.constants import STTProviders
 from src.domain import KwamiVoiceConfig
 from src.factories import stt as stt_module
-from src.factories.stt import create_stt
+from src.factories.stt import ELEVENLABS_SERVER_VAD, create_stt
 
 
 def voice(**overrides) -> KwamiVoiceConfig:
@@ -64,26 +64,42 @@ def test_openai_translates_multi_language_to_none() -> None:
     assert create_stt(voice(stt_provider="openai", stt_language="multi")) is not None
 
 
-def test_elevenlabs_goes_through_livekit_inference() -> None:
-    """Routed through Inference so no ELEVEN_API_KEY is needed in the agent."""
+def test_elevenlabs_uses_the_plugin_on_our_own_key() -> None:
+    """Inference answered "model not found" for scribe_v2_realtime (2026-10-18)."""
+    instance = create_stt(voice(stt_provider="elevenlabs", stt_language="es"))
+
+    assert type(instance).__module__.startswith("livekit.plugins.elevenlabs")
+
+
+def test_elevenlabs_realtime_commits_on_server_vad() -> None:
+    """Without it only interim transcripts arrive and the turn never ends."""
+    instance = create_stt(voice(stt_provider="elevenlabs", stt_model="scribe_v2_realtime"))
+
+    assert instance._opts.server_vad == ELEVENLABS_SERVER_VAD
+
+
+def test_elevenlabs_without_a_key_goes_through_livekit_inference(env_setting) -> None:
+    env_setting("ELEVEN_API_KEY", None)
+    env_setting("ELEVENLABS_API_KEY", None)
+
     instance = create_stt(voice(stt_provider="elevenlabs"))
 
     assert type(instance).__module__.startswith("livekit.agents")
 
 
 def test_an_elevenlabs_model_is_normalised_to_underscores(caplog) -> None:
-    """LiveKit Inference expects elevenlabs/scribe_v2_realtime, not hyphens."""
+    """Both paths expect scribe_v2_realtime, not hyphens."""
     with caplog.at_level(logging.INFO):
         create_stt(voice(stt_provider="elevenlabs", stt_model="scribe-v2-realtime"))
 
-    assert "elevenlabs/scribe_v2_realtime" in caplog.text
+    assert "ElevenLabs plugin for STT: scribe_v2_realtime" in caplog.text
 
 
 def test_a_non_scribe_elevenlabs_model_is_replaced(caplog) -> None:
     with caplog.at_level(logging.INFO):
         create_stt(voice(stt_provider="elevenlabs", stt_model="nova-3"))
 
-    assert "elevenlabs/scribe_v2_realtime" in caplog.text
+    assert "ElevenLabs plugin for STT: scribe_v2_realtime" in caplog.text
 
 
 def test_cartesia_is_constructed() -> None:
@@ -145,21 +161,57 @@ def test_every_advertised_provider_yields_an_stt(provider: str) -> None:
 
 
 # =============================================================================
-# Optional providers
-#
-# assemblyai is not declared anywhere in pyproject and google is an extra, so
-# neither package exists in the locked environment and their success branches
-# cannot reach a real constructor. The stand-ins below have strict keyword
-# signatures, so what is pinned is *our* call shape: drop a kwarg or rename
-# one and these fail. The real constructors are covered by the contract suite
-# whenever the extra is installed.
+# AssemblyAI -- a core dependency now, so this is the real constructor. The
+# stand-in it replaces pinned `word_boost`, a kwarg the plugin had dropped: the
+# test passed while every real AssemblyAI session fell back to Deepgram.
 # =============================================================================
 
 
-class StrictAssemblyAI:
-    class STT:
-        def __init__(self, *, word_boost: list) -> None:
-            self.word_boost = word_boost
+@pytest.fixture
+def assemblyai_key(fake_key):
+    fake_key("ASSEMBLYAI_API_KEY")
+
+
+@pytest.mark.usefixtures("assemblyai_key")
+def test_assemblyai_receives_the_key_terms_and_language() -> None:
+    instance = create_stt(
+        voice(stt_provider="assemblyai", stt_word_boost=["Kwami"], stt_language="es")
+    )
+
+    assert type(instance).__module__.startswith("livekit.plugins.assemblyai")
+    assert instance._opts.keyterms_prompt == ["Kwami"]
+    assert instance._opts.language_codes == ["es"]
+
+
+@pytest.mark.usefixtures("assemblyai_key")
+def test_assemblyai_ignores_a_model_that_is_not_its_own() -> None:
+    """The config default is Deepgram's nova-2; it must not reach AssemblyAI."""
+    instance = create_stt(voice(stt_provider="assemblyai", stt_model="nova-2"))
+
+    assert type(instance).__module__.startswith("livekit.plugins.assemblyai")
+    assert instance._opts.speech_model.startswith(("universal", "u3"))
+
+
+@pytest.mark.usefixtures("assemblyai_key")
+def test_assemblyai_streaming_models_get_no_language() -> None:
+    """universal-streaming-* detect the language and reject `language_codes`:
+    passing it raised a ValueError and fell back to Deepgram (2026-10-18)."""
+    instance = create_stt(
+        voice(
+            stt_provider="assemblyai",
+            stt_model="universal-streaming-multilingual",
+            stt_language="es",
+        )
+    )
+
+    assert type(instance).__module__.startswith("livekit.plugins.assemblyai")
+    assert instance._opts.speech_model == "universal-streaming-multilingual"
+
+
+# =============================================================================
+# Google Cloud STT. The stand-in has a strict keyword signature, so what is
+# pinned is *our* call shape: drop a kwarg or rename one and these fail.
+# =============================================================================
 
 
 class StrictGoogle:
@@ -167,25 +219,6 @@ class StrictGoogle:
         def __init__(self, *, model: str, languages: list) -> None:
             self.model = model
             self.languages = languages
-
-
-def test_assemblyai_receives_the_configured_word_boost(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(stt_module, "assemblyai", StrictAssemblyAI)
-
-    instance = create_stt(voice(stt_provider="assemblyai", stt_word_boost=["Kwami"]))
-
-    assert instance.word_boost == ["Kwami"]
-
-
-def test_assemblyai_without_a_word_boost_gets_an_empty_list(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """`or []` -- the plugin rejects None."""
-    monkeypatch.setattr(stt_module, "assemblyai", StrictAssemblyAI)
-
-    assert create_stt(voice(stt_provider="assemblyai")).word_boost == []
 
 
 def test_google_receives_the_model_and_language(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -177,7 +177,7 @@ async def test_change_ai_model_on_realtime_retargets_the_realtime_model() -> Non
     voice = new_agent.kwami_config.voice
     assert voice.pipeline_type == "realtime"
     assert voice.realtime_provider == "google"
-    assert voice.realtime_model == "gemini-2.0-flash-exp"
+    assert voice.realtime_model == "gemini-3.8-live"
 
 
 async def test_switching_realtime_provider_resets_the_voice() -> None:
@@ -191,7 +191,7 @@ async def test_switching_realtime_provider_resets_the_voice() -> None:
 
     new_agent, _ = await agent.change_ai_model(ctx, "Gemini")
 
-    assert new_agent.kwami_config.voice.realtime_voice == "Puck"
+    assert new_agent.kwami_config.voice.realtime_voice == "Charon"
 
 
 # -- switch_pipeline_mode ---------------------------------------------------

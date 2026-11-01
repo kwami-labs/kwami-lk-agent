@@ -115,8 +115,30 @@ stripped before the factory runs.
 
 Also accepted as flat `realtimeProvider` / `realtime_provider` keys.
 
-**VAD** (Silero): `threshold`, `min_speech_duration`, `min_silence_duration`.
+**VAD** (Silero): `threshold`, `minSpeechDuration`, `minSilenceDuration`.
 The prewarmed model is reused unless turn-taking settings differ.
+
+**Listening** (`voice.enhancements`, the app's Enhancements panel; see
+`handlers/listening.py`). Applied to the running session without a rebuild,
+on either pipeline:
+
+| Field | Default | Notes |
+| --- | --- | --- |
+| `noiseCancellation.enabled` / `.mode` | `true` / `bvc` | Filter on the agent, before VAD, turn detector, STT or realtime model. `bvc` also drops background voices; `krisp` keeps them; phone callers get telephony BVC. Applies from the next microphone track |
+| `turnDetection.mode` | `model` | `model` (multilingual end-of-turn), `vad` or `stt`. `manual` is refused: nothing commits turns, so the agent would never answer. `enabled: false` means `vad` |
+| `turnDetection.minEndpointingDelay` / `maxEndpointingDelay` | `0.4` / `2.5` s | Dynamic endpointing between them |
+| `turnDetection.allowInterruptions` | `true` | |
+| `turnDetection.minInterruptionDuration` / `minInterruptionWords` | `0.4` s / `0` | Below these, speech does not cut the agent off |
+| `preemptiveGeneration` | `true` | Text only; TTS waits for the confirmed turn |
+
+The SDK's flattened spelling (`minEndpointingDelay`, `turnDetection: "model"`
+on the voice object) is read as well. The agent never adds its own gain stage:
+the browser already levels the microphone, and a second one lifted the room's
+noise in every pause.
+
+On the realtime pipeline turns are decided on the provider's server:
+OpenAI uses `semantic_vad`, and Gemini Live a low start-of-speech
+sensitivity, so noise does not read as the user barging in.
 
 ### Memory knobs
 
@@ -158,7 +180,8 @@ flowchart TD
     T -->|memory| K["copy knobs onto live KwamiMemory"]
     T -->|tools| R["update_tools: built-ins + client tools"]
     T -->|llm| Swap["recreate agent, keep memory"]
-    T -->|voice| P{"provider or billed speed change?"}
+    T -->|voice| L["listening settings onto the live session"]
+    L --> P{"provider or billed speed change?"}
     P -->|yes| Swap
     P -->|no| Opt["tts/stt update_options"]
 ```

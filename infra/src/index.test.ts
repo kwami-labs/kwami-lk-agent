@@ -119,7 +119,14 @@ describe("/health", () => {
   });
 
   it("serves /status identically", async () => {
-    const [health, status] = await Promise.all([call("/health"), call("/status")]);
+    // Sequential on purpose. The vitest plugin creates each Durable Object RPC
+    // promise when the property is read but only awaits it once the call
+    // reaches the front of its invocation queue. With two calls in flight, the
+    // second one's rejection ("Containers have not been enabled") can land
+    // before anything is listening, and vitest fails the run on it. Only on
+    // some CI runs.
+    const health = await call("/health");
+    const status = await call("/status");
 
     expect(status.status).toBe(health.status);
   });

@@ -640,3 +640,94 @@ async def test_no_stt_at_all_is_tolerated(create_agent_fn) -> None:
     await _update_stt_if_needed(
         FakeSession(), state, agent, {"stt_language": "fr"}, None, create_agent_fn
     )
+
+
+async def test_a_charter_update_turns_friday_on() -> None:
+    agent = KwamiAgent()
+
+    await update_soul(
+        FakeSession(),
+        agent,
+        {"charter": {"enabled": True, "addressAs": "señor", "formal": True}},
+    )
+
+    assert agent.kwami_config.soul.charter.enabled is True
+    assert "## Your charter" in agent.instructions
+    assert "'señor'" in agent.instructions
+
+
+async def test_a_profile_only_charter_update_keeps_the_rest() -> None:
+    """What the app sends after `remember_about_user` writes to the profile."""
+    agent = KwamiAgent()
+    await update_soul(FakeSession(), agent, {"charter": {"enabled": True, "addressAs": "señor"}})
+
+    await update_soul(FakeSession(), agent, {"charter": {"userProfile": "Le gusta el té."}})
+
+    charter = agent.kwami_config.soul.charter
+    assert charter.address_as == "señor"
+    assert charter.user_profile == "Le gusta el té."
+    assert "Le gusta el té." in agent.instructions
+
+
+async def test_a_malformed_charter_is_ignored() -> None:
+    agent = KwamiAgent()
+    before = agent.instructions
+
+    await update_soul(FakeSession(), agent, {"charter": "on"})
+
+    assert agent.instructions == before
+
+
+class GeminiTTS(RecordingTTS):
+    """Module named as the real plugin's: Gemini calls its voice `voice_name`."""
+
+
+GeminiTTS.__module__ = "livekit.plugins.google.beta.gemini_tts"
+
+
+async def test_a_gemini_voice_update_uses_voice_name() -> None:
+    tts = GeminiTTS()
+    await _update_tts_options(FakeAgent(tts=tts), {}, "Charon", False)
+    assert tts.updates == [{"voice_name": "Charon"}]
+
+
+class ElevenLabsLikeTTS:
+    """The direct ElevenLabs plugin: `voice_id`, and no `speed` at all."""
+
+    provider = "elevenlabs"
+
+    def __init__(self) -> None:
+        self.updates: list[dict] = []
+
+    def update_options(self, *, voice_id=None, model=None, language=None) -> None:
+        self.updates.append({"voice_id": voice_id})
+
+
+async def test_a_new_elevenlabs_voice_survives_a_speed_it_cannot_take() -> None:
+    """The app sends voice and speed together; the speed used to fail the call
+    with a TypeError, and the new voice never reached ElevenLabs (seen on
+    LiveKit Cloud, 2026-10-22)."""
+    tts = ElevenLabsLikeTTS()
+    agent = FakeAgent(tts=tts)
+    agent.kwami_config.voice.tts_speed = 1.2
+
+    await _update_tts_options(agent, {"tts_speed": 0.9}, "cgSgspJ2msm6clMCkdW9", True)
+
+    assert tts.updates == [{"voice_id": "cgSgspJ2msm6clMCkdW9"}]
+    assert agent.kwami_config.voice.tts_voice == "cgSgspJ2msm6clMCkdW9"
+    # The plugin never took the speed, so it is not recorded as applied.
+    assert agent.kwami_config.voice.tts_speed == 1.2
+
+
+async def test_options_a_plugin_does_not_take_are_dropped() -> None:
+    from src.handlers.config_handler import _supported_options
+
+    def update_options(*, voice=None) -> None: ...
+
+    def anything(**kwargs) -> None: ...
+
+    assert _supported_options(update_options, {"voice": "a", "speed": 1}) == (
+        {"voice": "a"},
+        {"speed"},
+    )
+    assert _supported_options(anything, {"speed": 1}) == ({"speed": 1}, set())

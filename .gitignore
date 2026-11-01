@@ -97,3 +97,10 @@ infra/secrets.json
 *.log
 *.tmp
 *.temp
+
+# Character bench reports and audio (agent/scripts/character/bench.py)
+agent/scripts/character/out/
+agent/scripts/voice_lab/out/
+
+# Brain spend ledger and results owed to the next greeting (agent/src/brain/ledger.py)
+agent/.data/

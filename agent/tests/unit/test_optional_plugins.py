@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import sys
 
+import pytest
+
 from src.factories.optional import PLUGIN_NAMESPACE, optional_module, optional_plugin
 
 
@@ -44,10 +46,17 @@ def test_optional_plugin_builds_the_livekit_namespace_path() -> None:
 def test_an_absent_extra_is_none_rather_than_raising() -> None:
     """The four real ones. None of these extras is installed in the offline env,
     which is exactly the condition the factories must survive."""
-    for name in ("google", "anthropic", "groq", "assemblyai"):
-        assert optional_plugin(name) is None, (
-            f"{name} resolved, so this test no longer covers the absent branch"
-        )
+    import importlib.util
+
+    absent = [
+        name
+        for name in ("google", "anthropic", "groq", "assemblyai")
+        if importlib.util.find_spec(f"livekit.plugins.{name}") is None
+    ]
+    if not absent:
+        pytest.skip("every optional extra is installed here; nothing absent to probe")
+    for name in absent:
+        assert optional_plugin(name) is None
 
 
 def test_an_import_error_from_inside_the_module_is_not_swallowed(monkeypatch) -> None:

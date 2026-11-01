@@ -11,7 +11,8 @@ So the id has to be kept somewhere that outlives the agent process, or every
 session silently starts a fresh context: the user is signed out of everything,
 and the old context is orphaned and keeps being billed for storage. That store
 is the Kwami API, reached with the same internal key as the telephony runtime
-config.
+config -- or, on LiveKit Cloud where there is no API, the same table in the
+user's Supabase, written directly.
 
 When there is no API key -- local development, tests -- the store degrades to
 process memory rather than failing. Within one worker that still reuses a
@@ -21,8 +22,10 @@ hits; it just cannot survive a restart.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
+from ..adapters.supabase import SupabaseClient, as_user_id, direct_supabase
 from ..settings import Settings, get_settings
 from ..utils.logging import get_logger
 
@@ -163,9 +166,82 @@ class KwamiApiContextStore:
             self._http = None
 
 
+class SupabaseContextStore:
+    """Durable store in the user's Supabase `browser_contexts` table.
+
+    Used when the agent has no Kwami API (LiveKit Cloud). Same table and the
+    same rules as the API's `services/browser_sessions.py`: one row per
+    (owner, vendor), upserted, with `user_id` recorded when the owner is one so
+    the user can see and clear their own browsing state. Failures return None
+    or do nothing, as in `KwamiApiContextStore`.
+    """
+
+    TABLE = "browser_contexts"
+    #: Kept in step with the table's CHECK constraint on `vendor`.
+    VENDORS = frozenset({"browserbase", "browser_use"})
+
+    def __init__(self, store: SupabaseClient) -> None:
+        self._store = store
+
+    def _vendor(self, vendor: str) -> str | None:
+        normalized = (vendor or "").strip().lower()
+        if normalized not in self.VENDORS:
+            logger.warning("Unknown browser vendor %r; its context is not stored", vendor)
+            return None
+        return normalized
+
+    async def get(self, user_id: str, vendor: str) -> str | None:
+        owner = (user_id or "").strip()
+        normalized = self._vendor(vendor)
+        if not (owner and normalized):
+            return None
+        rows = await self._store.select(
+            self.TABLE,
+            {
+                "select": "context_id",
+                "owner_key": f"eq.{owner}",
+                "vendor": f"eq.{normalized}",
+                "limit": "1",
+            },
+            what="the saved browser context",
+        )
+        if not rows:
+            return None
+        return rows[0].get("context_id") or None
+
+    async def put(self, user_id: str, vendor: str, context_id: str) -> None:
+
+        owner = (user_id or "").strip()
+        normalized = self._vendor(vendor)
+        handle = (context_id or "").strip()
+        if not (owner and normalized and handle):
+            return
+        # Timestamps are explicit: an upsert that resolves to an UPDATE does
+        # not re-run the column default.
+        now = datetime.now(UTC).isoformat()
+        row: dict[str, Any] = {
+            "owner_key": owner,
+            "vendor": normalized,
+            "context_id": handle,
+            "updated_at": now,
+            "last_used_at": now,
+        }
+        if owner_id := as_user_id(owner):
+            row["user_id"] = owner_id
+        if not await self._store.insert(
+            self.TABLE, row, on_conflict="owner_key,vendor", what="the browser context"
+        ):
+            logger.warning("The user's logins will not survive this session")
+
+
 def create_context_store(settings: Settings | None = None) -> ContextStorePort:
-    """The durable store when the API is reachable, process memory otherwise."""
+    """The durable store when there is one, process memory otherwise.
+
+    Supabase directly when the agent has no Kwami API; the API when it has.
+    """
     settings = settings or get_settings()
+    if store := direct_supabase(settings):
+        return SupabaseContextStore(store)
     if settings.kwami_api_key and settings.kwami_api_url:
         return KwamiApiContextStore(settings=settings)
     logger.info(

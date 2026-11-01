@@ -90,7 +90,9 @@ class FakeReporter:
         self._raises = raises
         self._hang = hang
 
-    async def report(self, *, user_id: str, session_id: str, tracker: Any) -> Any:
+    async def report(
+        self, *, user_id: str, session_id: str, tracker: Any, kwami_id: Any = None
+    ) -> Any:
         self.calls.append({"user_id": user_id, "session_id": session_id})
         if self._raises is not None:
             raise self._raises
