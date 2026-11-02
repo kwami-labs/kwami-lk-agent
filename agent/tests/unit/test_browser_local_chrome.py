@@ -80,7 +80,7 @@ class TestFindingChrome:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         chrome = tmp_path / local_chrome._WINDOWS_PATHS[0]
-        chrome.parent.mkdir(parents=True)
+        chrome.parent.mkdir(parents=True, exist_ok=True)
         chrome.touch()
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
         assert find_chrome() == str(chrome)
