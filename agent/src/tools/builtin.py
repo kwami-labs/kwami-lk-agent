@@ -9,6 +9,7 @@ import httpx
 from livekit.agents import RunContext, function_tool
 
 from ..adapters.http import shared_client
+from ..browser.providers import ProviderUnavailableError
 from ..browser.safety import (
     UnsafeURLError,
     javascript_execution_enabled,
@@ -26,6 +27,7 @@ from ..runtime.container import room_from_context
 from ..settings import get_settings
 from ..utils.logging import get_logger, redacted
 from ..utils.room import participant_timezone
+from .web_fallback import safe_http_error, serpapi_web_search
 
 logger = get_logger("tools")
 
@@ -600,7 +602,7 @@ class AgentToolsMixin:
                 )
             data = r.json()
         except Exception as e:
-            logger.warning("SerpApi product search failed: %s", e)
+            logger.warning("SerpApi product search failed: %s", safe_http_error(e))
             return "Product search failed. Try web_search with search_for_products=True."
         shopping = data.get("shopping_results") or []
         if not shopping:
@@ -687,6 +689,8 @@ class AgentToolsMixin:
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
+        data: dict[str, Any] | None = None
+        failure = ""
         try:
             client = shared_client()
             resp = await client.post(
@@ -713,23 +717,27 @@ class AgentToolsMixin:
                 e.response.status_code,
                 body[:500] if body else "",
             )
-            if e.response.status_code == 432:
-                # Don't echo Tavily's body to the user; it can be wrong (e.g. "usage limit" when credits are fine).
-                # We only log it for debugging.
-                return "Web search is temporarily unavailable. Please try again in a moment."
-            if e.response.status_code == 401:
-                return "Web search is not configured correctly (invalid API key)."
-            if e.response.status_code == 429:
-                return "Web search rate limit reached. Please try again in a moment."
-            try:
-                err = e.response.json()
-                msg = err.get("detail") or err.get("message") or err.get("error") or body
-            except Exception:
-                msg = body or str(e)
-            return f"Search failed: {msg}"
+            # Don't echo Tavily's body to the user; it can be wrong (e.g. "usage limit" when credits are fine).
+            # We only log it for debugging.
+            failure = {
+                401: "Web search is not configured correctly (invalid API key).",
+                402: "Web search has no credit left with its provider.",
+                429: "Web search rate limit reached. Please try again in a moment.",
+                433: "Web search has no credit left with its provider.",
+            }.get(
+                e.response.status_code,
+                "Web search is temporarily unavailable. Please try again in a moment.",
+            )
         except Exception as e:
-            logger.exception("Tavily search failed")
-            return f"Search failed: {e!s}"
+            logger.warning("Tavily search failed: %s", safe_http_error(e))
+            failure = "Web search is temporarily unavailable. Please try again in a moment."
+
+        if data is None:
+            data = await serpapi_web_search(
+                query, usage_tracker=getattr(self, "usage_tracker", None)
+            )
+            if data is None:
+                return failure
 
         results: list[dict[str, Any]] = [
             {"title": r.get("title", ""), "url": r.get("url", ""), "content": r.get("content", "")}
@@ -880,9 +888,17 @@ class AgentToolsMixin:
                 result = await session.navigate(url)
             else:
                 await session.start(user_id=user_id, url=url)
-                result = f"Opening {url}. The user can see and interact with the page in the browser panel."
+                where = (
+                    "a Chrome window on the user's computer"
+                    if session.runs_locally is True
+                    else "the browser panel"
+                )
+                result = f"Opening {url}. The user can see and interact with the page in {where}."
         except ValueError as e:
             return refusal(f"Cannot open browser: {e}")
+        except ProviderUnavailableError as e:
+            logger.warning("Could not open a browser: %s", e)
+            return refusal(str(e))
         except Exception as e:
             logger.exception("Failed to open cloud browser")
             return refusal(f"Failed to open browser: {e}")
@@ -920,7 +936,7 @@ class AgentToolsMixin:
         if not session.is_active:
             return "No browser is currently open."
         try:
-            await session.close()
+            await session.close(quit_browser=True)
             return "Browser closed. Login state has been saved for next time."
         except Exception as e:
             # Reporting success here told the user their session was over while a

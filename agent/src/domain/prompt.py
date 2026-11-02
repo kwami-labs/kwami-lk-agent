@@ -202,7 +202,9 @@ _GUIDANCE_BLOCKS: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
             "everything you do in real time. Use read_navigation_page to see page content and interactive elements, then "
             "click_in_navigation to click elements (prefer element_id like 'el-5'), "
             "type_in_navigation to type text, press_key_in_navigation for keys like Enter, "
-            "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along.",
+            "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along. "
+            "This browser keeps its own logins, apart from the browser the user normally uses: never say "
+            "a site is already signed in until the page shows it.",
         ),
     ),
     (
@@ -388,6 +390,15 @@ SEARCH_DELEGATION_NOTE = (
     "delegate_task (kind research). Never say you cannot search the internet."
 )
 
+#: Heard on a real call (2026-11-02): "la consola de cloud, en la carpeta de Jarvis"
+#: was Claude on the PC, and the voice opened Google Cloud in the browser.
+CLAUDE_HEARING_NOTE = (
+    "\nSpeech recognition often writes the name Claude as 'cloud'. When the user speaks of "
+    "their cloud, cloud account or cloud console without saying Google, they most likely mean "
+    "Claude on their computer. Work on their PC or in its Jarvis folder is a delegate_task, "
+    "never the browser. If you cannot tell which they mean, ask."
+)
+
 
 def build_system_prompt(
     soul: Any,
@@ -465,6 +476,7 @@ def build_system_prompt(
     withheld = set(unavailable_tools or ())
     if "delegate_task" not in withheld:
         parts.append(BRIDGE_GUIDANCE)
+        parts.append(CLAUDE_HEARING_NOTE)
         if withheld >= BRAIN_SEARCH_TOOLS:
             parts.append(SEARCH_DELEGATION_NOTE)
 

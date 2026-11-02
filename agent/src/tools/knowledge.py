@@ -28,6 +28,7 @@ from livekit.agents import RunContext, function_tool
 from ..adapters.http import shared_client
 from ..settings import get_settings
 from ..utils.logging import get_logger
+from .web_fallback import safe_http_error, serpapi_web_search
 
 logger = get_logger("knowledge")
 
@@ -104,6 +105,12 @@ def research_query(template: str, topic: str, *, now: datetime | None = None) ->
     return template.format(topic=topic, year=year)
 
 
+#: What `_tavily` hands back for a search that failed, as opposed to one that
+#: found nothing: telling the user there is nothing on a topic because the search
+#: service is down is a confident wrong answer.
+_FAILED_SEARCH: dict[str, Any] = {"failed": True}
+
+
 async def _tavily(
     client: httpx.AsyncClient, api_key: str, query: str, max_results: int
 ) -> dict[str, Any]:
@@ -124,8 +131,8 @@ async def _tavily(
         data = response.json()
         return data if isinstance(data, dict) else {}
     except Exception as e:
-        logger.warning("Research angle failed (%s): %s", query[:60], e)
-        return {}
+        logger.warning("Research angle failed (%s): %s", query[:60], safe_http_error(e))
+        return _FAILED_SEARCH
 
 
 def _domain(url: str) -> str:
@@ -188,13 +195,28 @@ class KnowledgeToolsMixin:
             logger.exception("Deep research failed")
             return f"I couldn't complete the research on {topic}."
 
-        if getattr(self, "usage_tracker", None):
+        # Only what answered is billed, and only what failed goes to the fallback.
+        answered = sum(1 for payload in payloads if payload is not _FAILED_SEARCH)
+        tracker = getattr(self, "usage_tracker", None)
+        payloads = [
+            payload
+            if payload is not _FAILED_SEARCH
+            else await serpapi_web_search(
+                research_query(template, topic), MAX_SOURCES_PER_ANGLE, tracker
+            )
+            or _FAILED_SEARCH
+            for (_, template), payload in zip(angles, payloads, strict=True)
+        ]
+        if all(payload is _FAILED_SEARCH for payload in payloads):
+            return f"The search service is not answering, so I couldn't research {topic}."
+
+        if answered and getattr(self, "usage_tracker", None):
             try:
                 self.usage_tracker.record_external_usage(
                     "tool",
                     "tavily/search",
-                    units_used=float(len(angles)),
-                    request_count=len(angles),
+                    units_used=float(answered),
+                    request_count=answered,
                 )
             except Exception as e:  # metering must never break a tool
                 logger.debug("Could not record research usage: %s", e)

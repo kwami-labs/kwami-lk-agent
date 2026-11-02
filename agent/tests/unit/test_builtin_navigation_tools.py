@@ -80,7 +80,7 @@ class FakeBrowserSession:
             raise self.fail
         return self.page_text
 
-    async def close(self) -> None:
+    async def close(self, *, quit_browser: bool = False) -> None:
         if self.fail:
             raise self.fail
         self.closed += 1

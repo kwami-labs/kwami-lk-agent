@@ -29,7 +29,8 @@ DEFAULT_KWAMI_API_TIMEOUT = 30.0
 #: Which cloud-browser vendor backs the navigation panel. Browserbase is the
 #: default because its Contexts persist the user's logins across sessions,
 #: which is what makes "carry on where I left off" work; "browser_use" keeps
-#: the original Browser Use Cloud path available unchanged.
+#: the original Browser Use Cloud path available unchanged; "local" opens Chrome
+#: on the agent's own machine, for an agent running on the user's computer.
 DEFAULT_BROWSER_PROVIDER = "browserbase"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
