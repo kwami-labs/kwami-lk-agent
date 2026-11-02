@@ -157,6 +157,9 @@ class KwamiVoiceConfig:
 
     # Language codes: en, en-US, en-GB, es, fr, de, it, pt, ja, ko, zh, hi, ar, ru, multi
     stt_language: str = "en"
+    # Names and words the STT should expect (Deepgram Nova-3): it heard "Claude" as
+    # "Cloud" and "Jarvis" as "Jardis", and memory kept them that way.
+    stt_keyterms: list[str] = field(default_factory=list)
 
     # Word boost for better recognition (provider-specific)
     stt_word_boost: list[str] = field(default_factory=list)
@@ -299,8 +302,8 @@ class KwamiVoiceConfig:
     turn_detector: Literal["model", "vad", "stt"] = "model"
 
     # Silence before the turn may end; learned upwards from the minimum.
-    min_endpointing_delay: float = 0.4
-    max_endpointing_delay: float = 2.5
+    min_endpointing_delay: float = 0.8
+    max_endpointing_delay: float = 4.0
 
     # Whether the user can cut the agent off, and how much speech it takes.
     allow_interruptions: bool = True

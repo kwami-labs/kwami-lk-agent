@@ -396,7 +396,12 @@ RELAY_GUIDANCE = (
     "small talk and what this conversation has already said. Everything else goes through "
     "delegate_task however easy it looks, general knowledge and opinions included (a capital "
     "or a definition too, with difficulty simple). Repeat what comes back in your own voice "
-    "and add no facts of your own. " + _BRIDGE_END
+    "and add no facts of your own. For a quick question (difficulty simple) call "
+    "delegate_task straight away and say nothing first: the answer arrives in seconds and "
+    "is spoken for you. For longer work, say in a few words that you are on it. "
+    "If the user's next words continue or correct a task "
+    "you just delegated, cancel it and delegate the whole thing again rather than adding "
+    "a second one. " + _BRIDGE_END
 )
 
 #: Added when the voice has no search tool of its own: a model told to "look it

@@ -85,6 +85,8 @@ QUOTA_REST_SECONDS = 15 * 60
 
 #: How long a finished result waits for the user to stop talking.
 PAUSE_WAIT_SECONDS = 120.0
+#: A moment of quiet, on top of knowing no turn is open (`_user_mid_turn`).
+PAUSE_QUIET_SECONDS = 0.4
 #: Results longer than this are summarised in speech; the full text stays in
 #: `check_tasks` and in the app.
 SPOKEN_RESULT_CHARS = 3500
@@ -103,6 +105,19 @@ ACCOUNT_FRESH_SECONDS = 30.0
 THINK_QUEUE_PATIENCE_SECONDS = 25.0
 THINK_TIMEOUT_SECONDS = 600.0
 THINK_POLL_SECONDS = 1.5
+#: The first seconds of a thought, when the answer to something simple arrives.
+THINK_POLL_FAST_SECONDS = 0.4
+THINK_POLL_FAST_FOR_SECONDS = 30.0
+#: What a task carries of the call. Enough to resolve "eso", not a transcript to pay for.
+CONTEXT_TURNS = 8
+CONTEXT_TURN_CHARS = 240
+CONTEXT_MEMORY_CHARS = 1200
+#: A quick answer is spoken as the worker wrote it. Measured 2026-11-02, the voice model
+#: took 2 to 3 s more to say it again in its own words, and could only make it worse.
+QUICK_ANSWER_SECONDS = 25.0
+QUICK_ANSWER_CHARS = 600
+#: With no "I'm on it" first, how long a simple answer may take before something is said.
+STILL_WORKING_SECONDS = 6.0
 #: How often, while the PC thinks, to check that the PC is still there.
 THINK_PC_CHECK_SECONDS = 30.0
 #: How long a job may sit queued before asking whether the PC is still there.
@@ -151,6 +166,7 @@ class BrainTask:
     sources: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str = ""
+    seconds: float = 0.0
     delivered: bool = False
     #: The answer came from the Claude account on the user's PC, not an API key.
     via_account: bool = False
@@ -471,7 +487,7 @@ class Bridge:
         brain_task = BrainTask(
             id=f"t{next(self._ids)}",
             title=(title or task)[:120],
-            task=task if not context else f"{task}\n\nContext from the conversation:\n{context}",
+            task=self._with_conversation(task, context),
             kind=kind,
             difficulty=difficulty,
             council=convene,
@@ -488,8 +504,51 @@ class Bridge:
         brain_task.handle = asyncio.create_task(
             self._run(brain_task, model), name=f"brain_{brain_task.id}"
         )
+        if self.config.relay == "everything" and difficulty == "simple" and self.session:
+            self._schedule(self._say_still_working(brain_task))
         self._schedule(self.publish_status())
         return brain_task
+
+    def _with_conversation(self, task: str, context: str) -> str:
+        """The task, with what the worker cannot otherwise know.
+
+        A worker starts from nothing, and the voice model mentions only what it thinks
+        of: "that company" or "como te dije" reached it with nothing to resolve them.
+        """
+        parts = [task]
+        if context:
+            parts.append(f"Context from the conversation:\n{context}")
+        recent = self._recent_conversation()
+        if recent:
+            parts.append(f"The conversation so far, oldest first:\n{recent}")
+        remembered = self._remembered()
+        if remembered:
+            parts.append(f"What is remembered about the user:\n{remembered}")
+        return "\n\n".join(parts)
+
+    def _voice(self) -> Any:
+        """The agent of the call, or None: a scheduled task has no call, a new one no agent."""
+        try:
+            return self.session.current_agent
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _user_mid_turn(self) -> bool:
+        return getattr(self._voice(), "turn_open", False) is True
+
+    def _recent_conversation(self) -> str:
+        history = getattr(self._voice(), "_chat_ctx", None)
+        lines = []
+        for item in getattr(history, "items", []):
+            role = getattr(item, "role", None)
+            said = getattr(item, "text_content", None)
+            if role in ("user", "assistant") and said:
+                lines.append(f"{role}: {said[:CONTEXT_TURN_CHARS]}")
+        return "\n".join(lines[-CONTEXT_TURNS:])
+
+    def _remembered(self) -> str:
+        text = getattr(self._voice(), "_memory_text", "")
+        return text[:CONTEXT_MEMORY_CHARS] if isinstance(text, str) else ""
 
     def cancel(self, task_id: str) -> bool:
         brain_task = self.tasks.get(task_id)
@@ -570,7 +629,11 @@ class Bridge:
         started = checked = loop.time()
         try:
             while loop.time() - started < THINK_TIMEOUT_SECONDS:
-                await asyncio.sleep(THINK_POLL_SECONDS)
+                await asyncio.sleep(
+                    THINK_POLL_FAST_SECONDS
+                    if loop.time() - started < THINK_POLL_FAST_FOR_SECONDS
+                    else THINK_POLL_SECONDS
+                )
                 if loop.time() - checked >= THINK_PC_CHECK_SECONDS:
                     checked = loop.time()
                     if not await self.jobs.runner_online(self.user_id):
@@ -1001,6 +1064,7 @@ class Bridge:
 
     async def _run(self, brain_task: BrainTask, prefer: str) -> None:
         spent_before = self.ledger.month_spend()["usd"]
+        started = asyncio.get_running_loop().time()
         try:
             answer: BrainAnswer | None = None
             if (
@@ -1043,12 +1107,16 @@ class Bridge:
             brain_task.status = "failed"
             brain_task.result = f"La tarea falló: {e}"
         brain_task.finished_at = datetime.now(UTC).isoformat()
+        brain_task.seconds = asyncio.get_running_loop().time() - started
         logger.info(
-            "Brain task %s %s on %s (%.4f $)",
+            "Brain task %s %s on %s in %.1f s (%.4f $, %s, %s)",
             brain_task.id,
             brain_task.status,
             ", ".join(brain_task.models),
+            brain_task.seconds,
             brain_task.cost_usd,
+            brain_task.kind,
+            brain_task.difficulty,
         )
         await self.publish_status()
         await self._deliver(brain_task)
@@ -1063,14 +1131,17 @@ class Bridge:
             session = self.session
             if session is None or self._closed:
                 return False
-            quiet = session.user_state != "speaking" and session.agent_state in (
-                "listening",
-                "idle",
+            # The user going quiet is not the turn ending: the end-of-turn wait comes
+            # after it, and a result spoken in that wait took the place of the answer.
+            quiet = (
+                session.user_state != "speaking"
+                and session.agent_state in ("listening", "idle")
+                and not self._user_mid_turn()
             )
             now = loop.time()
             if quiet:
                 quiet_since = quiet_since or now
-                if now - quiet_since >= 1.0:
+                if now - quiet_since >= PAUSE_QUIET_SECONDS:
                     return True
             else:
                 quiet_since = None
@@ -1104,6 +1175,43 @@ class Bridge:
             "there is more."
         )
 
+    def _spoken_as_written(self, brain_task: BrainTask) -> str:
+        """The worker's spoken part, when nothing needs adding to it. Else empty.
+
+        A result that took long arrives after the talk moved on and needs introducing;
+        a council's needs comparing; a program's output was not written to be heard;
+        and without a TTS of its own a realtime model has to say it itself.
+        """
+        if (
+            brain_task.status != "done"
+            or self.config.delivery == "on_request"
+            or brain_task.council
+            or brain_task.kind == "code"
+            or brain_task.seconds > QUICK_ANSWER_SECONDS
+            or getattr(self._voice(), "tts", None) is None
+        ):
+            return ""
+        spoken = brain_task.result.split("Detalle:")[0].strip()
+        if len(spoken) > QUICK_ANSWER_CHARS or any(m in spoken for m in ("http", "**", "#", "|")):
+            return ""
+        return spoken
+
+    async def _say_still_working(self, brain_task: BrainTask) -> None:
+        """A simple answer goes unannounced, so if it is slow the silence needs breaking."""
+        await asyncio.sleep(STILL_WORKING_SECONDS)
+        session = self.session
+        if (
+            brain_task.status != "running"
+            or session is None
+            or session.agent_state not in ("listening", "idle")
+            or session.user_state == "speaking"
+            or self._user_mid_turn()
+        ):
+            return
+        session.generate_reply(
+            instructions="Say in very few words that the answer is coming. Nothing else."
+        )
+
     async def _deliver(self, brain_task: BrainTask) -> None:
         if brain_task.status == "cancelled":
             return
@@ -1120,9 +1228,13 @@ class Bridge:
             return
         self._remember(brain_task)
         try:
-            self.session.generate_reply(
-                instructions=self._spoken(brain_task), allow_interruptions=True
-            )
+            as_written = self._spoken_as_written(brain_task)
+            if as_written:
+                self.session.say(as_written, allow_interruptions=True)
+            else:
+                self.session.generate_reply(
+                    instructions=self._spoken(brain_task), allow_interruptions=True
+                )
             brain_task.delivered = True
         except Exception:
             logger.exception("Could not speak the result of %s", brain_task.id)

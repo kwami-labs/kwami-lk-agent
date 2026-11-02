@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from livekit.agents import Agent
+from livekit.agents.llm import StopResponse
 from livekit.agents.types import NOT_GIVEN
 from livekit.agents.voice.agent import find_function_tools
 
@@ -22,6 +23,7 @@ from .domain.greeting import (
     time_of_day,
     topics_from_facts,
 )
+from .domain.pipelines import STANDARD_PIPELINE
 from .domain.tool_gating import (
     BRAIN_SEARCH_TOOLS,
     VOICE_SWITCH_TOOLS,
@@ -30,6 +32,7 @@ from .domain.tool_gating import (
 )
 from .memory import KwamiMemory
 from .runtime.container import room_from_context
+from .runtime.turn_gate import TurnGate, sounds_unfinished
 from .settings import get_settings
 from .tools import (
     AgentToolsMixin,
@@ -43,6 +46,9 @@ from .tools import (
 from .tools.limits import enforce_tool_limit, trim_client_tools
 from .utils.logging import get_logger, redacted
 from .utils.room import should_disconnect_as_duplicate
+
+#: At most this long, an answer that stops mid-sentence was cut off before it said anything.
+MAX_SCRAP_WORDS = 3
 
 logger = get_logger("agent")
 
@@ -103,6 +109,12 @@ class KwamiAgent(
         self.kwami_config = config or KwamiConfig()
         self._vad = vad
         self._memory = memory
+        # Only where the framework asks before answering: a realtime model does not.
+        self._turn_gate: TurnGate | None = (
+            TurnGate(self._answer_held_turn)
+            if config is None or config.voice.pipeline_type == STANDARD_PIPELINE
+            else None
+        )
         self._skip_greeting = skip_greeting
         # Cached context from _inject_memory_context.
         self._last_memory_context: Any = None
@@ -620,15 +632,41 @@ class KwamiAgent(
         deps = self._deps()
         if deps is not None:
             deps.greeting_owed = False
-        if self._memory and self._memory.is_initialized and new_message:
-            try:
-                content = self._extract_message_content(new_message)
-                if content:
-                    # Get user name for better graph attribution
-                    user_name = self._memory._cached_user_name or None
-                    await self._memory.buffer_user_message(content, name=user_name)
-            except Exception as e:
-                logger.warning("Failed to buffer user message: %s", e)
+        content = self._extract_message_content(new_message) if new_message else ""
+        if self._turn_gate is not None and content:
+            whole = self._turn_gate.take(content)
+            if whole is None:
+                raise StopResponse()
+            if whole != content:
+                new_message.content = [whole]
+                content = whole
+        if content:
+            await self._buffer_for_memory(content)
+
+    async def _buffer_for_memory(self, content: str) -> None:
+        if not (self._memory and self._memory.is_initialized):
+            return
+        try:
+            # Get user name for better graph attribution
+            user_name = self._memory._cached_user_name or None
+            await self._memory.buffer_user_message(content, name=user_name)
+        except Exception as e:
+            logger.warning("Failed to buffer user message: %s", e)
+
+    def _answer_held_turn(self, content: str) -> None:
+        """The user stayed quiet after a turn that sounded unfinished: answer it as it is."""
+        task = asyncio.create_task(self._buffer_for_memory(content))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        try:
+            self.session.generate_reply(user_input=content)
+        except RuntimeError:
+            logger.info("The session ended before a held turn could be answered")
+
+    @property
+    def turn_open(self) -> bool:
+        """The user is mid-turn: no result should start speaking over it."""
+        return self._turn_gate is not None and self._turn_gate.turn_open
 
     def _register_session_listeners(self) -> None:
         """Subscribe to the session events this agent depends on.
@@ -647,7 +685,24 @@ class KwamiAgent(
             # No activity yet; on_enter will call us again once there is one.
             return
         session.on("conversation_item_added", self._on_conversation_item_added)
+        if self._turn_gate is not None:
+            session.on("user_state_changed", self._on_user_state_changed)
+            session.on("user_input_transcribed", self._on_user_transcribed)
         self._session_listeners_registered = True
+
+    async def on_exit(self) -> None:
+        """What was still being held is not answered, but it was said."""
+        held = self._turn_gate.drain() if self._turn_gate is not None else ""
+        if held:
+            await self._buffer_for_memory(held)
+
+    def _on_user_state_changed(self, event: Any) -> None:
+        if self._turn_gate is not None:
+            self._turn_gate.speaking(getattr(event, "new_state", "") == "speaking")
+
+    def _on_user_transcribed(self, event: Any) -> None:
+        if self._turn_gate is not None and getattr(event, "is_final", False):
+            self._turn_gate.heard()
 
     def _on_conversation_item_added(self, event: Any) -> None:
         """Persist assistant turns to memory as the session commits them.
@@ -663,6 +718,9 @@ class KwamiAgent(
             return
         content = self._extract_message_content(item)
         if not content:
+            return
+        # An answer cut off at its first words ("Señor,") is no memory of anything.
+        if sounds_unfinished(content) and len(content.split()) <= MAX_SCRAP_WORDS:
             return
 
         task = asyncio.create_task(self._persist_assistant_turn(content))

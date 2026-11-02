@@ -13,8 +13,10 @@ conversation; the app's Enhancements panel overrides them per session
 
 * **Endpointing, dynamic.** The floor is learned from the user's own pauses, so
   a speaker who stops mid-sentence ("pues... a ver...") is not cut off, and one
-  who answers in two words is not kept waiting. It starts at 0.4 s -- Spanish
-  turns hand over quickly -- and never waits past 2.5 s.
+  who answers in two words is not kept waiting. It starts at 0.8 s and never
+  waits past 4 s: at 0.4 s real turns were cut mid-sentence and answered in pieces
+  (2026-11-02), and a pause costs far less than an answer to half a question.
+  `runtime/turn_gate.py` holds a turn whose words say it has not finished.
 * **Preemptive generation.** The LLM starts on the interim transcript while the
   turn detector decides; only text is generated early. TTS waits for the
   confirmed turn, so a discarded guess costs tokens, never synthesized audio.

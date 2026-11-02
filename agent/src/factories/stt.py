@@ -1,4 +1,5 @@
 from livekit.agents import NOT_GIVEN, inference
+from livekit.agents.types import NotGiven
 
 # cartesia, deepgram, elevenlabs and openai are mandatory dependencies (see
 # pyproject [project.dependencies]), so guarding their import would be dead
@@ -41,6 +42,18 @@ ELEVENLABS_SERVER_VAD: VADOptions = {
 }
 
 
+#: Always worth expecting: what the user calls the assistant and its models.
+DEFAULT_KEYTERMS = ("Jarvis", "Friday", "Kwami", "Claude", "Gemini", "Grok")
+MAX_KEYTERMS = 50
+
+
+def _deepgram_keyterms(model: str, config: KwamiVoiceConfig) -> list[str] | NotGiven:
+    """The words to expect. Only Nova-3 takes them, and an older model refuses the call."""
+    if "nova-3" not in model:
+        return NOT_GIVEN
+    return list(dict.fromkeys([*config.stt_keyterms, *DEFAULT_KEYTERMS]))[:MAX_KEYTERMS]
+
+
 def create_stt(config: KwamiVoiceConfig):
     """Create STT instance based on configuration."""
     provider = config.stt_provider.lower()
@@ -52,12 +65,14 @@ def create_stt(config: KwamiVoiceConfig):
 
     try:
         if provider == STTProviders.DEEPGRAM:
+            deepgram_model = model or DeepgramModels.DEFAULT_STT
             return deepgram.STT(
-                model=model or DeepgramModels.DEFAULT_STT,
+                model=deepgram_model,
                 language=config.stt_language,
                 interim_results=True,
                 smart_format=True,
                 punctuate=True,
+                keyterm=_deepgram_keyterms(deepgram_model, config),
             )
 
         elif provider == STTProviders.OPENAI:

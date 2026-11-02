@@ -73,6 +73,9 @@ logger = get_logger("brain.worker")
 IDLE_POLL_SECONDS = 10.0
 #: Someone is on the line waiting for these.
 THINK_POLL_SECONDS = 2.0
+#: Right after a thought more usually follow: a call is under way.
+THINK_POLL_FAST_SECONDS = 0.4
+THINK_POLL_FAST_FOR_SECONDS = 120.0
 THINK_SLOTS = 3
 THINK_MAX_TURNS = 12
 #: How often the worker checks the PC is still signed in to Claude.
@@ -184,15 +187,24 @@ class Worker:
     # -- thinking --------------------------------------------------------------
 
     async def _think_forever(self, stop: asyncio.Event) -> None:
+        last_thought: float | None = None
         while not stop.is_set():
             took = False
             try:
                 took = await self.think_tick()
             except Exception:
                 logger.exception("The thinking line's tick failed")
+            now = asyncio.get_running_loop().time()
+            if took:
+                last_thought = now
             if not took:
+                recent = (
+                    last_thought is not None and now - last_thought < THINK_POLL_FAST_FOR_SECONDS
+                )
                 with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), THINK_POLL_SECONDS)
+                    await asyncio.wait_for(
+                        stop.wait(), THINK_POLL_FAST_SECONDS if recent else THINK_POLL_SECONDS
+                    )
 
     async def think_tick(self) -> bool:
         """Start the next job that only answers, if a slot is free. True when one started."""

@@ -132,6 +132,9 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         # ("Too many strict tools") on LiveKit Cloud, 2026-10-18.
         return anthropic.LLM(
             model=model,
+            # The prompt and the tools are the same on every turn of a call and are most
+            # of what it sends: read from cache, they cost a tenth and arrive sooner.
+            caching="ephemeral",
             _strict_tool_schema=False,
             **_anthropic_temperature(config, model),
         )

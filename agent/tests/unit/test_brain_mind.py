@@ -276,6 +276,7 @@ def _bridge(tmp_path: Path, keys: dict[str, str] | None = None, jobs: Any = None
 @pytest.fixture(autouse=True)
 def fast_polling(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(bridge_module, "THINK_POLL_SECONDS", 0.0)
+    monkeypatch.setattr(bridge_module, "THINK_POLL_FAST_SECONDS", 0.0)
 
 
 @pytest.fixture
@@ -1058,6 +1059,7 @@ async def test_the_worker_forgets_a_thought_once_it_ends_and_keeps_going_after_a
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     monkeypatch.setattr("src.brain.worker.THINK_POLL_SECONDS", 0.0)
+    monkeypatch.setattr("src.brain.worker.THINK_POLL_FAST_SECONDS", 0.0)
 
     async def run(*args: Any, **kwargs: Any) -> Any:
         return ExecutorResult("Hecho", 0.0, True)

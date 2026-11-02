@@ -56,8 +56,8 @@ class BrainToolsMixin:
         poll for it.
 
         Args:
-            task: The full, self-contained instruction. The worker has not heard
-                the conversation: include names, numbers and what a good answer is.
+            task: The instruction, short: names, numbers and what a good answer is.
+                The worker also receives the recent conversation and what is remembered.
             title: Four to eight words naming the task, in the user's language.
             kind: research (needs the web), x_search (what people say on X, or
                 anything on X itself), analysis, writing, question, or code
@@ -70,7 +70,7 @@ class BrainToolsMixin:
                 is involved. Convenes the council of several models.
             council: True when the user asks to consult several models.
             model: Only when the user names a model ('Opus', 'Gemini', 'GPT').
-            context_notes: Anything from the conversation the worker needs.
+            context_notes: Only what the last few turns do not already say.
             long_running: True for work of many steps that should carry on if the
                 call ends. It runs on the user's PC when the PC is on.
             follow_up: To carry on earlier work with what it already knows: its
