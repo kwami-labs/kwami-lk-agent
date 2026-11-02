@@ -462,3 +462,41 @@ def test_the_executor_inherits_no_secrets(monkeypatch: pytest.MonkeyPatch) -> No
     assert env["ANTHROPIC_API_KEY"] == "ak"
     assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
     assert "SUPABASE_URL" not in env
+
+
+class TestOpenedFolders:
+    def test_outside_the_jarvis_folder_is_shut_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("KWAMI_EXECUTOR_FOLDERS", raising=False)
+        other = tmp_path / "other"
+        root = tmp_path / "root"
+        assert "outside" in str(check_tool_call(root, "Read", {"file_path": str(other / "a")}))
+
+    def test_a_folder_the_user_opened_can_be_used(self, tmp_path, monkeypatch):
+        other = tmp_path / "other"
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", f" {other} ; {tmp_path / 'more'}")
+        root = tmp_path / "root"
+        assert check_tool_call(root, "Read", {"file_path": str(other / "a.py")}) is None
+        assert check_tool_call(root, "Read", {"file_path": str(tmp_path / "more")}) is None
+        assert "outside" in str(check_tool_call(root, "Read", {"file_path": str(tmp_path / "x")}))
+
+    @pytest.mark.parametrize(
+        "secret",
+        [".ssh/id_rsa", ".aws/credentials", ".claude/.credentials.json", "Chrome/Login Data"],
+    )
+    def test_keys_stay_shut_even_inside_an_opened_folder(self, tmp_path, monkeypatch, secret):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        refusal = check_tool_call(tmp_path / "root", "Read", {"file_path": str(tmp_path / secret)})
+        assert "outside" in str(refusal)
+
+    def test_env_files_stay_shut_in_an_opened_folder(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        refusal = check_tool_call(
+            tmp_path / "root", "Read", {"file_path": str(tmp_path / "app" / ".env")}
+        )
+        assert ".env" in str(refusal)
+
+    def test_the_model_is_told_which_folders_are_open(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("KWAMI_EXECUTOR_FOLDERS", raising=False)
+        assert "opened these folders" not in executor._system_append()
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        assert str(tmp_path.resolve()) in executor._system_append()

@@ -40,7 +40,8 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 from ..utils.logging import get_logger
-from .config import ExecutorConfig, resolve_executor_folder
+from .config import ExecutorConfig, extra_executor_folders, resolve_executor_folder
+from .google_tool import ALLOWED_TOOL, SERVER_NAME, google_available, google_server
 from .team import TEAM_GUIDANCE, agent_definitions
 
 if TYPE_CHECKING:
@@ -101,10 +102,19 @@ SYSTEM_APPEND = """
 You are the local executor of Jarvis, the user's voice assistant. A voice model
 handed you this task and will read your final answer aloud in Spanish (Spain).
 
-- Work only inside the current folder. Never push, never touch .env files.
+- Work only inside the current folder, and any other the user opened to you,
+  which are named below if there are any. Never push, never touch .env files.
 - Finish with a short spoken-style summary in Spanish: what you did, where it
   is, and anything the user must decide. No markdown tables, no code in it.
 """
+
+
+def _system_append() -> str:
+    folders = extra_executor_folders()
+    if not folders:
+        return SYSTEM_APPEND
+    named = "\n".join(f"  {folder}" for folder in folders)
+    return f"{SYSTEM_APPEND}\nThe user opened these folders of their PC to you:\n{named}\n"
 
 
 @dataclass
@@ -230,6 +240,21 @@ def _progress_line(block: Any) -> str:
     return str(block.name)
 
 
+_NEVER_OPENED = frozenset(
+    {
+        ".ssh",
+        ".aws",
+        ".azure",
+        ".gnupg",
+        ".kube",
+        ".claude",
+        ".credentials.json",
+        "login data",
+        "cookies",
+    }
+)
+
+
 def _inside(root: Path, raw: str) -> bool:
     # A drive-letter or UNC path is absolute only on Windows. On the Linux cloud
     # executor Path() reads "C:\Users\..." as a relative name under root and
@@ -240,7 +265,13 @@ def _inside(root: Path, raw: str) -> bool:
         target = (root / raw).resolve() if not Path(raw).is_absolute() else Path(raw).resolve()
     except (OSError, ValueError):
         return False
-    return target == root or root in target.parents
+    if target == root or root in target.parents:
+        return True
+    # Keys and sessions stay shut even inside a folder the user opened, such as their
+    # whole profile. A name, not a location, because they can sit at any depth.
+    if {part.lower() for part in target.parts} & _NEVER_OPENED:
+        return False
+    return any(target == folder or folder in target.parents for folder in extra_executor_folders())
 
 
 def _command_paths(command: str, *, windows: bool) -> list[tuple[str, str]]:
@@ -378,7 +409,7 @@ async def _run_in(
     options = ClaudeAgentOptions(
         cwd=str(root),
         model=model,
-        system_prompt={"type": "preset", "preset": "claude_code", "append": SYSTEM_APPEND},
+        system_prompt={"type": "preset", "preset": "claude_code", "append": _system_append()},
         max_turns=config.max_turns,
         max_budget_usd=config.max_task_usd,
         env=child_env(api_key),
@@ -410,11 +441,19 @@ async def _run_in(
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": SYSTEM_APPEND + TEAM_GUIDANCE,
+            "append": _system_append() + TEAM_GUIDANCE,
         }
     # The tools that exist at all, not only those allowed: Claude Code also offers its
     # own (scheduling, remote triggers, messages), which no job here has a use for.
     options.tools = list(options.allowed_tools)
+    # After `tools`: that list is Claude Code's own, and this one is not among them.
+    if config.permissions == "full_no_push" and google_available(config.google_user_id):
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+
+        options.mcp_servers = {
+            SERVER_NAME: google_server(config.google_user_id, tool, create_sdk_mcp_server)
+        }
+        options.allowed_tools = [*options.allowed_tools, ALLOWED_TOOL]
     if resume:
         options.resume = resume
     if effort:

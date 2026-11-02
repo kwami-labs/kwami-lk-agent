@@ -13,6 +13,7 @@ dropping the whole message, the same rule `handlers/config_handler.py` follows.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, cast
@@ -128,6 +129,8 @@ class ExecutorConfig:
     max_turns: int = 40
     #: Hard ceiling per task, enforced by the executor itself.
     max_task_usd: float = 2.0
+    #: Whose Google accounts the run may use (`google_tool`). Empty: none.
+    google_user_id: str = ""
 
 
 @dataclass
@@ -245,6 +248,16 @@ def _parse_model(raw: Any) -> BrainModel | None:
             :MAX_INSTRUCTIONS_CHARS
         ],
     )
+
+
+def extra_executor_folders() -> list[Path]:
+    """Folders of the PC the user opened to the executor, besides the Jarvis folder.
+
+    KWAMI_EXECUTOR_FOLDERS, separated by `;`. Empty by default, and only a variable on
+    the PC itself: nothing a call or a job carries can widen this.
+    """
+    raw = os.environ.get("KWAMI_EXECUTOR_FOLDERS", "")
+    return [Path(item.strip()).expanduser().resolve() for item in raw.split(";") if item.strip()]
 
 
 def resolve_executor_folder(folder: str) -> Path:
