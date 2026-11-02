@@ -80,6 +80,7 @@ CAPABILITIES: tuple[Capability, ...] = (
                 "close_workspace_panel",
                 "set_panel_control",
                 "focus_transcription_panel",
+                "set_panel_arrangement",
             }
         ),
         guidance="Asked where something is, open its panel.",
@@ -226,6 +227,50 @@ CAPABILITIES: tuple[Capability, ...] = (
             }
         ),
         guidance="reply_to_email and send_email take confirm=true only after you have read the message back and heard a clear yes.",
+    ),
+    Capability(
+        name="google_account",
+        requires=frozenset(
+            {
+                "list_gmail_messages",
+                "read_gmail_message",
+                "send_gmail_message",
+                "archive_gmail_message",
+                "list_google_events",
+                "create_google_event",
+                "update_google_event",
+                "delete_google_event",
+            }
+        ),
+        guidance=(
+            "There are two mailboxes and two calendars. read_emails, send_email and "
+            "the calendar tools are your own; the gmail and google tools are the "
+            "user's real account. 'My email' and 'my calendar' mean theirs. Sending "
+            "from their Gmail or inviting people speaks in their name, so say so."
+        ),
+    ),
+    Capability(
+        name="assistant_tasks",
+        requires=frozenset(
+            {
+                "create_reminder",
+                "schedule_work",
+                "add_followup",
+                "list_assistant_tasks",
+                "complete_assistant_task",
+                "cancel_assistant_task",
+                "read_assistant_notifications",
+                "set_assistant_notifications",
+            }
+        ),
+        guidance=(
+            "A reminder has a time and reaches the user even when no session is open. "
+            "A follow-up has no time: it is something under way, and it appears in the "
+            "Monday, Friday and Sunday reports. Mark follow-ups done when you hear they are. "
+            "schedule_work runs the brain at a set time and spends money with nobody on the "
+            "line: use it only when the user asks for work at a time or on a schedule, never "
+            "on your own idea."
+        ),
     ),
     Capability(
         name="calendar",

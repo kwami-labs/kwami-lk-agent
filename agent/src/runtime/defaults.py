@@ -60,7 +60,7 @@ LANGUAGE_KEY = "language"
 
 #: Fields whose value is one of a fixed set.
 _CHOICES: dict[str, tuple[str, ...]] = {
-    "pipeline_type": ("standard", "realtime"),
+    "pipeline_type": ("standard", "realtime", "hybrid"),
     "turn_detection": ("server_vad", "semantic", "none"),
     "turn_detector": ("model", "vad", "stt"),
     "noise_cancellation_mode": ("bvc", "krisp"),

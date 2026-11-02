@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from livekit.agents import RunContext, function_tool
+from livekit.agents import RunContext, StopResponse, function_tool
 
 from ..brain.router import DIFFICULTIES, KINDS
 from ..runtime.container import deps_from_context
@@ -22,6 +22,12 @@ logger = get_logger("tools.brain")
 def _bridge(context: Any) -> Any:
     deps = deps_from_context(context)
     return getattr(deps, "bridge", None) if deps is not None else None
+
+
+def _says_it_with_the_call(agent: Any) -> bool:
+    """A text LLM says it is on it in the same reply as the call. A realtime model cannot."""
+    voice = getattr(getattr(agent, "kwami_config", None), "voice", None)
+    return getattr(voice, "pipeline_type", "") == "standard"
 
 
 class BrainToolsMixin:
@@ -37,6 +43,9 @@ class BrainToolsMixin:
         council: bool = False,
         model: str = "",
         context_notes: str = "",
+        long_running: bool = False,
+        follow_up: str = "",
+        own_code_repo: str = "",
     ) -> dict[str, Any]:
         """Hand work to the brain: other models search, analyse, write or program.
 
@@ -50,8 +59,11 @@ class BrainToolsMixin:
             task: The full, self-contained instruction. The worker has not heard
                 the conversation: include names, numbers and what a good answer is.
             title: Four to eight words naming the task, in the user's language.
-            kind: research (needs the web), analysis, writing, question, or code
+            kind: research (needs the web), x_search (what people say on X, or
+                anything on X itself), analysis, writing, question, or code
                 (programs and runs things on the user's PC, in the Jarvis folder).
+                A document, spreadsheet or presentation file is code too: name the
+                format (.docx, .xlsx, .pptx) in the task.
             difficulty: simple, normal or hard. Picks the model: simple is the
                 fast one, hard the strongest.
             important: True when money, investments, security or a hard decision
@@ -59,6 +71,13 @@ class BrainToolsMixin:
             council: True when the user asks to consult several models.
             model: Only when the user names a model ('Opus', 'Gemini', 'GPT').
             context_notes: Anything from the conversation the worker needs.
+            long_running: True for work of many steps that should carry on if the
+                call ends. It runs on the user's PC when the PC is on.
+            follow_up: To carry on earlier work with what it already knows: its
+                task id, or "last" for the latest. Empty starts fresh.
+            own_code_repo: Only when the user asks you to change your own code: agent,
+                api, app or sdk, one per task. It ends in a pull request the user
+                reviews; you cannot merge or deploy it.
         """
         bridge = _bridge(context)
         if bridge is None:
@@ -74,16 +93,24 @@ class BrainToolsMixin:
             council=bool(council),
             model=model.strip(),
             context=context_notes.strip(),
+            long_running=bool(long_running),
+            follow_up=follow_up.strip(),
+            repo=own_code_repo.strip().lower(),
         )
         if isinstance(started, str):
             return {"error": started}
+        if _says_it_with_the_call(self):
+            # Answering the tool makes the framework ask for another reply, and on real
+            # calls that was a second "I'm on it" every time. The bridge says the result.
+            raise StopResponse()
         return {
             "taskId": started.id,
             "status": "running",
             "council": started.council,
             "say": (
-                "Tell the user briefly that you are on it; the result will come at the "
-                "next pause. Do not guess any part of it meanwhile."
+                "If you have not said so yet, tell the user in a few words that you are on "
+                "it; if you have, say nothing more now. The result will come at the next "
+                "pause. Do not guess any part of it meanwhile."
             ),
         }
 
@@ -138,8 +165,11 @@ class BrainToolsMixin:
                 "role": m.role,
                 "enabled": m.enabled,
                 "council": m.council,
+                "roles": m.roles,
+                "access": m.access,
             }
             for m in bridge.config.models
         ]
+        status["pcOnline"] = await bridge.runner_online()
         status["note"] = "Spend is approximate for non-Anthropic models."
         return status

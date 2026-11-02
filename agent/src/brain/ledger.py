@@ -57,9 +57,14 @@ PROVIDER_DEFAULT_PRICES: dict[str, tuple[float, float]] = {
     "anthropic": (4.00, 20.00),
     "google": (2.00, 12.00),
     "openai": (2.00, 15.00),
+    "xai": (3.00, 15.00),
+    "openrouter": (3.00, 15.00),
+    "groq": (0.50, 1.00),
+    "deepseek": (0.50, 2.00),
+    "mistral": (1.00, 5.00),
 }
 #: Per search, on top of tokens.
-SEARCH_PRICES: dict[str, float] = {"anthropic": 0.01, "google": 0.014, "openai": 0.01}
+SEARCH_PRICES: dict[str, float] = {"anthropic": 0.01, "google": 0.014, "openai": 0.01, "xai": 0.005}
 
 
 def token_cost(provider: str, model: str, input_tokens: int, output_tokens: int) -> float:
@@ -142,6 +147,9 @@ class Ledger:
                 self._write(self._spend_path(), data)
             except OSError:
                 logger.exception("Could not record brain spend")
+
+    def note_spend(self, model_id: str, usd: float) -> None:
+        """Spend someone else already recorded. On disk nobody else does."""
 
     def month_spend(self) -> dict[str, Any]:
         data = self._read(self._spend_path()) or {}
@@ -350,6 +358,12 @@ class SupabaseLedger(Ledger):
             self._unsent.append((self._kwami_id, model_id, usd))
             return
         self._send_spend(self._kwami_id, model_id, usd)
+
+    def note_spend(self, model_id: str, usd: float) -> None:
+        """The worker on the PC recorded this; only our running total lacks it."""
+        if usd > 0:
+            self._roll_month()
+            self._by_model[model_id] = round(self._by_model.get(model_id, 0.0) + usd, 6)
 
     def _send_spend(self, kwami_id: str, model_id: str, usd: float) -> None:
         self._spawn(

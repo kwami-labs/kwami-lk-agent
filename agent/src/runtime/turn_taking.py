@@ -43,6 +43,7 @@ from livekit.agents.voice.room_io.types import NoiseCancellationParams
 from livekit.agents.voice.turn import TurnHandlingOptions
 
 from ..domain import KwamiVoiceConfig
+from ..domain.pipelines import REALTIME_MODEL_PIPELINES
 from ..utils.logging import get_logger
 
 try:
@@ -52,8 +53,6 @@ except Exception:  # pragma: no cover - a core dependency; guarded so a broken
     noise_cancellation = None  # type: ignore[assignment]
 
 logger = get_logger("turn_taking")
-
-REALTIME_PIPELINE = "realtime"
 
 _DEFAULTS = KwamiVoiceConfig()
 
@@ -107,8 +106,11 @@ def session_turn_handling(voice: KwamiVoiceConfig | None = None) -> TurnHandling
 
 
 def agent_turn_handling(pipeline_type: str) -> Any:
-    """Per-agent overrides: adaptive interruptions on the standard pipeline."""
-    if pipeline_type == REALTIME_PIPELINE:
+    """Per-agent overrides: adaptive interruptions on the standard pipeline.
+
+    A realtime model takes the turns itself, on the hybrid pipeline too.
+    """
+    if pipeline_type in REALTIME_MODEL_PIPELINES:
         return NOT_GIVEN
     return TurnHandlingOptions(interruption={"mode": "adaptive"})
 

@@ -110,6 +110,8 @@ class KwamiAgent(
         self._memory_text = ""
         # Whether searches go to the brain; decides tools and prompt alike.
         self._delegating = self._brain_delegates()
+        # Whether another model does all the thinking; decides the prompt.
+        self._relaying_all = self._relay_all()
 
         # Track current voice config for switching
         self._current_voice_config = self.kwami_config.voice
@@ -168,6 +170,12 @@ class KwamiAgent(
             return bool(bridge.delegates())
         return can_delegate(default_brain(), get_settings().provider_keys)
 
+    def _relay_all(self) -> bool:
+        """Whether the app wants the voice to pass all the thinking to the brain."""
+        bridge = self._bridge()
+        config = getattr(bridge, "config", None) if bridge is not None else default_brain()
+        return getattr(config, "relay", "") == "everything" and self._brain_delegates()
+
     def _withheld_builtins(self) -> tuple[set[str], frozenset[str]]:
         """Built-in names withheld: (missing a credential, kept back on purpose).
 
@@ -194,13 +202,17 @@ class KwamiAgent(
         loses them before the next turn.
         """
         delegating = self._brain_delegates()
-        if delegating == getattr(self, "_delegating", False):
+        relay_all = self._relay_all()
+        tools_changed = delegating != getattr(self, "_delegating", False)
+        if not tools_changed and relay_all == getattr(self, "_relaying_all", False):
             return False
         self._delegating = delegating
-        combined = enforce_tool_limit(
-            self.available_builtin_tools(), self.client_tools.create_client_tools()
-        )
-        await self.update_tools(combined)
+        self._relaying_all = relay_all
+        if tools_changed:
+            combined = enforce_tool_limit(
+                self.available_builtin_tools(), self.client_tools.create_client_tools()
+            )
+            await self.update_tools(combined)
         await self.update_instructions(
             self._build_system_prompt(getattr(self, "_memory_text", None) or None)
         )
@@ -281,6 +293,7 @@ class KwamiAgent(
                 else ""
             ),
             voice_locked=self.kwami_config.voice.voice_locked,
+            relay_all=getattr(self, "_relaying_all", False),
         )
 
     def _registered_client_tool_names(self) -> set[str]:

@@ -18,18 +18,21 @@ from typing import Any
 
 import claude_agent_sdk
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ThinkingBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ThinkingBlock, ToolUseBlock
 
 from src.brain import config as brain_config
 from src.brain import executor
 from src.brain.config import ExecutorConfig
 from src.brain.executor import (
     FILES_BUCKET,
+    THINK_SYSTEM,
     CloudWorkspace,
     check_tool_call,
+    child_env,
     run_executor,
     upload_results,
 )
+from src.brain.team import TEAM
 
 USER = "11111111-1111-4111-8111-111111111111"
 
@@ -118,7 +121,11 @@ async def test_a_local_run_works_in_the_jarvis_folder(sdk, jarvis: Path) -> None
     options = sdk.last.options
     assert await asyncio.to_thread(jarvis.is_dir)
     assert options.cwd == str(await asyncio.to_thread(jarvis.resolve))
-    assert options.env == {"ANTHROPIC_API_KEY": "ak"}
+    assert options.env["ANTHROPIC_API_KEY"] == "ak"
+    assert options.setting_sources == []
+    assert options.resume is None
+    assert set(options.agents) == {"clerk", "researcher", "reasoner", "reviewer"}
+    assert all(member.background is False for member in options.agents.values())
     assert options.permission_mode == "bypassPermissions"
     assert options.max_budget_usd == 2.0
     assert sdk.last.prompt == "haz un informe"
@@ -143,6 +150,35 @@ async def test_permissions_narrow_what_the_executor_may_do(
     assert options.disallowed_tools == disallowed
     if permissions == "read_only":
         assert "Write" not in options.allowed_tools
+
+
+@pytest.mark.parametrize(
+    ("permissions", "tools"), [("think", []), ("think_web", ["WebSearch", "WebFetch"])]
+)
+async def test_a_thought_has_no_hands_and_leaves_no_session(
+    sdk, jarvis: Path, permissions: str, tools: list[str]
+) -> None:
+    config = ExecutorConfig(str(jarvis), permissions=permissions)  # type: ignore[arg-type]
+    await run_executor("", "m", "t", config)
+    options = sdk.last.options
+    assert options.tools == tools and options.allowed_tools == tools
+    assert options.permission_mode == "dontAsk"
+    assert options.system_prompt == THINK_SYSTEM
+    assert "no-session-persistence" in options.extra_args
+    assert options.agents is None
+
+
+@pytest.mark.parametrize("permissions", ["full_no_push", "edit_only", "read_only", "think"])
+async def test_no_mode_reaches_the_accounts_connectors(sdk, jarvis: Path, permissions: str) -> None:
+    config = ExecutorConfig(str(jarvis), permissions=permissions)  # type: ignore[arg-type]
+    await run_executor("", "m", "t", config)
+    options = sdk.last.options
+    # Seen on 2026-11-02: on a login, Claude Code loaded the account's Docs and Supabase.
+    assert options.mcp_servers == {} and "strict-mcp-config" in options.extra_args
+    assert options.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+    # And Claude Code's own tools (scheduling, remote triggers) do not exist for it.
+    assert options.tools == options.allowed_tools
+    assert not {"CronCreate", "RemoteTrigger", "Skill"} & set(options.tools)
 
 
 async def test_the_guard_runs_on_every_tool_call(sdk, jarvis: Path) -> None:
@@ -349,3 +385,80 @@ def test_a_linux_host_refuses_windows_paths(tmp_path: Path, monkeypatch, raw: st
     monkeypatch.setattr(executor, "os", SimpleNamespace(name="posix"))
     refusal = check_tool_call(tmp_path, "Read", {"file_path": raw})
     assert refusal == f"{raw} is outside the Jarvis folder."
+
+
+# -- the thread: memory, team, a clean environment -------------------------------
+
+
+async def test_a_run_can_carry_on_an_earlier_one(sdk, jarvis: Path) -> None:
+    sdk.messages = [_result("Seguido")]
+    result = await run_executor(
+        "ak",
+        "claude-sonnet-5-5",
+        "sigue",
+        ExecutorConfig(str(jarvis)),
+        resume="earlier",
+        effort="high",
+    )
+    assert sdk.last.options.resume == "earlier"
+    assert sdk.last.options.effort == "high"
+    assert result.session_id == "s"
+
+
+async def test_a_failure_keeps_the_session_it_was_resuming(sdk, jarvis: Path) -> None:
+    sdk.error = RuntimeError("boom")
+    result = await run_executor(
+        "ak", "claude-sonnet-5-5", "sigue", ExecutorConfig(str(jarvis)), resume="earlier"
+    )
+    assert not result.ok and result.session_id == "earlier"
+
+
+async def test_tool_calls_are_reported_as_progress(sdk, jarvis: Path) -> None:
+    sdk.messages = [
+        _assistant(
+            ToolUseBlock(id="1", name="Bash", input={"command": "ls"}),
+            ToolUseBlock(
+                id="2",
+                name="Agent",
+                input={"subagent_type": "reviewer", "description": "Comprueba el informe"},
+            ),
+        ),
+        _result("Hecho"),
+    ]
+    seen: list[str] = []
+    await run_executor(
+        "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)), on_progress=seen.append
+    )
+    assert seen == ["Bash", "reviewer: Comprueba el informe"]
+
+
+@pytest.mark.parametrize("permissions", ["read_only", "edit_only"])
+async def test_a_narrow_mode_gets_no_team(sdk, jarvis: Path, permissions: str) -> None:
+    sdk.messages = [_result("Hecho")]
+    await run_executor(
+        "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis), permissions=permissions)
+    )
+    assert sdk.last.options.agents is None
+
+
+def test_the_team_keeps_opus_for_hard_thinking() -> None:
+    assert TEAM["reasoner"].model == "claude-opus-5-5"
+    assert TEAM["clerk"].model == "claude-haiku-5-5"
+    assert {"Write", "Edit", "Bash"}.isdisjoint(TEAM["reasoner"].tools)
+    assert {"Write", "Edit"}.isdisjoint(TEAM["reviewer"].tools)
+
+
+def test_the_executor_inherits_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "x")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "x")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "x")
+    monkeypatch.setenv("SUPABASE_URL", "kept")
+
+    env = child_env("ak")
+
+    assert env["SUPABASE_SECRET_KEY"] == ""
+    assert env["TWILIO_AUTH_TOKEN"] == ""
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert env["ANTHROPIC_API_KEY"] == "ak"
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+    assert "SUPABASE_URL" not in env

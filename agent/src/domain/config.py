@@ -131,13 +131,14 @@ class KwamiVoiceConfig:
     This configuration supports:
     - Standard pipeline: STT → LLM → TTS
     - Realtime pipeline: Single model for ultra-low latency
+    - Hybrid pipeline: the realtime model thinks, a TTS speaks (domain/pipelines.py)
     """
 
     # =========================================================================
     # Pipeline Type
     # =========================================================================
 
-    pipeline_type: Literal["standard", "realtime"] = "standard"
+    pipeline_type: Literal["standard", "realtime", "hybrid"] = "standard"
 
     # =========================================================================
     # Speech-to-Text (STT) Configuration

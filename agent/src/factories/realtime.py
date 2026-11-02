@@ -15,6 +15,7 @@ from livekit.plugins import openai
 
 from ..constants import resolve_realtime_voice
 from ..domain import KwamiVoiceConfig
+from ..domain.pipelines import HYBRID_PIPELINE
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 from .optional import optional_plugin
@@ -95,6 +96,16 @@ def _gemini_activity_detection(config: KwamiVoiceConfig) -> Any:
     )
 
 
+def _gemini_modalities(text_only: bool) -> dict[str, Any]:
+    """Live's answer modality: text for the hybrid pipeline, else its default (audio).
+
+    Passed only when asked for, so the audio session is built exactly as before.
+    """
+    if not text_only or genai_types is None:
+        return {}
+    return {"modalities": [genai_types.Modality.TEXT]}
+
+
 def _realtime_voice(provider: str, voice: str | None, default: str) -> str:
     """The provider's spelling of `voice`, or `default` if it doesn't offer it.
 
@@ -125,9 +136,15 @@ def _default_openai_realtime():
 
 
 def create_realtime_model(config: KwamiVoiceConfig):
-    """Create a Realtime model instance for ultra-low latency."""
+    """Create a Realtime model instance for ultra-low latency.
+
+    On the hybrid pipeline it answers in text only, for the session's TTS to
+    speak; `domain.pipelines.resolve_pipeline` only lets a model that can do
+    that get here.
+    """
     provider = (config.realtime_provider or "openai").lower()
     model = strip_model_prefix(config.realtime_model or "", provider)
+    text_only = config.pipeline_type == HYBRID_PIPELINE
 
     try:
         if provider == "openai":
@@ -138,7 +155,9 @@ def create_realtime_model(config: KwamiVoiceConfig):
                 ),
                 temperature=config.llm_temperature,
                 # Validated by the provider; the config carries plain strings.
-                modalities=cast(Any, config.realtime_modalities or ["text", "audio"]),
+                modalities=cast(
+                    Any, ["text"] if text_only else config.realtime_modalities or ["text", "audio"]
+                ),
                 turn_detection=_server_vad(config),
             )
 
@@ -156,6 +175,7 @@ def create_realtime_model(config: KwamiVoiceConfig):
                 ),
                 temperature=config.llm_temperature,
                 realtime_input_config=_gemini_activity_detection(config),
+                **_gemini_modalities(text_only),
             )
 
         logger.warning(

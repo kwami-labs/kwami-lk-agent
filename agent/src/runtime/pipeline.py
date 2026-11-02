@@ -13,6 +13,7 @@ from typing import Any
 
 from ..agent import KwamiAgent
 from ..domain import KwamiConfig
+from ..domain.pipelines import HYBRID_PIPELINE, REALTIME_PIPELINE, resolve_pipeline
 from ..factories import create_llm, create_realtime_model, create_stt, create_tts
 from ..factories.fallback import with_llm_fallback, with_stt_fallback, with_tts_fallback
 from ..factories.vad import create_vad
@@ -20,8 +21,6 @@ from ..utils.logging import get_logger
 from .turn_taking import agent_turn_handling
 
 logger = get_logger("pipeline")
-
-REALTIME_PIPELINE = "realtime"
 
 
 def create_agent_from_config(
@@ -42,6 +41,19 @@ def create_agent_from_config(
         Configured KwamiAgent instance.
     """
     voice_config = config.voice
+    # A Live model that only answers in audio cannot speak through a TTS: build
+    # it with its own voice rather than open a socket it would close (1007).
+    choice = resolve_pipeline(
+        voice_config.pipeline_type, voice_config.realtime_provider, voice_config.realtime_model
+    )
+    if choice.adjusted:
+        logger.warning(
+            "Pipeline %s adjusted to %s: %s",
+            voice_config.pipeline_type,
+            choice.pipeline,
+            choice.reason,
+        )
+        voice_config.pipeline_type = choice.pipeline  # type: ignore[assignment]
 
     # Reuses the prewarmed model unless this session actually asks for
     # different turn-taking; the VAD settings were previously ignored entirely.
@@ -58,6 +70,23 @@ def create_agent_from_config(
             vad=session_vad,
             memory=memory,
             llm=create_realtime_model(voice_config),
+            skip_greeting=skip_greeting,
+        )
+
+    if voice_config.pipeline_type == HYBRID_PIPELINE:
+        logger.info(
+            "Using hybrid pipeline: %s/%s thinks, TTS=%s/%s speaks",
+            voice_config.realtime_provider,
+            voice_config.realtime_model,
+            voice_config.tts_provider,
+            voice_config.tts_model,
+        )
+        return KwamiAgent(
+            config,
+            vad=session_vad,
+            memory=memory,
+            llm=create_realtime_model(voice_config),
+            tts=with_tts_fallback(create_tts(voice_config), voice_config, create_tts),
             skip_greeting=skip_greeting,
         )
 

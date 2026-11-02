@@ -162,12 +162,14 @@ def _create_openai_tts(config: KwamiVoiceConfig):
         model = OpenAIModels.TTS_1
 
     # Validate voice
-    if voice not in OpenAIVoices.STANDARD:
+    valid = OpenAIVoices.for_tts_model(model)
+    if voice not in valid:
         logger.warning(
-            "Voice '%s' not supported by OpenAI TTS. Using '%s'. Valid: %s",
+            "Voice '%s' not supported by OpenAI TTS %s. Using '%s'. Valid: %s",
             voice,
+            model,
             OpenAIVoices.DEFAULT,
-            ", ".join(sorted(OpenAIVoices.STANDARD)),
+            ", ".join(sorted(valid)),
         )
         voice = OpenAIVoices.DEFAULT
 
@@ -298,6 +300,11 @@ _DEEPGRAM_TTS_MODEL = re.compile(r"^aura-(2-)?[a-z]+-[a-z]{2}$")
 def _create_deepgram_tts(config: KwamiVoiceConfig):
     """Create Deepgram Aura TTS with voice validation."""
     voice = config.tts_voice or DeepgramVoices.DEFAULT
+
+    # An Aura 2 voice is a whole model id, and what the user picked last: the
+    # family in `tts_model` ("aura-2") does not say which of them to speak with.
+    if _DEEPGRAM_TTS_MODEL.match(voice):
+        return deepgram.TTS(model=voice)
 
     if voice not in DeepgramVoices.ALL:
         logger.warning(

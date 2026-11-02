@@ -52,6 +52,7 @@ PROVIDER_KEY_NAMES: tuple[str, ...] = (
     "CEREBRAS_API_KEY",
     "XAI_API_KEY",
     "MISTRAL_API_KEY",
+    "OPENROUTER_API_KEY",
     # LiveKit Inference (Rime, the cloud turn detector) signs with these.
     "LIVEKIT_API_KEY",
     "LIVEKIT_API_SECRET",
@@ -95,6 +96,8 @@ ENV_VAR_NAMES: tuple[str, ...] = (
     "SUPABASE_SECRET_KEY",
     "KWAMI_STORAGE",
     "KWAMI_EXECUTOR_MODE",
+    "KWAMI_PROVIDER_KEYS_SECRET",
+    "KWAMI_SELF_REPO_OWNER",
     "KWAMI_AGENT_NAME",
     *PROVIDER_KEY_NAMES,
 )
@@ -190,6 +193,11 @@ class Settings:
     #: to Storage. "auto" (default): cloud when there is no Documents folder,
     #: which is the case in every container and never on the user's PC.
     executor_mode: str = "auto"
+    #: Opens the model keys users connected from the app. Without it, only this
+    #: deployment's own keys are used.
+    provider_keys_secret: str = ""
+    #: Whose repositories Jarvis may open pull requests on. Empty: nobody's.
+    self_repo_owner: str = ""
     #: The dispatch name LiveKit routes calls by. A local worker for testing
     #: takes another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not
     #: compete with the deployed agent for real calls.
@@ -230,6 +238,8 @@ class Settings:
             allow_browser_js=_env_bool("KWAMI_ALLOW_BROWSER_JS"),
             mistral_api_key=_env_str("MISTRAL_API_KEY"),
             executor_mode=_env_str("KWAMI_EXECUTOR_MODE", "auto").strip().lower(),
+            provider_keys_secret=_env_str("KWAMI_PROVIDER_KEYS_SECRET"),
+            self_repo_owner=_env_str("KWAMI_SELF_REPO_OWNER").strip(),
             agent_name=_env_str("KWAMI_AGENT_NAME").strip() or DEFAULT_AGENT_NAME,
             provider_keys={
                 name: _env_str(name) for name in PROVIDER_KEY_NAMES if os.environ.get(name)

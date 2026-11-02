@@ -94,6 +94,19 @@ def _extract_features(content: str, max_items: int = 8) -> list[str]:
     return features[:max_items]
 
 
+def looks_like_card_number(text: str) -> bool:
+    """A run of 13 to 19 digits that passes the Luhn check, spaces and dashes aside."""
+    for run in re.findall(r"\d(?:[ -]?\d){12,18}", text):
+        digits = [int(d) for d in run if d.isdigit()]
+        total = sum(
+            d if i % 2 == 0 else (d * 2 - 9 if d > 4 else d * 2)
+            for i, d in enumerate(reversed(digits))
+        )
+        if total % 10 == 0:
+            return True
+    return False
+
+
 async def _tavily_extract_images(
     api_key: str,
     urls: list[str],
@@ -974,6 +987,8 @@ class AgentToolsMixin:
             element_id: Exact element id from read_navigation_page (e.g. 'el-3').
             clear_first: If True (default), clears the field before typing. Set False to append.
         """
+        if looks_like_card_number(text):
+            return "Refused: card details are for the user to type. Tell them it is ready to pay."
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."

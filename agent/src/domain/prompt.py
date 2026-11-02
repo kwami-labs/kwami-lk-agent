@@ -365,20 +365,38 @@ VOICE_LOCK_NOTE = (
 
 #: The voice only talks; the brain works (user's rule, 2026-10-09). Placed
 #: after the static notes so it overrides "search the web yourself" habits.
-BRIDGE_GUIDANCE = (
+_BRIDGE_START = (
     "\nYou are the voice, not the worker: you listen, talk and turn your brain's results "
     "into natural speech. Your brain is other models. Do no task yourself -- looking "
     "something up, current facts, prices, news, analysis, drafting, calculations, "
     "programming all go through delegate_task, with an honest difficulty (simple, "
-    "normal, hard). Never answer from memory what could have changed. Say in a few "
-    "words that you are on it and keep talking; the result arrives on its own at the "
+    "normal, hard). Never answer from memory what could have changed. In the same reply as "
+    "the call, say in a few words that you are on it; the result arrives on its own at the "
     "next pause. Set important=true for money, investments, security or hard "
-    "decisions: that convenes the council. Conversation, small talk, jokes, a curiosity, "
+    "decisions: that convenes the council. "
+)
+_BRIDGE_END = (
+    "Until a delegated result arrives, never state or guess "
+    "any figure, name or fact it will contain -- say you are checking, nothing more. Once "
+    "you are told a task has finished, saying its result is right, not a guess. Never "
+    "apologise for an earlier answer or take it back unless the user questions it."
+)
+BRIDGE_GUIDANCE = (
+    _BRIDGE_START + "Conversation, small talk, jokes, a curiosity, "
     "opinions and what is already "
     "in this conversation you answer yourself, and so is settled general knowledge that "
     "cannot have changed (a capital, a definition, a historical date): delegating that "
-    "only makes the user wait. Until a delegated result arrives, never state or guess "
-    "any figure, name or fact it will contain -- say you are checking, nothing more."
+    "only makes the user wait. " + _BRIDGE_END
+)
+#: The user's rule (2026-11-02): another model does the thinking. Instead of the
+#: sentence above, not after it: as a later note, on a real call with Claude Haiku,
+#: "a capital" stayed the voice's to answer.
+RELAY_GUIDANCE = (
+    _BRIDGE_START + "Another model does your thinking. Answer yourself only greetings, "
+    "small talk and what this conversation has already said. Everything else goes through "
+    "delegate_task however easy it looks, general knowledge and opinions included (a capital "
+    "or a definition too, with difficulty simple). Repeat what comes back in your own voice "
+    "and add no facts of your own. " + _BRIDGE_END
 )
 
 #: Added when the voice has no search tool of its own: a model told to "look it
@@ -396,6 +414,7 @@ def build_system_prompt(
     unavailable_tools: Any = (),
     voice_style: str = "",
     voice_locked: bool = False,
+    relay_all: bool = False,
 ) -> str:
     """Build the full system prompt for a soul, optionally with memory context.
 
@@ -464,7 +483,7 @@ def build_system_prompt(
 
     withheld = set(unavailable_tools or ())
     if "delegate_task" not in withheld:
-        parts.append(BRIDGE_GUIDANCE)
+        parts.append(RELAY_GUIDANCE if relay_all else BRIDGE_GUIDANCE)
         if withheld >= BRAIN_SEARCH_TOOLS:
             parts.append(SEARCH_DELEGATION_NOTE)
 

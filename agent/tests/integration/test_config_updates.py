@@ -731,3 +731,14 @@ async def test_options_a_plugin_does_not_take_are_dropped() -> None:
         {"speed"},
     )
     assert _supported_options(anything, {"speed": 1}) == ({"speed": 1}, set())
+
+
+def test_an_option_method_without_a_readable_signature_gets_everything() -> None:
+    from src.handlers.config_handler import _supported_options
+
+    class Opaque:
+        __signature__ = "not a signature"
+
+        def __call__(self, **kwargs: Any) -> None: ...
+
+    assert _supported_options(Opaque(), {"speed": 1}) == ({"speed": 1}, set())

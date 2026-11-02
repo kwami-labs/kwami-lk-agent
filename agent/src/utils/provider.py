@@ -1,7 +1,55 @@
 """Provider detection utilities for TTS/LLM switching."""
 
 # OpenAI TTS voice names
-OPENAI_VOICES = {"alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"}
+OPENAI_VOICES = {
+    "alloy",
+    "ash",
+    "marin",
+    "cedar",
+    "coral",
+    "echo",
+    "fable",
+    "nova",
+    "onyx",
+    "sage",
+    "shimmer",
+}
+
+#: Gemini's prebuilt voices (Live and TTS share them).
+GEMINI_VOICES = frozenset(
+    {
+        "Achernar",
+        "Achird",
+        "Algenib",
+        "Algieba",
+        "Alnilam",
+        "Aoede",
+        "Autonoe",
+        "Callirrhoe",
+        "Charon",
+        "Despina",
+        "Enceladus",
+        "Erinome",
+        "Fenrir",
+        "Gacrux",
+        "Iapetus",
+        "Kore",
+        "Laomedeia",
+        "Leda",
+        "Orus",
+        "Puck",
+        "Pulcherrima",
+        "Rasalgethi",
+        "Sadachbia",
+        "Sadaltager",
+        "Schedar",
+        "Sulafat",
+        "Umbriel",
+        "Vindemiatrix",
+        "Zephyr",
+        "Zubenelgenubi",
+    }
+)
 
 #: Gemini's prebuilt voices (Live and TTS share them).
 GEMINI_VOICES = frozenset(

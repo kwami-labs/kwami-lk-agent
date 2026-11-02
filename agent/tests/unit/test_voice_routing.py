@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from src.brain import Bridge
@@ -105,6 +106,32 @@ async def test_switching_the_brain_off_hands_searching_back() -> None:
         assert await agent.refresh_brain_gating() is True
         assert not (BRAIN_SEARCH_TOOLS & _names(agent))
         assert SEARCH_DELEGATION_NOTE in agent.instructions
+    finally:
+        set_settings(None)
+
+
+async def test_changing_who_thinks_rewrites_the_prompt_and_leaves_the_tools_alone() -> None:
+    from src.agent import KwamiAgent
+    from src.domain.prompt import RELAY_GUIDANCE
+
+    set_settings(Settings(**SEARCH_CREDENTIALS, provider_keys=dict(BRAIN_KEYS)))
+    try:
+        agent = KwamiAgent()
+        # The default: nothing to update on entering, which on a realtime model costs.
+        assert RELAY_GUIDANCE in agent.instructions
+
+        bridge = _BridgeStub(delegates=True)
+        bridge.config = SimpleNamespace(relay="work_only")  # type: ignore[attr-defined]
+        agent._bridge = lambda: bridge  # type: ignore[method-assign]
+        updated: list[Any] = []
+
+        async def update_tools(tools: Any) -> None:
+            updated.append(tools)
+
+        agent.update_tools = update_tools  # type: ignore[method-assign]
+        assert await agent.refresh_brain_gating() is True
+        assert RELAY_GUIDANCE not in agent.instructions
+        assert updated == []
     finally:
         set_settings(None)
 

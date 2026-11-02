@@ -15,6 +15,11 @@ Measured, per case and over `--runs` repetitions (median reported):
   transcript that completes it, and accuracy is the word match against the
   sentence.
 * LLM: time to the first token (TTFT) and to the whole short answer.
+* Realtime: every Live model twice -- with its own voice (time to the first
+  audio) and asked to answer in text, which is what the hybrid pipeline needs
+  for a TTS to speak for it. A model that refuses text is marked "solo voz":
+  `src/domain/pipelines.py` keeps that list, and the app greys those models out
+  of the "Live + TTS" engine.
 
 The report also estimates the voice-to-voice delay of the best combinations:
 STT final + LLM first token + TTS first audio. Network and turn detection add
@@ -25,6 +30,7 @@ Usage, from `agent/`:
     uv run python -X utf8 scripts/voice_lab/bench.py
     uv run python -X utf8 scripts/voice_lab/bench.py --kinds tts --only eleven --runs 3
     uv run python -X utf8 scripts/voice_lab/bench.py --skip gemini   # spare the Google quota
+    uv run python -X utf8 scripts/voice_lab/bench.py --kinds realtime --runs 1
 
 Keys come from the repo's `.env` (or `--env`), loaded the way `main.py` does.
 Reports land in `scripts/voice_lab/out/<timestamp>/` (git-ignored).
@@ -39,7 +45,6 @@ import difflib
 import html
 import json
 import logging
-import math
 import statistics
 import sys
 import time
@@ -68,7 +73,7 @@ MADRID = ZoneInfo("Europe/Madrid")
 
 @dataclass
 class Case:
-    kind: str  # tts | stt | llm
+    kind: str  # tts | stt | llm | realtime
     label: str
     overrides: dict[str, Any]
     expected: str  # module family the instance must come from
@@ -310,6 +315,35 @@ LLM_CASES = [
     ),
 ]
 
+
+def realtime_cases() -> list[Case]:
+    """Each Live model with its own voice, and asked for text (the hybrid pipeline)."""
+    models = [
+        ("google", "gemini-3.1-flash-live-preview", "Charon"),
+        ("google", "gemini-2.5-flash-native-audio-preview-12-2025", "Charon"),
+        ("google", "gemini-3.8-live", "Charon"),
+        ("openai", "gpt-realtime", "marin"),
+        ("openai", "gpt-realtime-mini", "marin"),
+    ]
+    cases: list[Case] = []
+    for provider, model, voice in models:
+        for pipeline, mode in (("realtime", "voz propia"), ("hybrid", "texto → TTS")):
+            cases.append(
+                Case(
+                    "realtime",
+                    f"{model} · {mode}",
+                    dict(
+                        pipeline_type=pipeline,
+                        realtime_provider=provider,
+                        realtime_model=model,
+                        realtime_voice=voice,
+                    ),
+                    "google" if provider == "google" else "openai",
+                )
+            )
+    return cases
+
+
 _FAMILIES = (
     "inference",
     "openai",
@@ -449,8 +483,64 @@ async def ask(llm: Any) -> tuple[float, float, str]:
     return (first or end) - t0, end - t0, text
 
 
+async def converse(model: Any) -> tuple[float, float, str, int]:
+    """One realtime turn: (first output, whole answer, text heard, audio frames).
+
+    The first output is the first audio frame, or the first text when the model
+    answers in text only. A model that cannot answer the way it was asked
+    either errors at connect or returns nothing, and both come back as such.
+    """
+    from livekit.agents.llm import ChatContext
+
+    session = model.session()
+    errors: list[str] = []
+    session.on("error", lambda ev: errors.append(str(getattr(ev, "error", ev))[:300]))
+    try:
+        ctx = ChatContext.empty()
+        ctx.add_message(role="user", content=LLM_PROMPT)
+        await session.update_chat_ctx(ctx)
+        t0 = time.perf_counter()
+        try:
+            generation = await asyncio.wait_for(session.generate_reply(), TIMEOUT)
+        except Exception as e:
+            # The socket's own reason (Gemini's 1007 for a refused modality)
+            # says more than the framework's timeout waiting for a generation.
+            raise RuntimeError(errors[0] if errors else str(e)) from e
+        first: list[float] = []
+        text: list[str] = []
+        frames = 0
+
+        async def read_text(stream: Any) -> None:
+            async for chunk in stream:
+                if chunk and not first:
+                    first.append(time.perf_counter())
+                text.append(str(chunk))
+
+        async def read_audio(stream: Any) -> None:
+            nonlocal frames
+            async for _ in stream:
+                if not first:
+                    first.append(time.perf_counter())
+                frames += 1
+
+        async def read_all() -> None:
+            async for message in generation.message_stream:
+                await asyncio.gather(
+                    read_text(message.text_stream), read_audio(message.audio_stream)
+                )
+
+        await asyncio.wait_for(read_all(), TIMEOUT)
+        end = time.perf_counter()
+        if errors and not text and not frames:
+            raise RuntimeError(errors[0])
+        return (first[0] if first else end) - t0, end - t0, "".join(text), frames
+    finally:
+        with contextlib.suppress(Exception):
+            await session.aclose()
+
+
 def median(values: list[float]) -> float | None:
-    clean = [v for v in values if not math.isnan(v)]  # drop NaN
+    clean = [v for v in values if v == v]  # drop NaN
     return statistics.median(clean) if clean else None
 
 
@@ -462,11 +552,17 @@ async def run_case(case: Case, runs: int, out: Path, ref_frames: list[Any] | Non
 
     from src.domain import KwamiVoiceConfig
     from src.factories.llm import create_llm
+    from src.factories.realtime import create_realtime_model
     from src.factories.stt import create_stt
     from src.factories.tts import create_tts
 
     result = Result(case.kind, case.label)
-    factory = {"tts": create_tts, "stt": create_stt, "llm": create_llm}[case.kind]
+    factory = {
+        "tts": create_tts,
+        "stt": create_stt,
+        "llm": create_llm,
+        "realtime": create_realtime_model,
+    }[case.kind]
     try:
         instance = factory(KwamiVoiceConfig(**case.overrides))
     except Exception as e:
@@ -500,6 +596,18 @@ async def run_case(case: Case, runs: int, out: Path, ref_frames: list[Any] | Non
                 result.accuracy = accuracy(text)
                 result.sample = text
                 result.runs.append({"latency": latency, "accuracy": result.accuracy})
+            elif case.kind == "realtime":
+                first, total, text, frames = await converse(instance)
+                firsts.append(first)
+                totals.append(total)
+                wants_text = case.overrides.get("pipeline_type") == "hybrid"
+                result.sample = text.strip() or (f"{frames} tramas de audio" if frames else "")
+                if wants_text and not text.strip():
+                    result.status = "EMPTY"
+                    result.error = "no contesta en texto: solo voz propia" + (
+                        f" ({frames} tramas de audio)" if frames else ""
+                    )
+                result.runs.append({"first": first, "total": total, "frames": frames})
             else:
                 ttft, total, text = await asyncio.wait_for(ask(instance), TIMEOUT)
                 firsts.append(ttft)
@@ -613,6 +721,18 @@ def write_report(results: list[Result], out: Path, args: argparse.Namespace) -> 
             note(r),
         ],
     )
+    realtime = table(
+        "realtime",
+        ["Modelo Live", "Estado", "Primera salida", "Respuesta completa", "Respuesta", "Nota"],
+        lambda r: [
+            html.escape(r.label),
+            r.status,
+            fmt(r.first_s),
+            fmt(r.total_s),
+            html.escape(r.sample),
+            note(r),
+        ],
+    )
     llm = table(
         "llm",
         ["Modelo", "Estado", "Primer token", "Respuesta completa", "Respuesta", "Nota"],
@@ -654,6 +774,7 @@ tbody tr:first-child.ok td:first-child {{ color:var(--ok); font-weight:600; }} a
 <h2>Voz (TTS)</h2><div class="wrap">{tts}</div>
 <h2>Oído (STT)</h2><div class="wrap">{stt}</div>
 <h2>Cerebro de voz (LLM)</h2><div class="wrap">{llm}</div>
+<h2>Modelos Live (voz propia, y en texto para Live + TTS)</h2><div class="wrap">{realtime}</div>
 </body></html>"""
     path = out / "report.html"
     path.write_text(page, encoding="utf-8")
@@ -702,7 +823,9 @@ def selected(cases: list[Case], args: argparse.Namespace) -> list[Case]:
 
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--kinds", default="tts,stt,llm", help="tts,stt,llm (comma separated)")
+    parser.add_argument(
+        "--kinds", default="tts,stt,llm", help="tts,stt,llm,realtime (comma separated)"
+    )
     parser.add_argument("--runs", type=int, default=2, help="repetitions per case (median)")
     parser.add_argument(
         "--only", action="append", default=[], help="keep cases whose label contains this"
@@ -739,6 +862,8 @@ async def main() -> None:
             groups += selected(STT_CASES, args)
         if "llm" in kinds:
             groups += selected(LLM_CASES, args)
+        if "realtime" in kinds:
+            groups += selected(realtime_cases(), args)
 
         ref_frames = None
         if any(c.kind == "stt" for c in groups):
