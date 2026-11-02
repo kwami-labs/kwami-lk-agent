@@ -313,6 +313,23 @@ def test_a_path_that_cannot_be_resolved_is_refused(tmp_path: Path) -> None:
     assert check_tool_call(tmp_path, "Read", {"file_path": "a\x00b"}) is not None
 
 
+@pytest.mark.parametrize(
+    ("permissions", "reachable"), [("full_no_push", True), ("think", False), ("think_web", False)]
+)
+async def test_only_the_work_thread_reaches_google(
+    sdk, jarvis: Path, monkeypatch: pytest.MonkeyPatch, permissions: str, reachable: bool
+) -> None:
+    monkeypatch.setattr(executor, "google_available", lambda _user: True)
+    monkeypatch.setattr(executor, "google_server", lambda *_: {"name": "google"})
+    config = ExecutorConfig(str(jarvis), permissions=permissions, google_user_id="u1")  # type: ignore[arg-type]
+    await executor.run_executor("ak", "claude-sonnet-5-5", "lee mi correo", config)
+    options = sdk.last.options
+    assert bool(options.mcp_servers) is reachable
+    assert (executor.ALLOWED_TOOL in options.allowed_tools) is reachable
+    # The strict flag stays: only this server, never the account's own connectors.
+    assert "strict-mcp-config" in options.extra_args
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="a drive path is inside only on Windows")
 def test_a_windows_host_lets_a_command_name_files_inside_the_folder(tmp_path: Path) -> None:
     """Absolute paths inside the folder do not stop the scan of a command.
