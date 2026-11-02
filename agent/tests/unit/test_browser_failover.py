@@ -7,7 +7,7 @@ message, URL included, reached the model.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
@@ -129,6 +129,37 @@ async def test_a_bad_user_id_is_not_the_vendors_fault() -> None:
     other.launch.assert_not_awaited()
 
 
+async def test_a_vendor_is_built_once() -> None:
+    provider = _vendor(BROWSER_USE)
+    build = MagicMock(return_value=provider)
+    failover = FailoverBrowserProvider([(BROWSER_USE, build)])
+    await failover.launch("user-1")
+    await failover.launch("user-1")
+    build.assert_called_once()
+
+
+async def test_releasing_a_browser_nobody_launched_does_nothing() -> None:
+    provider = _vendor(BROWSER_USE)
+    await FailoverBrowserProvider([(BROWSER_USE, lambda: provider)]).release("unknown")
+    provider.release.assert_not_awaited()
+
+
+async def test_quit_reaches_a_vendor_that_can() -> None:
+    provider = _vendor(LOCAL)
+    failover = FailoverBrowserProvider([(LOCAL, lambda: provider)])
+    launched = await failover.launch("user-1")
+    await failover.quit(launched.browser_id)
+    provider.quit.assert_awaited_once_with(launched.browser_id)
+
+
+def test_each_vendor_is_built_from_its_own_settings() -> None:
+    settings = Settings(browserbase_api_key="bb", browser_use_api_key="bu")
+    candidates = dict(create_browser_provider(settings)._candidates)
+    assert candidates[BROWSER_USE]().vendor == BROWSER_USE
+    with patch("src.browser.browserbase.create_context_store"):
+        assert candidates[BROWSERBASE]().vendor == BROWSERBASE
+
+
 async def test_quit_only_reaches_a_vendor_that_can() -> None:
     provider = _vendor(BROWSER_USE)
     del provider.quit
@@ -196,6 +227,26 @@ class TestALocalWindow:
         provider = session._provider
         await session.close(quit_browser=True)
         provider.quit.assert_awaited_once_with("local-1")
+
+    async def test_a_provider_with_nothing_to_quit_is_only_released(self, session: Any) -> None:
+        provider = MagicMock(spec=["release"])
+        provider.release = AsyncMock()
+        session._provider = provider
+        await session.close(quit_browser=True)
+        provider.release.assert_awaited_once_with("local-1")
+
+    async def test_starting_one_brings_it_forward_at_its_own_size(self) -> None:
+        session = CloudBrowserSession()
+        session._provider = AsyncMock()
+        session._provider.launch.return_value = LaunchedBrowser(
+            browser_id="local-1", vendor=LOCAL, cdp_http_url="http://127.0.0.1:1"
+        )
+        cdp = AsyncMock()
+        with patch.object(session_module, "CDPConnection", return_value=cdp):
+            await session.start("user-1")
+        sent = [call.args[0] for call in cdp.send.await_args_list]
+        assert "Page.bringToFront" in sent
+        assert "Emulation.setDeviceMetricsOverride" not in sent
 
     async def test_a_cloud_browser_still_has_a_timer(self, session: Any) -> None:
         session._vendor = BROWSER_USE

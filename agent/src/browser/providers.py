@@ -26,56 +26,48 @@ captured in `LaunchedBrowser`:
 from __future__ import annotations
 
 import time
-from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
 from ..settings import Settings, get_settings
 from ..utils.logging import get_logger
+from .launched import (
+    BILLING,
+    BROWSER_USE,
+    BROWSERBASE,
+    BUSY,
+    CREDENTIALS,
+    DOWN,
+    LOCAL,
+    MISSING,
+    BrowserVendorError,
+    LaunchedBrowser,
+)
 
 logger = get_logger("browser.providers")
 
-BROWSER_USE = "browser_use"
-BROWSERBASE = "browserbase"
-#: Chrome on the agent's own machine: see `local_chrome`. Never a fallback for a
-#: cloud vendor, because on a server it would open a window nobody can see.
-LOCAL = "local"
+__all__ = [
+    "BILLING",
+    "BROWSERBASE",
+    "BROWSER_USE",
+    "BUSY",
+    "CREDENTIALS",
+    "DOWN",
+    "LOCAL",
+    "MISSING",
+    "BrowserProviderPort",
+    "BrowserVendorError",
+    "FailoverBrowserProvider",
+    "LaunchedBrowser",
+    "ProviderUnavailableError",
+    "configured_vendors",
+    "create_browser_provider",
+    "vendor_failure",
+]
 
-#: Why a vendor could not give us a browser. The first two do not fix themselves
-#: on a retry, so the vendor is left alone for a while (see `_REST_SECONDS`).
-BILLING = "billing"
-CREDENTIALS = "credentials"
-BUSY = "busy"
-DOWN = "down"
-MISSING = "missing"
-
+#: Vendors that refuse for a reason a retry does not fix are left alone for a while.
 _REST_SECONDS = {BILLING: 15 * 60, CREDENTIALS: 15 * 60, BUSY: 60}
-_LABELS = {BROWSERBASE: "Browserbase", BROWSER_USE: "Browser Use", LOCAL: "The local browser"}
-
-
-@dataclass(frozen=True)
-class LaunchedBrowser:
-    """A running cloud browser, and the two ways to reach it.
-
-    `live_url` is what the user watches; `cdp_http_url` or `cdp_ws_url` is what
-    the agent drives. Exactly one of the two CDP fields is set -- which one is
-    the vendor's choice, not ours.
-    """
-
-    browser_id: str
-    vendor: str
-    live_url: str = ""
-    cdp_http_url: str = ""
-    cdp_ws_url: str = ""
-    #: The vendor-side handle for this user's persisted cookies and logins
-    #: (a Browser Use profile id, or a Browserbase context id). Recorded so a
-    #: session can say whether persistence was actually in effect.
-    persistence_id: str = ""
-
-    def __post_init__(self) -> None:
-        if not (self.cdp_http_url or self.cdp_ws_url):
-            raise ValueError(f"{self.vendor} returned a browser with no CDP endpoint")
 
 
 @runtime_checkable
@@ -103,24 +95,6 @@ class BrowserProviderPort(Protocol):
 
 class ProviderUnavailableError(RuntimeError):
     """No cloud-browser vendor is configured well enough to use."""
-
-
-class BrowserVendorError(RuntimeError):
-    """One vendor could not give us a browser, in words fit for the user."""
-
-    def __init__(self, vendor: str, kind: str, text: str = "") -> None:
-        self.vendor = vendor
-        self.kind = kind
-        super().__init__(text or _describe(vendor, kind))
-
-
-def _describe(vendor: str, kind: str) -> str:
-    label = _LABELS.get(vendor, vendor)
-    return {
-        BILLING: f"{label} has no credit left (402) and needs topping up.",
-        CREDENTIALS: f"{label} rejected our API key.",
-        BUSY: f"{label} is at its usage limit for the moment.",
-    }.get(kind, f"{label} could not be reached.")
 
 
 def vendor_failure(vendor: str, error: Exception) -> BrowserVendorError:

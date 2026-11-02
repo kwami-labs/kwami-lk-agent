@@ -32,7 +32,7 @@ from pathlib import Path
 
 from ..adapters.http import shared_client
 from ..utils.logging import get_logger
-from .providers import LOCAL, MISSING, BrowserVendorError, LaunchedBrowser
+from .launched import LOCAL, MISSING, BrowserVendorError, LaunchedBrowser
 
 logger = get_logger("browser.local")
 
