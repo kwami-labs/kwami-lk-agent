@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Any model can take any job.** A brain model holds several jobs and a brief of its own,
+  one model directs the rest, and Grok, OpenRouter, Groq, DeepSeek and Mistral join.
+- **The work thread.** A process on the user's PC takes queued work, with Claude on that PC's
+  own login first and on the API key only when the login cannot.
+- **Live + TTS.** A realtime model hears and thinks, and a TTS speaks.
+
 ### Fixed
 
 - **Voice, speed and language changes are no longer lost.** `change_voice`,
