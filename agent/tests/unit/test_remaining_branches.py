@@ -757,3 +757,16 @@ async def test_a_resting_gemini_search_returns_the_tavily_rescue(
     answer, model = await TinyBridge()._ask_role(task, "research", "simple", request)
     assert answer.text == "from tavily"
     assert model is gemini
+
+
+def test_a_text_model_is_not_taken_as_the_realtime_one(caplog) -> None:
+    voice = KwamiConfig().voice
+    voice.realtime_provider = "google"
+    before = voice.realtime_model
+
+    with caplog.at_level("WARNING"):
+        changed = apply_realtime_fields(voice, {"realtime_model": "gemini-3.5-flash"})
+
+    assert "realtime_model" not in changed
+    assert voice.realtime_model == before
+    assert "not a realtime one" in caplog.text

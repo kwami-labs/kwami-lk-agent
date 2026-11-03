@@ -14,14 +14,21 @@ publishing to the frontend -- is the same whoever is running the browser.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from typing import Any
 
 from ..utils.logging import get_logger
 from .cloud_browser import CDPConnection
-from .providers import BrowserProviderPort, LaunchedBrowser, create_browser_provider
-from .safety import UnsafeURLError, validate_url
+from .providers import (
+    HEADLESS,
+    LOCAL,
+    BrowserProviderPort,
+    LaunchedBrowser,
+    create_browser_provider,
+)
+from .safety import UnsafeURLError, validate_url, validate_url_async
 
 logger = get_logger("browser.session")
 
@@ -30,6 +37,13 @@ IDLE_TIMEOUT_SECONDS = 5 * 60  # 5 minutes
 
 #: Where the browser is sent when a page redirects somewhere refused.
 BLANK_PAGE = "about:blank"
+#: Chromium's own page for a request that failed, the proxy's refusals included.
+ERROR_PAGE_SCHEME = "chrome-error:"
+
+#: How the built-in browser, which has no live view, shows itself in the panel.
+FRAME_TOPIC = "browser_frame"
+FRAME_INTERVAL_SECONDS = 1.5
+FRAME_QUALITY = 50
 
 
 class CloudBrowserSession:
@@ -65,6 +79,7 @@ class CloudBrowserSession:
         self._room = room
         self._current_url: str = ""
         self._idle_timer: asyncio.Task | None = None
+        self._frame_task: asyncio.Task | None = None
         # Cloud browsers bill per minute, with a US proxy on top. This is the
         # single most expensive resource the agent can hold, and it was the one
         # resource never metered -- pure, invisible margin loss.
@@ -75,6 +90,16 @@ class CloudBrowserSession:
     def is_active(self) -> bool:
         """Whether a cloud browser is currently running."""
         return self._browser_id is not None and self._cdp is not None and self._cdp.is_connected
+
+    @property
+    def runs_locally(self) -> bool:
+        """Whether this is a window on the user's computer, not the app's panel."""
+        return self._vendor == LOCAL
+
+    @property
+    def is_builtin(self) -> bool:
+        """Whether this is Chromium in our own container: no live view, no vendor bill."""
+        return self._vendor == HEADLESS
 
     @property
     def live_url(self) -> str | None:
@@ -96,7 +121,7 @@ class CloudBrowserSession:
         the user closed.
         """
         started, self._started_at = self._started_at, None
-        if started is None or self._usage_tracker is None:
+        if started is None or self._usage_tracker is None or self.runs_locally or self.is_builtin:
             return
         minutes = max(0.0, (time.monotonic() - started)) / 60.0
         if minutes <= 0:
@@ -137,6 +162,13 @@ class CloudBrowserSession:
                 await self.navigate(url)
             return self._live_url or ""
 
+        # Its connection dropped, but the browser is still there holding what the user
+        # signed in to, and the next line would lose the only handle to it.
+        if self._browser_id:
+            self._cancel_idle_timer()
+            self._stop_frames()
+            await self._release_unusable_browser()
+
         if self._provider is None:
             try:
                 self._provider = create_browser_provider()
@@ -170,13 +202,17 @@ class CloudBrowserSession:
         # Enable Page domain for navigation events
         try:
             await self._cdp.send("Page.enable")
-            await self._cdp.send(
-                "Emulation.setDeviceMetricsOverride",
-                width=1280,
-                height=1400,
-                deviceScaleFactor=1,
-                mobile=False,
-            )
+            if self.runs_locally:
+                # The user's window keeps the size they gave it.
+                await self._cdp.send("Page.bringToFront")
+            else:
+                await self._cdp.send(
+                    "Emulation.setDeviceMetricsOverride",
+                    width=1280,
+                    height=1400,
+                    deviceScaleFactor=1,
+                    mobile=False,
+                )
         except Exception as e:
             logger.debug("Failed to set CDP initial overrides: %s", e)
 
@@ -191,6 +227,11 @@ class CloudBrowserSession:
         # Start idle timer
         self._started_at = time.monotonic()
         self._reset_idle_timer()
+        # Before the frames: nothing of a page goes out until it has been checked.
+        if url:
+            await self._verify_landing_url()
+        if self.is_builtin:
+            self._frame_task = asyncio.create_task(self._stream_frames())
 
         logger.info(
             "Cloud browser started: vendor=%s, id=%s, profile=%s, url=%s",
@@ -206,9 +247,14 @@ class CloudBrowserSession:
             )
         return self._live_url or ""
 
-    async def close(self) -> None:
-        """Stop the cloud browser and disconnect CDP. Profile state is persisted."""
+    async def close(self, *, quit_browser: bool = False) -> None:
+        """Stop the cloud browser and disconnect CDP. Profile state is persisted.
+
+        `quit_browser` is the user asking to close it. It only matters for a
+        window on their computer, which otherwise outlives the session.
+        """
         self._cancel_idle_timer()
+        self._stop_frames()
         self._record_browser_minutes()
 
         if self._cdp:
@@ -217,6 +263,10 @@ class CloudBrowserSession:
 
         if self._provider and self._browser_id:
             try:
+                if quit_browser and self.runs_locally:
+                    closer = getattr(self._provider, "quit", None)
+                    if closer is not None:
+                        await closer(self._browser_id)
                 await self._provider.release(self._browser_id)
             except Exception as e:
                 logger.warning("Failed to stop cloud browser %s: %s", self._browser_id[:8], e)
@@ -517,8 +567,8 @@ class CloudBrowserSession:
         if not self._room:
             return
         msg: dict[str, Any] = {"type": "browser_session", "action": action}
-        if self._live_url and action == "open":
-            msg["liveUrl"] = self._embeddable_live_url()
+        if action == "open" and (self._live_url or self.is_builtin):
+            msg["liveUrl"] = self._embeddable_live_url() if self._live_url else ""
             msg["vendor"] = self._vendor
             # The panel shows a "not signed in" hint when persistence is off,
             # rather than letting the user discover it by being logged out.
@@ -533,6 +583,55 @@ class CloudBrowserSession:
             logger.debug("Published browser_session event: action=%s", action)
         except Exception as e:
             logger.warning("Failed to publish browser_session event: %s", e)
+
+    def _stop_frames(self) -> None:
+        task, self._frame_task = self._frame_task, None
+        if task is not None:
+            task.cancel()
+
+    async def _page_may_be_shown(self) -> bool:
+        """Whether the page is one we would have opened, leaving it when it is not.
+
+        A click, a meta refresh or the page's own script can move it at any time. No
+        DNS here, once per frame: the proxy has already checked what the name resolved
+        to, and this catches what never went through it.
+        """
+        href = await self._connection.evaluate("location.href")
+        if not isinstance(href, str) or not href:
+            return False
+        if href == BLANK_PAGE or href.startswith(ERROR_PAGE_SCHEME):
+            return True
+        try:
+            await validate_url_async(href, resolve_dns=False)
+        except UnsafeURLError as e:
+            logger.warning("Not showing a refused page: %s", e)
+            await self._leave_unsafe_page()
+            return False
+        return True
+
+    async def _stream_frames(self) -> None:
+        """Keep the panel showing the page, sending a frame only when it changed."""
+        last = ""
+        while self.is_active:
+            try:
+                shown = await self._page_may_be_shown()
+                frame = await self._connection.screenshot(quality=FRAME_QUALITY) if shown else ""
+                if frame and frame != last:
+                    await self._publish_frame(base64.b64decode(frame))
+                    last = frame
+            except Exception as e:
+                # A page mid-navigation has nothing to capture. The next try will.
+                logger.debug("Could not send a browser frame: %s", e)
+            await asyncio.sleep(FRAME_INTERVAL_SECONDS)
+
+    async def _publish_frame(self, jpeg: bytes) -> None:
+        if not self._room:
+            return
+        writer = await self._room.local_participant.stream_bytes(
+            "frame.jpg", total_size=len(jpeg), mime_type="image/jpeg", topic=FRAME_TOPIC
+        )
+        await writer.write(jpeg)
+        await writer.aclose()
 
     def _embeddable_live_url(self) -> str:
         """The live view URL, tuned for an iframe.
@@ -557,6 +656,9 @@ class CloudBrowserSession:
     def _reset_idle_timer(self) -> None:
         """Reset the idle auto-close timer."""
         self._cancel_idle_timer()
+        if self.runs_locally:
+            # Nothing is billing, and the user may be reading or signing in.
+            return
         self._idle_timer = asyncio.create_task(self._idle_timeout())
 
     async def _release_unusable_browser(self) -> None:
@@ -606,7 +708,8 @@ class CloudBrowserSession:
         """Auto-close the browser after idle timeout."""
         try:
             await asyncio.sleep(IDLE_TIMEOUT_SECONDS)
-            if self.is_active:
+            # Not `is_active`: a dropped connection leaves the browser running.
+            if self._browser_id:
                 logger.info("Cloud browser idle timeout reached, closing")
                 await self.close()
         except asyncio.CancelledError:

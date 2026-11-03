@@ -71,12 +71,20 @@ class OpenAIVoices:
     SAGE = "sage"  # Female
     SHIMMER = "shimmer"  # Female
 
-    # Realtime only
+    # Not on tts-1 or tts-1-hd: gpt-4o-mini-tts and the realtime models.
     BALLAD = "ballad"
     VERSE = "verse"
+    MARIN = "marin"
+    CEDAR = "cedar"
 
-    ALL = {ALLOY, ASH, CORAL, ECHO, FABLE, NOVA, ONYX, SAGE, SHIMMER, BALLAD, VERSE}
+    ALL = {ALLOY, ASH, CORAL, ECHO, FABLE, NOVA, ONYX, SAGE, SHIMMER, BALLAD, VERSE, MARIN, CEDAR}
     STANDARD = {ALLOY, ASH, CORAL, ECHO, FABLE, NOVA, ONYX, SAGE, SHIMMER}
+
+    @classmethod
+    def for_tts_model(cls, model: str) -> set[str]:
+        """The voices an OpenAI TTS model takes: only gpt-4o-mini-tts has them all."""
+        return cls.ALL if model.startswith("gpt-") else cls.STANDARD
+
     DEFAULT = NOVA
 
 

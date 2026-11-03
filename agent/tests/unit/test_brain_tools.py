@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
+from livekit.agents import StopResponse
 
 from src.agent import KwamiAgent
 from src.brain.config import default_brain
@@ -39,6 +40,9 @@ class FakeBridge:
             return self.refuse
         return FakeTask("t1", council=kwargs["council"])
 
+    async def runner_online(self) -> bool:
+        return True
+
     def cancel(self, task_id: str) -> bool:
         return task_id in self.tasks
 
@@ -48,7 +52,9 @@ class FakeBridge:
 
 @pytest.fixture
 def agent() -> KwamiAgent:
-    return KwamiAgent()
+    realtime = KwamiAgent()
+    realtime.kwami_config.voice.pipeline_type = "realtime"
+    return realtime
 
 
 @pytest.fixture
@@ -120,3 +126,26 @@ async def test_brain_status_adds_the_roster(agent: KwamiAgent, bridge: FakeBridg
     assert status["spentUsd"] == 1.5
     assert {m["id"] for m in status["roster"]} == {m.id for m in bridge.config.models}
     assert status["note"]
+
+
+async def test_on_a_text_llm_the_tool_asks_for_no_second_reply(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    agent.kwami_config.voice.pipeline_type = "standard"
+    with pytest.raises(StopResponse):
+        await agent.delegate_task(_ctx(bridge), "task", "title")
+    assert bridge.started
+
+
+async def test_a_realtime_model_is_still_told_to_say_it(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    assert "say" in await agent.delegate_task(_ctx(bridge), "task", "title")
+
+
+async def test_a_refusal_is_answered_on_a_text_llm_too(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    agent.kwami_config.voice.pipeline_type = "standard"
+    bridge.refuse = "No"
+    assert await agent.delegate_task(_ctx(bridge), "task", "title") == {"error": "No"}

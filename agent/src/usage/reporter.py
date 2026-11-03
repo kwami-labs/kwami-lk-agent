@@ -83,6 +83,7 @@ class UsageReporter:
             "user_id": user_id,
             "session_id": session_id,
             "usage": usage_summary,
+            "session_minutes": round(duration / 60.0, 3),
         }
 
         if not self._api_key:

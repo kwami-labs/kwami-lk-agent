@@ -214,7 +214,7 @@ class StrictLLMPlugin:
         self.calls: list[dict] = []
 
     def LLM(self, *, model: str, **kwargs: float):  # noqa: N802
-        assert set(kwargs) <= {"temperature", "_strict_tool_schema"}, kwargs
+        assert set(kwargs) <= {"temperature", "_strict_tool_schema", "caching"}, kwargs
         self.calls.append({"model": model, **kwargs})
         return f"llm:{model}"
 
@@ -224,7 +224,7 @@ class StrictLLMPlugin:
     [
         ("google", "gemini-2.0-flash", {"temperature": 0.25}),
         # Claude 5 answers 400 to any temperature, so none is sent.
-        ("anthropic", "claude-haiku-5-5", {"_strict_tool_schema": False}),
+        ("anthropic", "claude-haiku-5-5", {"_strict_tool_schema": False, "caching": "ephemeral"}),
         ("groq", "openai/gpt-oss-120b", {"temperature": 0.25}),
     ],
 )
@@ -425,3 +425,16 @@ def test_gemini_live_honours_the_interruption_and_server_vad_choices() -> None:
         == types.StartSensitivity.START_SENSITIVITY_HIGH
     )
     assert config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
+
+
+def test_a_saved_model_openai_withdrew_is_replaced(monkeypatch):
+    from src.factories import llm as llm_factory
+
+    built = {}
+    monkeypatch.setattr(
+        llm_factory, "_openai_llm", lambda _config, model, **_kw: built.setdefault("model", model)
+    )
+
+    llm_factory._build(object(), "openai", "gpt-5.1-chat-latest")
+
+    assert built["model"] == "gpt-4.1-mini"

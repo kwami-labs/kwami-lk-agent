@@ -186,6 +186,13 @@ async def _run_session(ctx: JobContext) -> None:
     # Turn-taking tuned for Spanish: multilingual end-of-turn detection,
     # learned endpointing and early LLM generation (runtime/turn_taking.py).
     session = AgentSession(userdata=deps, turn_handling=session_turn_handling())
+
+    def build_agent(config, vad, memory=None, skip_greeting=False):
+        """Build on the keys this user connected, and report those parts as theirs."""
+        config.voice.user_keys = deps.bridge.voice_keys
+        state.usage_tracker.mark_own_keys(deps.bridge.voice_key_providers)
+        return create_agent_from_config(config, vad, memory, skip_greeting=skip_greeting)
+
     state = create_session_state(
         initial_agent=initial_agent,
         user_identity=user_identity,
@@ -202,16 +209,14 @@ async def _run_session(ctx: JobContext) -> None:
     deps.reconfigure = Reconfigurator(
         state=state,
         vad=vad,
-        create_agent_fn=create_agent_from_config,
+        create_agent_fn=build_agent,
     )
 
     # Usage tracking. `metrics_collected` is deprecated from livekit-agents 1.8;
     # this event carries the session's running totals per model instead.
     # A realtime model that dies for good moves the call to the standard
     # pipeline instead of closing it (runtime/recovery.py).
-    install_realtime_rescue(
-        session, state, vad, create_agent_from_config, LiveKitRoomPublisher(ctx.room)
-    )
+    install_realtime_rescue(session, state, vad, build_agent, LiveKitRoomPublisher(ctx.room))
 
     @session.on("session_usage_updated")
     def on_usage(event):
@@ -222,12 +227,14 @@ async def _run_session(ctx: JobContext) -> None:
         session=session,
         state=state,
         vad=vad,
-        create_agent_fn=create_agent_from_config,
+        create_agent_fn=build_agent,
         room=ctx.room,
         # So a tool invoked from a data message reaches the same AgentDeps a
         # tool invoked from a model turn does.
         deps=deps,
     )
+
+    state.user_keys_ready = deps.bridge.keys_ready
 
     def handle_data(data: rtc.DataPacket) -> None:
         message = decode_data_message(data.data)
@@ -313,7 +320,7 @@ async def _run_session(ctx: JobContext) -> None:
         session,
         state,
         vad,
-        create_agent_from_config,
+        build_agent,
         runtime_config_task,
         kwami_id,
     )

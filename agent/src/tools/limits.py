@@ -41,6 +41,20 @@ MAX_TOOLS_PER_REQUEST = 128
 TOOL_COUNT_WARN_THRESHOLD = int(MAX_TOOLS_PER_REQUEST * 0.85)
 
 
+#: Trimmed last. The list is cut from the tail, and the app registers these late,
+#: so services with no other way in went first while a spare UI control stayed:
+#: the agent could not read the calendar (2026-11-02).
+KEEP_LONGEST: frozenset[str] = frozenset(
+    {
+        "list_calendar_events",
+        "create_calendar_event",
+        "update_calendar_event",
+        "delete_calendar_event",
+        "clear_search_results",
+    }
+)
+
+
 def _name_of(tool: Any) -> str:
     info = getattr(tool, "info", None)
     name = getattr(info, "name", None) if info is not None else None
@@ -82,8 +96,9 @@ def trim_client_tools(
         return list(client_tools)
 
     room_for_client = max(0, limit - builtin_count)
-    kept = client_tools[:room_for_client]
-    dropped = client_tools[room_for_client:]
+    ordered = sorted(client_tools, key=lambda tool: _name_of(tool) not in KEEP_LONGEST)
+    kept = ordered[:room_for_client]
+    dropped = ordered[room_for_client:]
 
     logger.error(
         "Tool limit exceeded: %d built-in + %d client tools is %d, over the %d the "

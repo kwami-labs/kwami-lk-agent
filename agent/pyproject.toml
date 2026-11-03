@@ -47,6 +47,7 @@ dependencies = [
     "opentelemetry-exporter-otlp-proto-http>=1.30.0,<2.0.0",
     "anthropic>=0.116,<1",
     "claude-agent-sdk>=0.2.165",
+    "cryptography>=46",
 ]
 
 [project.optional-dependencies]

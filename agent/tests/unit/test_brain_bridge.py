@@ -18,8 +18,9 @@ import pytest
 
 from src.brain import bridge as bridge_module
 from src.brain.bridge import BrainTask, Bridge
-from src.brain.config import BrainConfig, BrainModel, default_brain
+from src.brain.config import HARD_MONTHLY_CAP_USD, BrainConfig, BrainModel, default_brain
 from src.brain.executor import CloudWorkspace, ExecutorResult
+from src.brain.jobs import BrainJob
 from src.brain.ledger import Ledger
 from src.brain.planner import Plan, PlanStep
 from src.brain.providers import BrainAnswer, BrainRequest
@@ -161,7 +162,14 @@ async def test_configure_publishes_and_regates_the_voice(tmp_path: Path) -> None
     assert agent.refreshed == 1
     status = publisher.messages[-1]
     assert status["type"] == "brain_status"
-    assert status["providers"] == {"anthropic": True, "google": True, "openai": True, "local": True}
+    assert {k: v for k, v in status["providers"].items() if v} == {
+        "anthropic": True,
+        "google": True,
+        "openai": True,
+        "local": True,
+    }
+    assert status["account"] == {"pcOnline": False, "loggedIn": False}
+    assert status["apiKeys"]["anthropic"] is True and status["apiKeys"]["xai"] is False
     assert "realtime" in status["voiceProviders"]
 
 
@@ -256,6 +264,7 @@ def test_a_switched_off_brain_takes_nothing(tmp_path: Path) -> None:
 
 def test_a_spent_budget_stops_delegation_when_asked_to(tmp_path: Path) -> None:
     bridge = _bridge(tmp_path)
+    bridge.config.monthly_budget_usd = 50.0
     bridge.ledger.add_spend("claude-opus", 60.0)
     bridge.config.budget_policy = "stop"
     out = bridge.start(task="t", title="t", kind="analysis", difficulty="hard")
@@ -264,6 +273,7 @@ def test_a_spent_budget_stops_delegation_when_asked_to(tmp_path: Path) -> None:
 
 async def test_a_spent_budget_downgrades_when_asked_to(tmp_path: Path) -> None:
     bridge = _bridge(tmp_path)
+    bridge.config.monthly_budget_usd = 50.0
     bridge.ledger.add_spend("claude-opus", 60.0)
     bridge.config.budget_policy = "downgrade"
     task = _run(bridge, kind="analysis", difficulty="hard", important=True, model="opus")
@@ -794,3 +804,324 @@ async def test_a_finished_but_unspoken_result_is_kept_at_hangup(tmp_path: Path) 
     bridge.tasks["t2"] = _done(title="Ya dicho", delivered=True)
     await bridge.close(timeout=1)
     assert [p.title for p in bridge.take_pending("k1")] == ["Oro"]
+
+
+async def test_a_failed_rescue_of_a_resting_model_goes_on_with_the_fallback(
+    tmp_path: Path,
+) -> None:
+    bridge = _bridge(
+        tmp_path,
+        {
+            "gemini-flash": _out_of_quota("gemini-flash"),
+            "claude-sonnet": _failed("claude-sonnet"),
+        },
+    )
+    bridge._tavily_key = "tv"
+    _run(bridge, kind="research", difficulty="simple")
+    await _finish(bridge)
+    task = _run(bridge, kind="research", difficulty="simple")
+    await _finish(bridge)
+
+    assert task.models[0] == "Claude Sonnet 5.5 + Tavily"
+    assert "Gemini 3.5 Flash" not in task.models
+    assert task.status == "done"
+
+
+# -- work on the user's PC ------------------------------------------------------
+
+KWAMI = "22222222-2222-4222-8222-222222222222"
+
+
+class FakeJobs:
+    """The queue, with the PC's answers scripted."""
+
+    def __init__(self, *, online: bool = True, enqueues: bool = True) -> None:
+        self.online = online
+        self.enqueues = enqueues
+        self.queued: list[BrainJob] = []
+        self.script: list[BrainJob | None] = []
+        self.cancelled: list[str] = []
+        self.ended: list[str] = []
+        self.delivered: list[str] = []
+        self.renewed = 0
+        self.last = "t-last"
+
+    async def runner_online(self, user_id: str) -> bool:
+        return self.online
+
+    async def enqueue(self, job: BrainJob) -> bool:
+        job.id, job.thread_id = "j1", job.thread_id or "t-new"
+        self.queued.append(job)
+        return self.enqueues
+
+    async def get(self, job_id: str) -> BrainJob | None:
+        return self.script.pop(0) if len(self.script) > 1 else self.script[0]
+
+    async def renew_watch(self, job_id: str) -> bool:
+        self.renewed += 1
+        return True
+
+    async def end_watch(self, job_id: str) -> bool:
+        self.ended.append(job_id)
+        return True
+
+    async def mark_delivered(self, job_id: str) -> bool:
+        self.delivered.append(job_id)
+        return True
+
+    async def request_cancel(self, job_id: str) -> bool:
+        self.cancelled.append(job_id)
+        return True
+
+    async def last_thread(self, kwami_id: str) -> str:
+        return self.last
+
+
+def _job(status: str, **extra: Any) -> BrainJob:
+    return BrainJob(USER, KWAMI, "T", "t", id="j1", status=status, **extra)
+
+
+@pytest.fixture
+def pc_bridge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Bridge, FakeJobs]:
+    monkeypatch.setattr(bridge_module, "JOB_POLL_SECONDS", 0.001)
+    bridge = _bridge(tmp_path)
+    jobs = FakeJobs()
+    bridge.jobs = jobs  # type: ignore[assignment]
+    bridge.kwami_id = KWAMI
+    bridge.user_id = USER
+    return bridge, jobs
+
+
+async def test_code_goes_to_the_pc_when_it_is_there(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("running", progress="Bash"), _job("done", result="Hecho", cost_usd=0.5)]
+
+    task = _run(bridge, kind="code", difficulty="hard")
+    await _finish(bridge)
+
+    assert jobs.queued[0].kwami_id == KWAMI
+    assert jobs.queued[0].difficulty == "hard"
+    assert jobs.queued[0].model == "claude-sonnet-5-5"
+    assert task.status == "done" and task.result == "Hecho"
+    assert task.job_id == "j1" and task.public()["onPc"] is True
+    assert task.cost_usd == 0.5
+    assert jobs.delivered == ["j1"]
+
+
+async def test_the_pc_records_the_spend_so_the_call_does_not(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("done", result="Hecho", cost_usd=0.5)]
+    sent: list[float] = []
+    bridge.ledger.add_spend = lambda model_id, usd: sent.append(usd)  # type: ignore[method-assign]
+    _run(bridge, kind="code")
+    await _finish(bridge)
+    assert sent == []
+
+
+async def test_a_failure_on_the_pc_is_a_failed_task(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("failed", result="No pude")]
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert task.status == "failed" and task.result == "No pude"
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        lambda b, j: setattr(j, "online", False),
+        lambda b, j: setattr(j, "enqueues", False),
+        lambda b, j: setattr(b, "kwami_id", "not-a-uuid"),
+    ],
+)
+async def test_without_the_pc_it_runs_here(pc_bridge, setup: Any) -> None:
+    bridge, jobs = pc_bridge
+    setup(bridge, jobs)
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert task.status == "done" and task.result == "respuesta de claude-code"
+    assert task.job_id == ""
+
+
+async def test_ordinary_questions_never_queue(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    task = _run(bridge, kind="question")
+    await _finish(bridge)
+    assert jobs.queued == [] and task.status == "done"
+
+
+async def test_long_running_work_goes_to_the_pc(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("done", result="Investigado")]
+    task = _run(bridge, kind="research", long_running=True)
+    await _finish(bridge)
+    assert jobs.queued and task.result == "Investigado"
+
+
+async def test_a_follow_up_continues_a_thread(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("done", result="Uno")]
+    first = _run(bridge, kind="code")
+    await _finish(bridge)
+    _run(bridge, kind="code", follow_up=first.id)
+    await _finish(bridge)
+    _run(bridge, kind="code", follow_up="last")
+    await _finish(bridge)
+    assert [job.thread_id for job in jobs.queued] == ["t-new", "t-new", "t-last"]
+
+
+async def test_a_job_stuck_with_no_pc_is_withdrawn_and_run_here(
+    pc_bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge_module, "JOB_QUEUE_PATIENCE_SECONDS", 0.0)
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("queued"), _job("cancelled")]
+
+    async def gone_after_enqueue(user_id: str) -> bool:
+        return not jobs.queued
+
+    jobs.runner_online = gone_after_enqueue  # type: ignore[method-assign]
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+
+    assert jobs.cancelled == ["j1"]
+    assert task.job_id == "" and task.result == "respuesta de claude-code"
+
+
+async def test_a_job_the_pc_took_at_the_last_moment_is_kept(
+    pc_bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge_module, "JOB_QUEUE_PATIENCE_SECONDS", 0.0)
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("queued"), _job("running"), _job("done", result="Del PC")]
+
+    async def gone_after_enqueue(user_id: str) -> bool:
+        return not jobs.queued
+
+    jobs.runner_online = gone_after_enqueue  # type: ignore[method-assign]
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert task.result == "Del PC"
+
+
+async def test_the_watch_is_renewed_and_a_blip_is_survived(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [None, _job("running"), _job("running"), _job("done", result="Hecho")]
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert jobs.renewed >= 1 and task.result == "Hecho"
+
+
+async def test_cancelling_reaches_the_pc(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("running")]
+    task = _run(bridge, kind="code")
+    while not task.job_id:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+    assert bridge.cancel(task.id) is True
+    await _finish(bridge)
+    assert jobs.cancelled == ["j1"]
+
+
+async def test_hanging_up_leaves_the_pc_working(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("running")]
+    task = _run(bridge, kind="code")
+    while not task.job_id:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+
+    await bridge.close(timeout=0.01)
+
+    assert jobs.ended == ["j1"] and jobs.cancelled == []
+    assert bridge.ledger.take_pending(KWAMI) == []
+
+
+async def test_hanging_up_cancels_when_the_user_chose_that(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    bridge.config.on_hangup = "cancel"
+    jobs.script = [_job("running")]
+    task = _run(bridge, kind="code")
+    while not task.job_id:  # noqa: ASYNC110
+        await asyncio.sleep(0)
+    await bridge.close(timeout=0.01)
+    assert jobs.cancelled == ["j1"]
+
+
+async def test_runner_online_needs_an_owner_and_a_queue(tmp_path: Path, pc_bridge) -> None:
+    bridge, _ = pc_bridge
+    assert await bridge.runner_online() is True
+    assert await _bridge(tmp_path).runner_online() is False
+
+
+async def test_a_phone_caller_never_reaches_the_owners_pc(pc_bridge) -> None:
+    """No app user in the room: the ledger still knows the owner, and that is not them."""
+    bridge, jobs = pc_bridge
+    bridge.user_id = ""
+    bridge.ledger.user_id = USER  # type: ignore[attr-defined]
+    assert bridge._owner() == USER
+
+    assert await bridge.runner_online() is False
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+
+    assert jobs.queued == []
+    assert task.job_id == ""
+
+
+async def test_the_ceiling_stops_everything_whatever_the_panel_says(tmp_path: Path) -> None:
+    bridge = _bridge(tmp_path)
+    bridge.config.budget_policy = "inform"
+    bridge.config.monthly_budget_usd = 5000.0
+    bridge.ledger.add_spend("claude-opus", HARD_MONTHLY_CAP_USD)
+    out = bridge.start(task="t", title="t", kind="question", difficulty="simple")
+    assert isinstance(out, str) and "ceiling" in out
+
+
+async def test_crossing_a_line_is_said_with_the_result(tmp_path: Path) -> None:
+    bridge = _bridge(tmp_path, {"claude-haiku": BrainAnswer("Respuesta", "claude-haiku", "h", 2.0)})
+    real_ask = bridge._ask
+
+    async def spending_ask(model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        answer = await real_ask(model, request)
+        bridge.ledger.add_spend(model.id, answer.cost_usd)
+        return answer
+
+    bridge._ask = spending_ask  # type: ignore[method-assign]
+    bridge.ledger.add_spend("claude-opus", 119.0)
+    task = _run(bridge, kind="question", difficulty="simple")
+    await _finish(bridge)
+    assert task.result.startswith("Aviso: este mes ya van 121")
+
+
+# -- Jarvis changing its own code ------------------------------------------------
+
+
+async def test_own_code_goes_to_the_pc_as_a_job_for_that_repo(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("done", result="PR abierto")]
+    task = _run(bridge, kind="question", repo="agent", important=True, council=True)
+    await _finish(bridge)
+    assert jobs.queued[0].repo == "agent"
+    assert task.kind == "code" and not task.council
+    assert task.result == "PR abierto"
+
+
+async def test_own_code_never_falls_back_to_the_cloud(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online = False
+    task = _run(bridge, repo="agent")
+    await _finish(bridge)
+    assert task.status == "failed" and "ordenador encendido" in task.result
+
+
+def test_own_code_needs_a_known_repo(pc_bridge) -> None:
+    bridge, _ = pc_bridge
+    out = bridge.start(task="t", title="t", kind="code", difficulty="normal", repo="kwami-labs")
+    assert isinstance(out, str) and "must be one of" in out
+
+
+def test_own_code_cannot_be_ordered_by_phone(pc_bridge) -> None:
+    bridge, _ = pc_bridge
+    bridge.user_id = ""
+    out = bridge.start(task="t", title="t", kind="code", difficulty="normal", repo="agent")
+    assert isinstance(out, str) and "not by phone" in out

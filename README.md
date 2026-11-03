@@ -150,6 +150,12 @@ vendors are supported and selected with `KWAMI_BROWSER_PROVIDER`:
   `BROWSERBASE_PROJECT_ID`.
 - **Browser Use Cloud** — profiles are addressed by name, so the user id is
   enough. Needs `BROWSER_USE_API_KEY`.
+- **Local Chrome** (`local`) — for an agent running on the user's own computer:
+  a real window with its own profile, free, and never chosen unless asked for.
+
+A vendor that refuses at launch (no credit, a rejected key, an outage) passes
+the request to the next configured one, and one with no credit is left alone for
+15 minutes.
 
 If the selected vendor has no credential the agent falls back to the other one
 and says so loudly: saved logins do not carry across vendors, so the user is

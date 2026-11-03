@@ -17,12 +17,10 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any
 
+from ..domain.pipelines import REALTIME_MODEL_PIPELINES, REALTIME_PIPELINE, STANDARD_PIPELINE
 from ..utils.logging import get_logger
 
 logger = get_logger("recovery")
-
-REALTIME_PIPELINE = "realtime"
-STANDARD_PIPELINE = "standard"
 
 
 def install_realtime_rescue(
@@ -42,14 +40,16 @@ def install_realtime_rescue(
         if getattr(error, "recoverable", True):
             return
         agent = getattr(state, "current_agent", None)
-        if agent is None or agent.kwami_config.voice.pipeline_type != REALTIME_PIPELINE:
+        if agent is None or agent.kwami_config.voice.pipeline_type not in REALTIME_MODEL_PIPELINES:
             return
         # Read synchronously by the framework right after this handler returns.
         error.recoverable = True
         if rescuing["active"]:
             return
         rescuing["active"] = True
-        reason = str(getattr(error, "error", "") or "realtime model failed")[:300]
+        # The kind of failure only. A provider's message can quote the key it refused,
+        # and this goes to the log and to everyone in the room.
+        reason = type(getattr(error, "error", None)).__name__
         logger.error(
             "Realtime model failed for good (%s); moving the call to the standard pipeline", reason
         )
@@ -82,7 +82,7 @@ async def _rescue(
 ) -> None:
     try:
         agent = state.current_agent
-        if agent is None or agent.kwami_config.voice.pipeline_type != REALTIME_PIPELINE:
+        if agent is None or agent.kwami_config.voice.pipeline_type not in REALTIME_MODEL_PIPELINES:
             return
         from ..domain import clone_config
 
@@ -100,7 +100,7 @@ async def _rescue(
             await publisher.publish(
                 {
                     "type": "voice_fallback",
-                    "from": REALTIME_PIPELINE,
+                    "from": agent.kwami_config.voice.pipeline_type or REALTIME_PIPELINE,
                     "to": STANDARD_PIPELINE,
                     "reason": reason,
                 }

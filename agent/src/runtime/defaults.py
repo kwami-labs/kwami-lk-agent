@@ -60,7 +60,7 @@ LANGUAGE_KEY = "language"
 
 #: Fields whose value is one of a fixed set.
 _CHOICES: dict[str, tuple[str, ...]] = {
-    "pipeline_type": ("standard", "realtime"),
+    "pipeline_type": ("standard", "realtime", "hybrid"),
     "turn_detection": ("server_vad", "semantic", "none"),
     "turn_detector": ("model", "vad", "stt"),
     "noise_cancellation_mode": ("bvc", "krisp"),
@@ -75,7 +75,8 @@ _CLEARED_WITH: dict[str, tuple[str, ...]] = {
 }
 
 _VOICE_DEFAULTS = KwamiVoiceConfig()
-_VOICE_FIELDS = {f.name for f in fields(KwamiVoiceConfig)}
+# Keys come from the bridge alone: job metadata and the environment must not set them.
+_VOICE_FIELDS = {f.name for f in fields(KwamiVoiceConfig)} - {"user_keys"}
 
 
 def _coerce(name: str, value: Any) -> Any:

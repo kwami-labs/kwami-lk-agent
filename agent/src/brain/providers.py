@@ -10,6 +10,10 @@ Search is per provider, which is the point of having several:
 * Claude: Anthropic's server-side ``web_search`` and ``web_fetch``.
 * Gemini: grounding with Google Search.
 * GPT: the Responses API's ``web_search``.
+* Grok: the same API at xAI, which adds ``x_search`` to read X.
+
+The others (Groq, DeepSeek, Mistral, OpenRouter) only think: they take the
+OpenAI chat format, at their own address, and have no search of their own.
 
 When the user picked "both" and a Tavily key exists, Claude and GPT also get a
 ``tavily_search`` tool run here, on our side.
@@ -29,6 +33,21 @@ from .ledger import search_cost, token_cost
 logger = get_logger("brain.providers")
 
 TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+XAI_URL = "https://api.x.ai/v1"
+COMPATIBLE_URLS = {
+    "openrouter": "https://openrouter.ai/api/v1",
+    "groq": "https://api.groq.com/openai/v1",
+    "deepseek": "https://api.deepseek.com/v1",
+    "mistral": "https://api.mistral.ai/v1",
+}
+PROVIDER_NAMES = {
+    "openai": "OpenAI",
+    "xai": "xAI",
+    "openrouter": "OpenRouter",
+    "groq": "Groq",
+    "deepseek": "DeepSeek",
+    "mistral": "Mistral",
+}
 MAX_TOOL_ROUNDS = 8
 #: Models that take the dynamic-filtering web tools; the rest get the basic ones.
 _DYNAMIC_WEB_TOOLS = (
@@ -55,6 +74,8 @@ class BrainAnswer:
     ok: bool = True
     #: The provider said "out of quota" (429): retrying soon only fails again.
     rate_limited: bool = False
+    #: Answered on the Claude account of the user's PC, not on an API key.
+    via_account: bool = False
 
 
 @dataclass
@@ -293,15 +314,26 @@ async def run_gemini(api_key: str, model_id: str, model: str, request: BrainRequ
     )
 
 
-async def run_openai(api_key: str, model_id: str, model: str, request: BrainRequest) -> BrainAnswer:
+async def run_openai(
+    api_key: str,
+    model_id: str,
+    model: str,
+    request: BrainRequest,
+    *,
+    provider: str = "openai",
+    base_url: str | None = None,
+    search_tools: tuple[str, ...] = ("web_search",),
+) -> BrainAnswer:
+    """The Responses API: OpenAI's, or xAI's at its own address with its own tools."""
     import openai
 
+    name = PROVIDER_NAMES[provider]
     tools: list[Any] = []
     if request.native_search:
-        tools.append({"type": "web_search"})
+        tools += [{"type": tool} for tool in search_tools]
     if request.tavily_key:
         tools.append(TAVILY_FUNCTION)
-    client = openai.AsyncOpenAI(api_key=api_key, timeout=600.0)
+    client = openai.AsyncOpenAI(api_key=api_key, base_url=base_url, timeout=600.0)
     cost = 0.0
     searches = 0
     input_items: list[Any] = [{"role": "user", "content": request.task}]
@@ -316,9 +348,11 @@ async def run_openai(api_key: str, model_id: str, model: str, request: BrainRequ
             )
             usage = response.usage
             if usage is not None:
-                cost += token_cost("openai", model, usage.input_tokens, usage.output_tokens)
+                cost += token_cost(provider, model, usage.input_tokens, usage.output_tokens)
             calls = [item for item in response.output if item.type == "function_call"]
-            searches += sum(1 for item in response.output if item.type == "web_search_call")
+            searches += sum(
+                1 for item in response.output if item.type in ("web_search_call", "x_search_call")
+            )
             if not calls:
                 break
             input_items += list(response.output)
@@ -336,14 +370,14 @@ async def run_openai(api_key: str, model_id: str, model: str, request: BrainRequ
                     }
                 )
     except openai.AuthenticationError:
-        return _failure(model_id, model, "La clave de OpenAI no es válida.")
+        return _failure(model_id, model, f"La clave de {name} no es válida.")
     except openai.RateLimitError:
-        return _failure(model_id, model, "OpenAI está limitando las peticiones ahora mismo.")
+        return _failure(model_id, model, f"{name} está limitando las peticiones ahora mismo.")
     except openai.APIError as e:
-        logger.warning("OpenAI %s failed: %s", model, e)
-        return _failure(model_id, model, "OpenAI devolvió un error.")
+        logger.warning("%s %s failed: %s", name, model, e)
+        return _failure(model_id, model, f"{name} devolvió un error.")
 
-    cost += search_cost("openai", searches)
+    cost += search_cost(provider, searches)
     text = (getattr(response, "output_text", "") or "").strip() if response is not None else ""
     return BrainAnswer(
         text=text or "Sin contenido.",
@@ -351,5 +385,59 @@ async def run_openai(api_key: str, model_id: str, model: str, request: BrainRequ
         model=model,
         cost_usd=cost,
         searches=searches,
+        ok=bool(text),
+    )
+
+
+async def run_xai(api_key: str, model_id: str, model: str, request: BrainRequest) -> BrainAnswer:
+    """Grok: the only model that can read X, as well as the web."""
+    return await run_openai(
+        api_key,
+        model_id,
+        model,
+        request,
+        provider="xai",
+        base_url=XAI_URL,
+        search_tools=("web_search", "x_search"),
+    )
+
+
+async def run_compatible(
+    provider: str, api_key: str, model_id: str, model: str, request: BrainRequest
+) -> BrainAnswer:
+    """A provider that takes OpenAI's chat format: it thinks, with no search of its own."""
+    import openai
+
+    name = PROVIDER_NAMES[provider]
+    client = openai.AsyncOpenAI(api_key=api_key, base_url=COMPATIBLE_URLS[provider], timeout=600.0)
+    try:
+        response = await client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": request.system},
+                {"role": "user", "content": request.task},
+            ],
+        )
+    except openai.AuthenticationError:
+        return _failure(model_id, model, f"La clave de {name} no es válida.")
+    except openai.RateLimitError:
+        answer = _failure(model_id, model, f"{name} está limitando las peticiones ahora mismo.")
+        answer.rate_limited = True
+        return answer
+    except openai.APIError as e:
+        logger.warning("%s %s failed: %s", name, model, e)
+        return _failure(model_id, model, f"{name} devolvió un error.")
+    usage = response.usage
+    cost = (
+        token_cost(provider, model, usage.prompt_tokens, usage.completion_tokens)
+        if usage is not None
+        else 0.0
+    )
+    text = (response.choices[0].message.content or "").strip() if response.choices else ""
+    return BrainAnswer(
+        text=text or "Sin contenido.",
+        model_id=model_id,
+        model=model,
+        cost_usd=cost,
         ok=bool(text),
     )
