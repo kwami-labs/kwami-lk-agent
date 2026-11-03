@@ -162,16 +162,19 @@ def _create_openai_tts(config: KwamiVoiceConfig):
         model = OpenAIModels.TTS_1
 
     # Validate voice
-    if voice not in OpenAIVoices.STANDARD:
+    valid = OpenAIVoices.for_tts_model(model)
+    if voice not in valid:
         logger.warning(
-            "Voice '%s' not supported by OpenAI TTS. Using '%s'. Valid: %s",
+            "Voice '%s' not supported by OpenAI TTS %s. Using '%s'. Valid: %s",
             voice,
+            model,
             OpenAIVoices.DEFAULT,
-            ", ".join(sorted(OpenAIVoices.STANDARD)),
+            ", ".join(sorted(valid)),
         )
         voice = OpenAIVoices.DEFAULT
 
     return openai.TTS(
+        **config.key_for("OPENAI_API_KEY"),
         model=model,
         voice=voice,
         speed=float(config.tts_speed or 1.0),
@@ -184,8 +187,11 @@ def session_language(config: KwamiVoiceConfig) -> str:
     return "" if language == "multi" else language
 
 
-def elevenlabs_key() -> str:
-    """The ElevenLabs key under either spelling, or "" when none is set."""
+def elevenlabs_key(config: KwamiVoiceConfig | None = None) -> str:
+    """The user's ElevenLabs key, else ours under either spelling, else ""."""
+    own = config.key_for(*EnvVars.ELEVENLABS).get("api_key") if config is not None else None
+    if own:
+        return own
     keys = get_settings().provider_keys
     return next((keys[name] for name in EnvVars.ELEVENLABS if keys.get(name)), "")
 
@@ -221,7 +227,7 @@ def _create_elevenlabs_tts(config: KwamiVoiceConfig):
     # Models without language enforcement ignore it.
     language = session_language(config) or NOT_GIVEN
 
-    api_key = elevenlabs_key()
+    api_key = elevenlabs_key(config)
     if api_key:
         logger.info("🔊 Using the ElevenLabs plugin: %s:%s", model, voice_id)
         return elevenlabs.TTS(voice_id=voice_id, model=model, api_key=api_key, language=language)
@@ -282,6 +288,7 @@ def _create_cartesia_tts(config: KwamiVoiceConfig):
     language = session_language(config)
 
     return cartesia.TTS(
+        **config.key_for("CARTESIA_API_KEY"),
         model=model,
         voice=voice,
         speed=float(config.tts_speed or 1.0),
@@ -298,6 +305,11 @@ _DEEPGRAM_TTS_MODEL = re.compile(r"^aura-(2-)?[a-z]+-[a-z]{2}$")
 def _create_deepgram_tts(config: KwamiVoiceConfig):
     """Create Deepgram Aura TTS with voice validation."""
     voice = config.tts_voice or DeepgramVoices.DEFAULT
+
+    # An Aura 2 voice is a whole model id, and what the user picked last: the
+    # family in `tts_model` ("aura-2") does not say which of them to speak with.
+    if _DEEPGRAM_TTS_MODEL.match(voice):
+        return deepgram.TTS(model=voice, **config.key_for("DEEPGRAM_API_KEY"))
 
     if voice not in DeepgramVoices.ALL:
         logger.warning(
@@ -316,7 +328,7 @@ def _create_deepgram_tts(config: KwamiVoiceConfig):
     if not _DEEPGRAM_TTS_MODEL.match(model):
         model = f"aura-{voice}-en"
 
-    return deepgram.TTS(model=model)
+    return deepgram.TTS(model=model, **config.key_for("DEEPGRAM_API_KEY"))
 
 
 def _create_google_tts(config: KwamiVoiceConfig):
@@ -386,6 +398,7 @@ def _create_gemini_tts(config: KwamiVoiceConfig):
     # config default is OpenAI's "nova", which Gemini rejects.
     voice = resolve_realtime_voice("google", config.tts_voice) or DEFAULT_GEMINI_TTS_VOICE
     return google.beta.GeminiTTS(
+        **config.key_for("GOOGLE_API_KEY"),
         model=model,
         voice_name=voice,
         **({"instructions": instructions} if instructions else {}),

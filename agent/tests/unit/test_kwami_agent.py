@@ -994,3 +994,54 @@ async def test_speaking_settles_the_greeting() -> None:
     agent._fake_session = SessionWithDeps(deps)
     await agent.on_user_turn_completed(None, SimpleNamespace(text_content="hola"))
     assert deps.greeting_owed is False
+
+
+# -- an agent replaced before or while it greets -----------------------------
+
+
+class SessionMovedOn(FakeSession):
+    """A session whose current agent is already another one."""
+
+    def __init__(self, current: Any = None, *, moves_on_reply: bool = False) -> None:
+        super().__init__()
+        self.current_agent = current
+        self._moves_on_reply = moves_on_reply
+
+    def generate_reply(self, **kwargs: Any):
+        if self._moves_on_reply:
+            self.current_agent = object()
+            raise RuntimeError("speech scheduling is draining")
+        return super().generate_reply(**kwargs)
+
+
+async def test_an_agent_replaced_before_greeting_leaves_it_to_its_successor() -> None:
+    agent = agent_with(skip_greeting=False)
+    agent.room = FakeRoom()
+    agent._fake_session = SessionMovedOn(current=object())
+
+    await agent.on_enter()
+
+    assert agent._fake_session.replies == []
+
+
+async def test_an_agent_replaced_while_greeting_does_not_fall_back(caplog) -> None:
+    agent = agent_with(skip_greeting=False)
+    agent.room = FakeRoom()
+    agent._fake_session = SessionMovedOn(moves_on_reply=True)
+
+    with caplog.at_level(logging.ERROR):
+        await agent.on_enter()
+
+    assert agent._fake_session.replies == []
+    assert "Failed to generate greeting" not in caplog.text
+
+
+async def test_the_current_agent_is_not_superseded_by_itself() -> None:
+    agent = agent_with(skip_greeting=False)
+    agent.room = FakeRoom()
+    agent._fake_session = SessionMovedOn()
+    agent._fake_session.current_agent = agent
+
+    await agent.on_enter()
+
+    assert len(agent._fake_session.replies) == 1

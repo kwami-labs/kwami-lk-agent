@@ -27,6 +27,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..domain import clone_config, number, text
+from ..domain.pipelines import HYBRID_PIPELINE, PIPELINES, REALTIME_PIPELINE, STANDARD_PIPELINE
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 
@@ -37,9 +38,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("realtime_config")
 
-REALTIME_PIPELINE = "realtime"
-STANDARD_PIPELINE = "standard"
-PIPELINE_TYPES = (STANDARD_PIPELINE, REALTIME_PIPELINE)
+PIPELINE_TYPES = PIPELINES
 
 #: Keys that only mean something to the realtime pipeline. Their presence is
 #: what tells a mixed `voice` payload apart from a plain TTS one.
@@ -68,10 +67,9 @@ REALTIME_KEYS = (
 #: pipeline was unreachable from the product.
 PIPELINE_KEYS = ("pipelineType", "pipeline_type", "pipeline", "type")
 
-#: Every spelling either side uses, mapped to this codebase's two.
-#: `hybrid` is in the SDK's union but has no implementation here; it resolves to
-#: the standard pipeline, which is what it degrades to, and says so out loud
-#: rather than being silently dropped.
+#: Every spelling either side uses, mapped to this codebase's three.
+#: `hybrid` is the SDK's name for a realtime model that answers in text for a
+#: TTS to speak (domain/pipelines.py).
 PIPELINE_ALIASES: dict[str, str] = {
     "standard": STANDARD_PIPELINE,
     "stt-llm-tts": STANDARD_PIPELINE,
@@ -79,7 +77,11 @@ PIPELINE_ALIASES: dict[str, str] = {
     "sttllmtts": STANDARD_PIPELINE,
     "normal": STANDARD_PIPELINE,
     "classic": STANDARD_PIPELINE,
-    "hybrid": STANDARD_PIPELINE,
+    "hybrid": HYBRID_PIPELINE,
+    "realtime-tts": HYBRID_PIPELINE,
+    "realtime_tts": HYBRID_PIPELINE,
+    "live-tts": HYBRID_PIPELINE,
+    "half-cascade": HYBRID_PIPELINE,
     "realtime": REALTIME_PIPELINE,
     "real-time": REALTIME_PIPELINE,
     "real_time": REALTIME_PIPELINE,
@@ -89,7 +91,7 @@ PIPELINE_ALIASES: dict[str, str] = {
 
 
 def normalize_pipeline_type(raw: Any) -> str | None:
-    """Map any client's spelling onto `standard` or `realtime`, or None.
+    """Map any client's spelling onto `standard`, `realtime` or `hybrid`, or None.
 
     Returning None for an unrecognised value is deliberate: the pipeline branch
     is chosen by equality against `"realtime"`, so passing a typo through would
@@ -104,8 +106,6 @@ def normalize_pipeline_type(raw: Any) -> str | None:
     if resolved is None:
         logger.warning("Ignoring unknown pipeline type %r", raw)
         return None
-    if normalized == "hybrid":
-        logger.warning("Pipeline type 'hybrid' is not implemented; using the standard pipeline")
     return resolved
 
 
@@ -304,9 +304,17 @@ async def update_realtime(
     vad: Any,
     create_agent_fn: Any,
 ) -> None:
-    """Apply a realtime-pipeline voice update, live where the provider allows it."""
+    """Apply a realtime-pipeline voice update, live where the provider allows it.
+
+    On the hybrid pipeline the TTS speaks, so the TTS fields of the same
+    payload count too: a character switched to another engine sends both, and
+    reading only the realtime half left the old TTS speaking (seen on
+    2026-10-23, "Realtime update carried no changes").
+    """
     voice_config = replace(agent.kwami_config.voice)
     changed = apply_realtime_fields(voice_config, config)
+    if voice_config.pipeline_type == HYBRID_PIPELINE:
+        changed |= {f for f in apply_standard_fields(voice_config, config) if f.startswith("tts_")}
 
     if not changed:
         logger.debug("Realtime update carried no changes")

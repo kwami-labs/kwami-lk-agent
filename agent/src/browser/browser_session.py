@@ -20,7 +20,7 @@ from typing import Any
 
 from ..utils.logging import get_logger
 from .cloud_browser import CDPConnection
-from .providers import BrowserProviderPort, LaunchedBrowser, create_browser_provider
+from .providers import LOCAL, BrowserProviderPort, LaunchedBrowser, create_browser_provider
 from .safety import UnsafeURLError, validate_url
 
 logger = get_logger("browser.session")
@@ -77,6 +77,11 @@ class CloudBrowserSession:
         return self._browser_id is not None and self._cdp is not None and self._cdp.is_connected
 
     @property
+    def runs_locally(self) -> bool:
+        """Whether this is a window on the user's computer, not the app's panel."""
+        return self._vendor == LOCAL
+
+    @property
     def live_url(self) -> str | None:
         return self._live_url
 
@@ -96,7 +101,7 @@ class CloudBrowserSession:
         the user closed.
         """
         started, self._started_at = self._started_at, None
-        if started is None or self._usage_tracker is None:
+        if started is None or self._usage_tracker is None or self.runs_locally:
             return
         minutes = max(0.0, (time.monotonic() - started)) / 60.0
         if minutes <= 0:
@@ -170,13 +175,17 @@ class CloudBrowserSession:
         # Enable Page domain for navigation events
         try:
             await self._cdp.send("Page.enable")
-            await self._cdp.send(
-                "Emulation.setDeviceMetricsOverride",
-                width=1280,
-                height=1400,
-                deviceScaleFactor=1,
-                mobile=False,
-            )
+            if self.runs_locally:
+                # The user's window keeps the size they gave it.
+                await self._cdp.send("Page.bringToFront")
+            else:
+                await self._cdp.send(
+                    "Emulation.setDeviceMetricsOverride",
+                    width=1280,
+                    height=1400,
+                    deviceScaleFactor=1,
+                    mobile=False,
+                )
         except Exception as e:
             logger.debug("Failed to set CDP initial overrides: %s", e)
 
@@ -206,8 +215,12 @@ class CloudBrowserSession:
             )
         return self._live_url or ""
 
-    async def close(self) -> None:
-        """Stop the cloud browser and disconnect CDP. Profile state is persisted."""
+    async def close(self, *, quit_browser: bool = False) -> None:
+        """Stop the cloud browser and disconnect CDP. Profile state is persisted.
+
+        `quit_browser` is the user asking to close it. It only matters for a
+        window on their computer, which otherwise outlives the session.
+        """
         self._cancel_idle_timer()
         self._record_browser_minutes()
 
@@ -217,6 +230,10 @@ class CloudBrowserSession:
 
         if self._provider and self._browser_id:
             try:
+                if quit_browser and self.runs_locally:
+                    closer = getattr(self._provider, "quit", None)
+                    if closer is not None:
+                        await closer(self._browser_id)
                 await self._provider.release(self._browser_id)
             except Exception as e:
                 logger.warning("Failed to stop cloud browser %s: %s", self._browser_id[:8], e)
@@ -557,6 +574,9 @@ class CloudBrowserSession:
     def _reset_idle_timer(self) -> None:
         """Reset the idle auto-close timer."""
         self._cancel_idle_timer()
+        if self.runs_locally:
+            # Nothing is billing, and the user may be reading or signing in.
+            return
         self._idle_timer = asyncio.create_task(self._idle_timeout())
 
     async def _release_unusable_browser(self) -> None:

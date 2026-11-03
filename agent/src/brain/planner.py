@@ -63,6 +63,14 @@ PLAN_SCHEMA = {
 }
 
 
+#: For a director that has no structured output to hold it to the schema.
+PLAN_FORMAT = (
+    "\n\nReply with JSON only, no markdown fence: an object with `split` (boolean) and "
+    "`steps`, each step having `id`, `goal`, `difficulty`, `web` (boolean) and `after` "
+    "(list of ids)."
+)
+
+
 @dataclass
 class PlanStep:
     id: str
@@ -125,6 +133,16 @@ def waves(steps: list[PlanStep]) -> list[list[PlanStep]]:
         done.update(s.id for s in ready)
         remaining = [s for s in remaining if s not in ready]
     return out
+
+
+def plan_from_text(text: str) -> Plan:
+    """A plan out of a model's plain answer. No steps when it cannot be read."""
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        return Plan(steps=parse_plan(text[start : end + 1]) if start != -1 else [])
+    except (ValueError, AttributeError, TypeError):
+        logger.warning("The director returned an unreadable plan")
+        return Plan(steps=[])
 
 
 async def plan_task(api_key: str, model: str, task: str) -> Plan | None:

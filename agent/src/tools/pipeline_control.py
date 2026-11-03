@@ -37,6 +37,7 @@ from ..domain.models import (
     REALTIME_PROVIDER_DEFAULT_MODEL,
     resolve_model,
 )
+from ..domain.pipelines import HYBRID_PIPELINE, REALTIME_MODEL_PIPELINES, realtime_speaks_text
 from ..runtime.reconfigure import (
     REALTIME_PIPELINE,
     STANDARD_PIPELINE,
@@ -115,7 +116,7 @@ class PipelineControlMixin:
             return NO_RECONFIGURE
 
         voice = self.kwami_config.voice
-        realtime = voice.pipeline_type == REALTIME_PIPELINE
+        realtime = voice.pipeline_type in REALTIME_MODEL_PIPELINES
         current_provider = voice.realtime_provider if realtime else voice.llm_provider
 
         choice = resolve_model(model, current_provider, realtime=realtime)
@@ -158,7 +159,7 @@ class PipelineControlMixin:
     async def list_available_models(self, context: RunContext) -> dict[str, Any]:
         """List the AI model providers this agent can switch between, and the current one."""
         voice = self.kwami_config.voice
-        realtime = voice.pipeline_type == REALTIME_PIPELINE
+        realtime = voice.pipeline_type in REALTIME_MODEL_PIPELINES
         defaults = REALTIME_PROVIDER_DEFAULT_MODEL if realtime else PROVIDER_DEFAULT_MODEL
         return {
             "pipeline": voice.pipeline_type,
@@ -176,12 +177,14 @@ class PipelineControlMixin:
 
     @function_tool()
     async def switch_pipeline_mode(self, context: RunContext, mode: str) -> Any:
-        """Switch between the standard and realtime voice pipelines mid-conversation.
+        """Switch between the standard, realtime and hybrid voice pipelines mid-conversation.
 
         Args:
             mode: 'realtime' for the low-latency speech-to-speech model (one model
-                  hears and speaks), or 'standard' for the separate
-                  speech-to-text, LLM and text-to-speech chain.
+                  hears and speaks), 'standard' for the separate
+                  speech-to-text, LLM and text-to-speech chain, or 'hybrid' for
+                  the realtime model thinking and the text-to-speech voice
+                  speaking (only realtime models that answer in text).
         """
         reconfigurator = reconfigurator_from_context(context)
         if reconfigurator is None:
@@ -199,9 +202,19 @@ class PipelineControlMixin:
             "fast": REALTIME_PIPELINE,
             "pipeline": STANDARD_PIPELINE,
             "stt": STANDARD_PIPELINE,
+            "live + tts": HYBRID_PIPELINE,
+            "live with tts": HYBRID_PIPELINE,
         }.get(spoken) or normalize_pipeline_type(spoken)
         if target is None:
-            return f"I don't know a '{mode}' mode. I can use 'standard' or 'realtime'."
+            return f"I don't know a '{mode}' mode. I can use 'standard', 'realtime' or 'hybrid'."
+        voice = self.kwami_config.voice
+        if target == HYBRID_PIPELINE and not realtime_speaks_text(
+            voice.realtime_provider, voice.realtime_model
+        ):
+            return (
+                f"{voice.realtime_model} only answers with its own voice, so it can't "
+                "speak through a text-to-speech voice. Pick an OpenAI Realtime model first."
+            )
 
         if target == self.kwami_config.voice.pipeline_type:
             return f"I'm already on the {target} pipeline."
@@ -211,6 +224,8 @@ class PipelineControlMixin:
         logger.info("Agent-initiated pipeline switch to %s", target)
         if target == REALTIME_PIPELINE:
             return new_agent, "Switched to the realtime pipeline -- I should feel snappier now."
+        if target == HYBRID_PIPELINE:
+            return new_agent, "Switched to the hybrid pipeline: realtime thinking, my TTS voice."
         return new_agent, "Switched back to the standard pipeline."
 
     # -- realtime voice ------------------------------------------------------

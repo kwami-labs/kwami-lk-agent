@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -56,6 +57,8 @@ class SessionState:
     browser_session: Any = None
     usage_tracker: UsageTracker = field(default_factory=UsageTracker)
     usage_reporter: UsageReporterPort = field(default_factory=create_usage_reporter)
+    #: Waits for this user's own model keys. Set by the worker, which holds the bridge.
+    user_keys_ready: Callable[[], Awaitable[None]] | None = None
     _cleanup_tasks: list = field(default_factory=list, repr=False)
     # Serializes config handling. Two config messages arriving close together
     # used to be handled concurrently: both built a Zep client and both called

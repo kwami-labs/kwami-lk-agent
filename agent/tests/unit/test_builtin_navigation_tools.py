@@ -22,11 +22,15 @@ from typing import Any
 
 import pytest
 
+from src.browser.providers import ProviderUnavailableError
 from src.domain import KwamiConfig
+from src.domain.tool_result import was_refused
 from src.tools.builtin import AgentToolsMixin
 
 
 class FakeBrowserSession:
+    runs_locally = False
+
     def __init__(self, active: bool = True) -> None:
         self.is_active = active
         self.started: list[tuple[str, str | None]] = []
@@ -43,6 +47,8 @@ class FakeBrowserSession:
         return f"{name} ok"
 
     async def start(self, user_id: str, url: str | None = None) -> str:
+        if self.fail:
+            raise self.fail
         self.started.append((user_id, url))
         self.is_active = True
         return "https://live"
@@ -80,7 +86,7 @@ class FakeBrowserSession:
             raise self.fail
         return self.page_text
 
-    async def close(self) -> None:
+    async def close(self, *, quit_browser: bool = False) -> None:
         if self.fail:
             raise self.fail
         self.closed += 1
@@ -357,3 +363,34 @@ async def test_a_negative_index_is_clamped_rather_than_sent() -> None:
     await tools.dismiss_search_result(None, -5)
 
     assert tools.publisher.published[0]["index"] == 0
+
+
+async def test_a_card_number_is_never_typed_into_a_page() -> None:
+    tools, session = _tools()
+
+    result = await tools.type_in_navigation(None, "4111 1111 1111 1111")
+
+    assert "Refused" in result
+    assert not session.actions
+
+
+async def test_a_window_on_the_computer_is_called_that() -> None:
+    tools, session = _tools(active=False)
+    session.runs_locally = True
+
+    result = await tools.navigate_to(None, "https://example.com")
+
+    assert "window on the user's computer" in result
+    assert "panel" not in result
+
+
+async def test_no_vendor_able_to_browse_is_refused_in_its_own_words() -> None:
+    tools, session = _tools(active=False)
+    session.fail = ProviderUnavailableError(
+        "No browser could be opened. Browser Use has no credit."
+    )
+
+    result = await tools.navigate_to(None, "https://example.com")
+
+    assert was_refused(result)
+    assert str(result) == "No browser could be opened. Browser Use has no credit."

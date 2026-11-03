@@ -5,6 +5,7 @@ from .context_store import create_context_store
 from .providers import (
     BROWSER_USE,
     BROWSERBASE,
+    LOCAL,
     BrowserProviderPort,
     LaunchedBrowser,
     ProviderUnavailableError,
@@ -15,6 +16,7 @@ from .providers import (
 __all__ = [
     "BROWSERBASE",
     "BROWSER_USE",
+    "LOCAL",
     "BrowserProviderPort",
     "CloudBrowserSession",
     "LaunchedBrowser",

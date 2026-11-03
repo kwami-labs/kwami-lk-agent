@@ -97,6 +97,11 @@ Browserbase is the default (`KWAMI_BROWSER_PROVIDER`), with Browser Use
 Cloud as the alternative. Both keep a per-user profile carrying real cookies
 and logins, so everything below applies identically to either.
 
+`KWAMI_BROWSER_PROVIDER=local` is for an agent running on the user's own computer
+only: a Chrome window with its own profile, never the everyday one, driven over a
+debugging port on loopback. Any process on that computer can reach that port
+while the window is open, which is why it is never picked as a fallback.
+
 ### URL validation (`browser/safety.py`)
 
 `validate_url` / `validate_url_async` reject:

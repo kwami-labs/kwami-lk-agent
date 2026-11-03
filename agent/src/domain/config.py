@@ -10,7 +10,7 @@ Supports full configuration for voice AI pipelines including:
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from ..settings import get_settings
 
@@ -131,13 +131,25 @@ class KwamiVoiceConfig:
     This configuration supports:
     - Standard pipeline: STT → LLM → TTS
     - Realtime pipeline: Single model for ultra-low latency
+    - Hybrid pipeline: the realtime model thinks, a TTS speaks (domain/pipelines.py)
     """
 
     # =========================================================================
     # Pipeline Type
     # =========================================================================
 
-    pipeline_type: Literal["standard", "realtime"] = "standard"
+    pipeline_type: Literal["standard", "realtime", "hybrid"] = "standard"
+
+    # The keys this user connected, by environment name. Set on the server when an
+    # agent is built, never read from the app. Out of repr so no log can print them.
+    user_keys: dict[str, str] = field(default_factory=dict, repr=False)
+
+    def key_for(self, *names: str) -> dict[str, Any]:
+        """`{"api_key": ...}` when the user connected one of these, else nothing."""
+        for name in names:
+            if self.user_keys.get(name):
+                return {"api_key": self.user_keys[name]}
+        return {}
 
     # =========================================================================
     # Speech-to-Text (STT) Configuration
@@ -156,6 +168,9 @@ class KwamiVoiceConfig:
 
     # Language codes: en, en-US, en-GB, es, fr, de, it, pt, ja, ko, zh, hi, ar, ru, multi
     stt_language: str = "en"
+    # Names and words the STT should expect (Deepgram Nova-3): it heard "Claude" as
+    # "Cloud" and "Jarvis" as "Jardis", and memory kept them that way.
+    stt_keyterms: list[str] = field(default_factory=list)
 
     # Word boost for better recognition (provider-specific)
     stt_word_boost: list[str] = field(default_factory=list)
@@ -298,8 +313,8 @@ class KwamiVoiceConfig:
     turn_detector: Literal["model", "vad", "stt"] = "model"
 
     # Silence before the turn may end; learned upwards from the minimum.
-    min_endpointing_delay: float = 0.4
-    max_endpointing_delay: float = 2.5
+    min_endpointing_delay: float = 0.8
+    max_endpointing_delay: float = 4.0
 
     # Whether the user can cut the agent off, and how much speech it takes.
     allow_interruptions: bool = True
