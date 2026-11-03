@@ -918,6 +918,42 @@ async def test_knowing_the_user_brings_in_their_keys_and_their_pc(
     assert bridge._keys["XAI_API_KEY"] == f"for-{USER}" and ACCOUNT_MARK in bridge._keys
 
 
+async def test_someone_who_joins_later_does_not_get_the_first_persons_keys(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def load(store: Any, user_id: str, secret: str, *_: Any) -> dict[str, str]:
+        return {"XAI_API_KEY": f"for-{user_id}"}
+
+    monkeypatch.setattr(bridge_module, "load_user_keys", load)
+    bridge = _bridge(tmp_path, {"GOOGLE_API_KEY": "ours"}, FakeJobs())
+    bridge._keys_store = object()  # type: ignore[assignment]
+    await bridge._on_user_known()
+    assert bridge._keys["XAI_API_KEY"] == f"for-{USER}"
+
+    bridge.user_id = "22222222-2222-2222-2222-222222222222"
+    await bridge._on_user_known()
+
+    assert "XAI_API_KEY" not in bridge._keys
+    assert bridge._keys["GOOGLE_API_KEY"] == "ours"
+    assert bridge.voice_keys == {}
+
+
+async def test_keys_that_arrive_after_someone_else_joined_are_dropped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bridge = _bridge(tmp_path, {}, FakeJobs())
+    bridge._keys_store = object()  # type: ignore[assignment]
+
+    async def load(store: Any, user_id: str, secret: str, *_: Any) -> dict[str, str]:
+        bridge.user_id = "22222222-2222-2222-2222-222222222222"
+        return {"XAI_API_KEY": f"for-{user_id}"}
+
+    monkeypatch.setattr(bridge_module, "load_user_keys", load)
+    await bridge._on_user_known()
+
+    assert "XAI_API_KEY" not in bridge._keys and bridge.voice_keys == {}
+
+
 # -- the new providers ---------------------------------------------------------------
 
 

@@ -234,6 +234,26 @@ async def test_past_the_ceiling_it_stops_and_says_so(
     assert "tope" in ledger.all_pending()[0].summary
 
 
+@pytest.mark.parametrize(
+    ("text", "takes_over"),
+    [
+        ("Not logged in · Please run /login", True),
+        ("Invalid API key", True),
+        ('{"type":"authentication_error"}', True),
+        ("OAuth token has expired", True),
+        ("Credit balance is too low", True),
+        ("Claude usage limit reached", True),
+        ("El ejecutor local falló: ProcessError", True),
+        ("La página pide log in y no tengo la contraseña.", False),
+        ("El author del commit no coincide.", False),
+        ("Falta el flujo OAuth en la API.", False),
+    ],
+)
+def test_only_what_a_login_says_hands_the_job_to_the_api_key(text: str, takes_over: bool) -> None:
+    """Handing over runs the whole job again, with everything it already did."""
+    assert bool(worker_module._LOGIN_TROUBLE.search(text)) is takes_over
+
+
 async def test_crossing_a_line_warns_in_the_result(tmp_path: Path) -> None:
     jobs = FakeJobs(spent=119.9)
     results = iter([ExecutorResult("Sin credit", 0.0, False), ExecutorResult("Hecho.", 0.5, True)])
