@@ -75,7 +75,7 @@ def _openai_llm(config: KwamiVoiceConfig, model: str, **kwargs):
         model=model,
         temperature=_openai_temperature(config, model),
         max_completion_tokens=config.llm_max_tokens,
-        **kwargs,
+        **{**config.key_for("OPENAI_API_KEY"), **kwargs},
     )
 
 
@@ -117,6 +117,7 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         return google.LLM(
             model=model,
             temperature=config.llm_temperature,
+            **config.key_for("GOOGLE_API_KEY"),
             **({"thinking_config": thinking} if thinking else {}),
         )
 
@@ -132,7 +133,11 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         # ("Too many strict tools") on LiveKit Cloud, 2026-10-18.
         return anthropic.LLM(
             model=model,
+            # The prompt and the tools are the same on every turn of a call and are most
+            # of what it sends: read from cache, they cost a tenth and arrive sooner.
+            caching="ephemeral",
             _strict_tool_schema=False,
+            **config.key_for("ANTHROPIC_API_KEY"),
             **_anthropic_temperature(config, model),
         )
 
@@ -146,12 +151,14 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         return groq.LLM(
             model=model or "openai/gpt-oss-120b",
             temperature=config.llm_temperature,
+            **config.key_for("GROQ_API_KEY"),
         )
 
     if provider == "deepseek":
         return openai.LLM.with_deepseek(
             model=model or "deepseek-chat",
             temperature=config.llm_temperature,
+            **config.key_for("DEEPSEEK_API_KEY"),
         )
 
     if provider == "mistral":
@@ -159,7 +166,7 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         # This used to go through `with_x_ai(base_url=...)`, which routed to
         # the right endpoint but read XAI_API_KEY -- so a deployment that
         # correctly set MISTRAL_API_KEY failed with "XAI API key is required".
-        api_key = get_settings().mistral_api_key
+        api_key = config.user_keys.get("MISTRAL_API_KEY") or get_settings().mistral_api_key
         if not api_key:
             raise ValueError("MISTRAL_API_KEY is required for the Mistral provider")
         return _openai_llm(

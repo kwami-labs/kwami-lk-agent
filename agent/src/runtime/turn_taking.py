@@ -13,8 +13,10 @@ conversation; the app's Enhancements panel overrides them per session
 
 * **Endpointing, dynamic.** The floor is learned from the user's own pauses, so
   a speaker who stops mid-sentence ("pues... a ver...") is not cut off, and one
-  who answers in two words is not kept waiting. It starts at 0.4 s -- Spanish
-  turns hand over quickly -- and never waits past 2.5 s.
+  who answers in two words is not kept waiting. It starts at 0.8 s and never
+  waits past 4 s: at 0.4 s real turns were cut mid-sentence and answered in pieces
+  (2026-11-02), and a pause costs far less than an answer to half a question.
+  `runtime/turn_gate.py` holds a turn whose words say it has not finished.
 * **Preemptive generation.** The LLM starts on the interim transcript while the
   turn detector decides; only text is generated early. TTS waits for the
   confirmed turn, so a discarded guess costs tokens, never synthesized audio.
@@ -43,6 +45,7 @@ from livekit.agents.voice.room_io.types import NoiseCancellationParams
 from livekit.agents.voice.turn import TurnHandlingOptions
 
 from ..domain import KwamiVoiceConfig
+from ..domain.pipelines import REALTIME_MODEL_PIPELINES
 from ..utils.logging import get_logger
 
 try:
@@ -52,8 +55,6 @@ except Exception:  # pragma: no cover - a core dependency; guarded so a broken
     noise_cancellation = None  # type: ignore[assignment]
 
 logger = get_logger("turn_taking")
-
-REALTIME_PIPELINE = "realtime"
 
 _DEFAULTS = KwamiVoiceConfig()
 
@@ -107,8 +108,11 @@ def session_turn_handling(voice: KwamiVoiceConfig | None = None) -> TurnHandling
 
 
 def agent_turn_handling(pipeline_type: str) -> Any:
-    """Per-agent overrides: adaptive interruptions on the standard pipeline."""
-    if pipeline_type == REALTIME_PIPELINE:
+    """Per-agent overrides: adaptive interruptions on the standard pipeline.
+
+    A realtime model takes the turns itself, on the hybrid pipeline too.
+    """
+    if pipeline_type in REALTIME_MODEL_PIPELINES:
         return NOT_GIVEN
     return TurnHandlingOptions(interruption={"mode": "adaptive"})
 

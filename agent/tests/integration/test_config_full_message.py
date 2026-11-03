@@ -883,3 +883,67 @@ async def test_a_new_tts_direction_rebuilds_the_engine(captured, create_agent_fn
     )
 
     assert captured["config"].voice.tts_style == "después"
+
+
+async def test_a_text_model_sent_as_the_realtime_one_is_ignored(
+    captured, create_agent_fn, caplog
+) -> None:
+    default = KwamiConfig().voice.realtime_model
+
+    with caplog.at_level(logging.WARNING):
+        await run_config(
+            {"voice": {"realtime": {"provider": "google", "model": "gemini-3.5-flash"}}},
+            create_agent_fn,
+        )
+
+    assert captured["config"].voice.realtime_model == default
+    assert "not a realtime one" in caplog.text
+
+
+def test_llm_sampling_is_applied_to_the_running_client() -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=0.7, max_completion_tokens=100, max_tokens=50)
+    agent = SimpleNamespace(kwami_config=KwamiConfig(), llm=SimpleNamespace(_opts=opts))
+    new_voice = replace(agent.kwami_config.voice, llm_temperature=0.2, llm_max_tokens=256)
+
+    _apply_llm_knobs_live(agent, new_voice)
+
+    assert (opts.temperature, opts.max_completion_tokens) == (0.2, 256)
+    assert opts.max_tokens == 50, "only the first token limit the client has is set"
+
+
+def test_a_client_built_without_temperature_gets_none() -> None:
+    """Claude from Opus 4.7 on answers 400 to a temperature."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=None, max_output_tokens=100)
+    agent = SimpleNamespace(kwami_config=KwamiConfig(), llm=SimpleNamespace(_opts=opts))
+    new_voice = replace(agent.kwami_config.voice, llm_temperature=0.2, llm_max_tokens=256)
+
+    _apply_llm_knobs_live(agent, new_voice)
+
+    assert opts.temperature is None
+    assert opts.max_output_tokens == 256
+
+
+def test_a_client_without_a_token_limit_keeps_none() -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=0.7)
+    agent = SimpleNamespace(kwami_config=KwamiConfig(), llm=SimpleNamespace(_opts=opts))
+    new_voice = replace(agent.kwami_config.voice, llm_temperature=0.2, llm_max_tokens=256)
+
+    _apply_llm_knobs_live(agent, new_voice)
+
+    assert vars(opts) == {"temperature": 0.2}
+    assert agent.kwami_config.voice.llm_max_tokens == 256

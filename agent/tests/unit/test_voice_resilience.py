@@ -19,6 +19,7 @@ from src.factories import create_llm, create_stt, create_tts
 from src.factories.fallback import (
     ELEVENLABS_FEMALE,
     ELEVENLABS_MALE,
+    _has_key,
     is_female_voice,
     primary_of,
     with_llm_fallback,
@@ -121,6 +122,7 @@ def test_the_tts_backup_keeps_the_characters_register(env_setting) -> None:
         ("kore", True),
         (ELEVENLABS_MALE, False),
         (ELEVENLABS_FEMALE, True),
+        ("7DhuphZTKDjiMKbUjawV", True),
         ("", False),
         (None, False),
     ],
@@ -137,6 +139,38 @@ def test_the_stt_falls_back_too(env_setting) -> None:
     chain = with_stt_fallback(create_stt(voice), voice, create_stt, vad=None)
 
     assert len(chain._stt_instances) == 2
+
+
+def test_a_provider_without_requirements_has_no_key() -> None:
+    assert _has_key({}, "nobody") is False
+
+
+def test_a_backup_that_cannot_be_built_is_skipped(env_setting, caplog) -> None:
+    for name in ("GOOGLE_API_KEY", "ASSEMBLYAI_API_KEY", "DEEPGRAM_API_KEY"):
+        env_setting(name, "test-key-not-real")
+    voice = _voice(stt_provider="deepgram", stt_model="nova-3", stt_language="es")
+    primary = create_stt(voice)
+
+    def broken(config: Any) -> Any:
+        raise RuntimeError("plugin missing")
+
+    with caplog.at_level("WARNING"):
+        assert with_stt_fallback(primary, voice, broken, vad=None) is primary
+    assert "Could not build stt backup" in caplog.text
+
+
+def test_the_stt_stays_alone_when_the_adapter_refuses(env_setting, monkeypatch) -> None:
+    for name in ("GOOGLE_API_KEY", "ASSEMBLYAI_API_KEY", "DEEPGRAM_API_KEY"):
+        env_setting(name, "test-key-not-real")
+    voice = _voice(stt_provider="deepgram", stt_model="nova-3", stt_language="es")
+    primary = create_stt(voice)
+
+    def refuse(*args: Any, **kwargs: Any) -> Any:
+        raise ValueError("a non-streaming STT needs a VAD")
+
+    monkeypatch.setattr("src.factories.fallback.lk_stt.FallbackAdapter", refuse)
+
+    assert with_stt_fallback(primary, voice, create_stt, vad=None) is primary
 
 
 def test_primary_of_a_plain_component_is_itself() -> None:
@@ -398,3 +432,33 @@ def test_an_inference_model_needs_its_provider_prefix(env_setting) -> None:
     voice = _voice(llm_provider="inference", llm_model="gemini-2.5-flash")
     # No "provider/" in the id: not a model Inference can route, so OpenAI.
     assert "openai" in type(create_llm(voice)).__module__
+
+
+async def test_a_rescue_finds_nothing_left_to_rescue() -> None:
+    """The call already moved off the realtime model (or ended) meanwhile."""
+    from src.runtime.recovery import _rescue
+
+    for agent in (None, FakeAgent("standard")):
+        state = FakeState(agent)
+        rescuing = {"active": True}
+
+        await _rescue(EmittingSession(), state, None, None, None, "x", rescuing)
+
+        assert state.swaps == []
+        assert rescuing["active"] is False
+
+
+async def test_a_rescue_that_fails_is_logged_and_released(caplog) -> None:
+    from src.runtime.recovery import _rescue
+
+    def create_agent_fn(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no standard pipeline either")
+
+    state = FakeState(FakeAgent("realtime"))
+    rescuing = {"active": True}
+
+    with caplog.at_level("ERROR"):
+        await _rescue(EmittingSession(), state, None, create_agent_fn, None, "x", rescuing)
+
+    assert "Could not move the call off the realtime model" in caplog.text
+    assert rescuing["active"] is False

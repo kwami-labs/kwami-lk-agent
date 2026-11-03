@@ -10,6 +10,7 @@ from livekit.agents.voice.agent import find_function_tools
 
 from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..domain.charter import parse_charter
+from ..domain.pipelines import REALTIME_MODEL_PIPELINES
 from ..factories.fallback import primary_of
 from ..memory import create_memory
 from ..tools.limits import enforce_tool_limit
@@ -114,7 +115,9 @@ async def handle_full_config(
             # normalize_pipeline_type only ever returns one of the two Literal
             # members or None; an unrecognised spelling is rejected upstream
             # rather than passed through.
-            new_config.voice.pipeline_type = cast(Literal["standard", "realtime"], pipeline_type_in)
+            new_config.voice.pipeline_type = cast(
+                Literal["standard", "realtime", "hybrid"], pipeline_type_in
+            )
 
         realtime_data = section(voice_data, "realtime")
         realtime_provider_in = text(realtime_data, "provider") or text(
@@ -294,6 +297,10 @@ async def handle_full_config(
         if previous is not None:
             copy_listening(previous.kwami_config.voice, new_config.voice)
         listening_changed = apply_listening(new_config.voice, parse_listening(voice_data))
+        # The first config can beat the user's keys here, and would then spend ours.
+        keys_ready = state.user_keys_ready() if state.user_keys_ready is not None else None
+        if inspect.isawaitable(keys_ready):
+            await keys_ready
         new_agent = create_agent_fn(new_config, vad, memory, skip_greeting=skip_greeting)
 
         # 4. Switch to new agent (state handles memory cleanup)
@@ -412,12 +419,13 @@ async def update_voice(
 
     # Realtime keys are meaningless to the standard pipeline; routing on the
     # live pipeline type (not on key presence alone) keeps a stale realtime_*
-    # field in a mixed payload from hijacking a TTS update.
+    # field in a mixed payload from hijacking a TTS update. The hybrid pipeline
+    # has both: a realtime model, and a TTS that the rest of this updates.
+    if current_pipeline in REALTIME_MODEL_PIPELINES and has_realtime_keys(config):
+        await update_realtime(session, state, agent, config, vad, create_agent_fn)
+        return
     if current_pipeline == REALTIME_PIPELINE:
-        if has_realtime_keys(config):
-            await update_realtime(session, state, agent, config, vad, create_agent_fn)
-        else:
-            logger.debug("Ignoring TTS/STT voice update while on the realtime pipeline")
+        logger.debug("Ignoring TTS/STT voice update while on the realtime pipeline")
         return
 
     current_provider = agent.kwami_config.voice.tts_provider
@@ -560,11 +568,12 @@ async def _update_tts_options(
         if is_openai_tts:
             from ..constants import OpenAIVoices
 
-            if new_voice not in OpenAIVoices.STANDARD:
+            valid = OpenAIVoices.for_tts_model(str(agent.kwami_config.voice.tts_model or ""))
+            if new_voice not in valid:
                 logger.warning(
                     "Voice '%s' not valid for current OpenAI TTS, skipping voice update. Valid: %s",
                     new_voice,
-                    ", ".join(sorted(OpenAIVoices.STANDARD)),
+                    ", ".join(sorted(valid)),
                 )
                 new_voice = None  # Skip this update
 
@@ -710,7 +719,7 @@ async def update_llm(
     # realtime model. The models panel sends provider/model under updateType
     # "llm" regardless of pipeline, so translate rather than rebuild a standard
     # pipeline underneath a realtime session.
-    if agent.kwami_config.voice.pipeline_type == REALTIME_PIPELINE:
+    if agent.kwami_config.voice.pipeline_type in REALTIME_MODEL_PIPELINES:
         # Only a model that speaks the realtime protocol can replace the live
         # one. The app sends its *text* LLM here on every connect, whatever the
         # pipeline; taken as the realtime model, gemini-3.5-flash made Gemini

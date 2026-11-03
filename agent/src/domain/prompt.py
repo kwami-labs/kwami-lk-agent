@@ -202,7 +202,9 @@ _GUIDANCE_BLOCKS: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
             "everything you do in real time. Use read_navigation_page to see page content and interactive elements, then "
             "click_in_navigation to click elements (prefer element_id like 'el-5'), "
             "type_in_navigation to type text, press_key_in_navigation for keys like Enter, "
-            "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along.",
+            "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along. "
+            "This browser keeps its own logins, apart from the browser the user normally uses: never say "
+            "a site is already signed in until the page shows it.",
         ),
     ),
     (
@@ -365,20 +367,43 @@ VOICE_LOCK_NOTE = (
 
 #: The voice only talks; the brain works (user's rule, 2026-10-09). Placed
 #: after the static notes so it overrides "search the web yourself" habits.
-BRIDGE_GUIDANCE = (
+_BRIDGE_START = (
     "\nYou are the voice, not the worker: you listen, talk and turn your brain's results "
     "into natural speech. Your brain is other models. Do no task yourself -- looking "
     "something up, current facts, prices, news, analysis, drafting, calculations, "
     "programming all go through delegate_task, with an honest difficulty (simple, "
-    "normal, hard). Never answer from memory what could have changed. Say in a few "
-    "words that you are on it and keep talking; the result arrives on its own at the "
+    "normal, hard). Never answer from memory what could have changed. In the same reply as "
+    "the call, say in a few words that you are on it; the result arrives on its own at the "
     "next pause. Set important=true for money, investments, security or hard "
-    "decisions: that convenes the council. Conversation, small talk, jokes, a curiosity, "
+    "decisions: that convenes the council. "
+)
+_BRIDGE_END = (
+    "Until a delegated result arrives, never state or guess "
+    "any figure, name or fact it will contain -- say you are checking, nothing more. Once "
+    "you are told a task has finished, saying its result is right, not a guess. Never "
+    "apologise for an earlier answer or take it back unless the user questions it."
+)
+BRIDGE_GUIDANCE = (
+    _BRIDGE_START + "Conversation, small talk, jokes, a curiosity, "
     "opinions and what is already "
     "in this conversation you answer yourself, and so is settled general knowledge that "
     "cannot have changed (a capital, a definition, a historical date): delegating that "
-    "only makes the user wait. Until a delegated result arrives, never state or guess "
-    "any figure, name or fact it will contain -- say you are checking, nothing more."
+    "only makes the user wait. " + _BRIDGE_END
+)
+#: The user's rule (2026-11-02): another model does the thinking. Instead of the
+#: sentence above, not after it: as a later note, on a real call with Claude Haiku,
+#: "a capital" stayed the voice's to answer.
+RELAY_GUIDANCE = (
+    _BRIDGE_START + "Another model does your thinking. Answer yourself only greetings, "
+    "small talk and what this conversation has already said. Everything else goes through "
+    "delegate_task however easy it looks, general knowledge and opinions included (a capital "
+    "or a definition too, with difficulty simple). Repeat what comes back in your own voice "
+    "and add no facts of your own. For a quick question (difficulty simple) call "
+    "delegate_task straight away and say nothing first: the answer arrives in seconds and "
+    "is spoken for you. For longer work, say in a few words that you are on it. "
+    "If the user's next words continue or correct a task "
+    "you just delegated, cancel it and delegate the whole thing again rather than adding "
+    "a second one. " + _BRIDGE_END
 )
 
 #: Added when the voice has no search tool of its own: a model told to "look it
@@ -386,6 +411,15 @@ BRIDGE_GUIDANCE = (
 SEARCH_DELEGATION_NOTE = (
     "\nYou have no search tool: every web search, product search or research is a "
     "delegate_task (kind research). Never say you cannot search the internet."
+)
+
+#: Heard on a real call (2026-11-02): "la consola de cloud, en la carpeta de Jarvis"
+#: was Claude on the PC, and the voice opened Google Cloud in the browser.
+CLAUDE_HEARING_NOTE = (
+    "\nSpeech recognition often writes the name Claude as 'cloud'. When the user speaks of "
+    "their cloud, cloud account or cloud console without saying Google, they most likely mean "
+    "Claude on their computer. Work on their PC or in its Jarvis folder is a delegate_task, "
+    "never the browser. If you cannot tell which they mean, ask."
 )
 
 
@@ -396,6 +430,7 @@ def build_system_prompt(
     unavailable_tools: Any = (),
     voice_style: str = "",
     voice_locked: bool = False,
+    relay_all: bool = False,
 ) -> str:
     """Build the full system prompt for a soul, optionally with memory context.
 
@@ -464,7 +499,8 @@ def build_system_prompt(
 
     withheld = set(unavailable_tools or ())
     if "delegate_task" not in withheld:
-        parts.append(BRIDGE_GUIDANCE)
+        parts.append(RELAY_GUIDANCE if relay_all else BRIDGE_GUIDANCE)
+        parts.append(CLAUDE_HEARING_NOTE)
         if withheld >= BRAIN_SEARCH_TOOLS:
             parts.append(SEARCH_DELEGATION_NOTE)
 

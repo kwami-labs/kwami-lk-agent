@@ -420,18 +420,18 @@ async def test_a_search_error_whose_body_cannot_be_read(env_setting) -> None:
 
     result = await _searching_agent(env_setting).web_search(None, "anything")
 
-    assert "Search failed" in result
+    assert "temporarily unavailable" in result
 
 
 @respx.mock
 async def test_a_search_error_with_a_non_json_body(env_setting) -> None:
-    """The detail is dug out of JSON; a plain-text body must not raise."""
+    """The vendor's body is for the log: it can be wrong, and it is not for the user."""
     respx.post(TAVILY_SEARCH).mock(return_value=httpx.Response(500, text="upstream exploded"))
 
     result = await _searching_agent(env_setting).web_search(None, "anything")
 
-    assert "Search failed" in result
-    assert "upstream exploded" in result
+    assert "temporarily unavailable" in result
+    assert "upstream exploded" not in result
 
 
 @respx.mock

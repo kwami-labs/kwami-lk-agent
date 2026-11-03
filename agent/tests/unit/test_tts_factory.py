@@ -532,3 +532,18 @@ def test_an_unknown_provider_has_a_generic_default() -> None:
 
 def test_the_default_lookup_is_case_insensitive() -> None:
     assert get_default_voice("OpenAI") == OpenAIVoices.DEFAULT
+
+
+@pytest.mark.parametrize("voice", ["marin", "cedar", "ballad", "verse"])
+def test_the_newest_openai_voices_need_the_newest_model(voice: str, caplog) -> None:
+    create_tts(voice_config(tts_provider="openai", tts_model="gpt-4o-mini-tts", tts_voice=voice))
+    assert "not supported" not in caplog.text
+    create_tts(voice_config(tts_provider="openai", tts_model="tts-1", tts_voice=voice))
+    assert "not supported" in caplog.text
+
+
+def test_an_aura_2_voice_is_the_model_whatever_the_family_says() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="deepgram", tts_model="aura-2", tts_voice="aura-2-nestor-es")
+    )
+    assert instance.model == "aura-2-nestor-es"

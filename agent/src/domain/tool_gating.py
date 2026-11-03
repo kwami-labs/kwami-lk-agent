@@ -122,7 +122,9 @@ def unavailable_builtin_tools(settings: object) -> frozenset[str]:
             missing.add(requirement.tool)
 
     browser_configured = bool(
-        getattr(settings, "browserbase_api_key", "") or getattr(settings, "browser_use_api_key", "")
+        getattr(settings, "browserbase_api_key", "")
+        or getattr(settings, "browser_use_api_key", "")
+        or getattr(settings, "browser_provider", "") == "local"
     )
     if not browser_configured:
         missing |= BROWSER_TOOLS
