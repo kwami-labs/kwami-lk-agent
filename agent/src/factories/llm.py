@@ -32,6 +32,10 @@ groq = optional_plugin("groq")
 _OPENAI_TEMPERATURE_FIXED_MODELS = ("gpt-5.1", "o1-", "o3-")
 
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
+#: Models OpenAI has withdrawn that kwamis still have saved. Each answers 404, so the
+#: voice lost its first turn to the failover on every call (seen in production,
+#: 2026-11-02). The replacement is one production was answering on that day.
+RETIRED_OPENAI_MODELS = {"gpt-5.1-chat-latest": "gpt-4.1-mini"}
 #: The provider name for models served by LiveKit Inference ("google/...").
 INFERENCE_PROVIDER = "inference"
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-5-5"
@@ -101,7 +105,10 @@ def _build(config: KwamiVoiceConfig, provider: str, model: str):
         return inference.LLM(model=model, extra_kwargs={"temperature": config.llm_temperature})
 
     if provider == "openai":
-        return _openai_llm(config, model or DEFAULT_OPENAI_MODEL)
+        replacement = RETIRED_OPENAI_MODELS.get(model)
+        if replacement:
+            logger.warning("OpenAI withdrew %s; using %s instead", model, replacement)
+        return _openai_llm(config, replacement or model or DEFAULT_OPENAI_MODEL)
 
     if provider == "google":
         if google is None:
