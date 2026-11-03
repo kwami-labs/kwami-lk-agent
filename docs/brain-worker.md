@@ -50,6 +50,7 @@ Ctrl+C. It exits with code 2 and logs the reason when something is missing.
 | Migration 024 | The thinking line, and the worker reporting its Claude login |
 | `scripts\\brain-worker.cmd --login` once on the PC | The Claude account it works on, signed in through Anthropic's own flow |
 | `ANTHROPIC_API_KEY` | Optional: the fallback when the login cannot do the work |
+| `KWAMI_GOOGLE_WORK_TOKEN` | Optional: the user's token for Google, from `POST /google/work-thread/token`. Without it, the thread has no Google. A task uses Google or commands, the web and team members, never both |
 | `KWAMI_SELF_REPO_OWNER` | Optional: the GitHub owner whose repositories self-improvement works on. Without it, none |
 | A valid `--user` | The Supabase user id whose jobs it takes |
 

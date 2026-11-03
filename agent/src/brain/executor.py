@@ -70,6 +70,8 @@ _FULL_TOOLS = [*_EDIT_TOOLS, "Bash", "Agent", "Task"]
 #: A model that only thinks. What it reads on the web can say anything, and on the
 #: user's own login it must not be able to act on it: no files, no commands.
 _THINK_TOOLS = ["WebSearch", "WebFetch"]
+#: What can carry data out of a run, or bring in orders from outside it.
+_OPEN_WORLD_TOOLS = frozenset({"Bash", "WebSearch", "WebFetch", "Agent", "Task"})
 #: Where a path that starts with "/" may begin in a command: its start, or after
 #: whitespace, a quote, `=`, a bracket or a shell operator -- not mid-word, where
 #: the "/a/" of "/home/u/a/b.txt" or "src/a/b.py" is no path of its own.
@@ -82,6 +84,11 @@ _WINDOWS_PATH = re.compile(
 #: On Linux (the cloud executor): POSIX absolute paths, and the Windows forms,
 #: which `_inside` refuses there.
 _POSIX_PATH = re.compile(rf"(?:(?<![A-Za-z])[A-Za-z]:[\\/]|\\\\|{_PATH_START}/){_PATH_REST}")
+#: The user's home by another name: the shell expands these after the scan has read them.
+_HOME_PATH = re.compile(
+    rf"{_PATH_START}(?:~|\$\{{?(?:HOME|USERPROFILE)\}}?(?![A-Za-z0-9_])|%USERPROFILE%)"
+    rf"(?:[\\/]({_PATH_REST}))?"
+)
 #: Devices a command may name without leaving the folder ("2> /dev/null").
 _DEVICES = frozenset({"/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr"})
 _GIT_PUSH = re.compile(r"\bgit\b[^\n|;&]*\bpush\b", re.IGNORECASE)
@@ -291,6 +298,38 @@ def _command_paths(command: str, *, windows: bool) -> list[tuple[str, str]]:
     return paths
 
 
+class _GoogleLane:
+    """One run reaches the user's Google or the open world, never both.
+
+    Mail and web pages are written by outsiders. A run that could read a message and
+    then use `curl` or WebFetch needs only one crafted message to send out what it read,
+    and a prompt line is no defence. So the first of the two to be used closes the other.
+    A run that carries on an earlier one may hold anything already, so it starts closed
+    to Google, and a run that touched Google leaves no session to carry on.
+    """
+
+    def __init__(self, resuming: bool) -> None:
+        self.open_world = resuming
+        self.google = False
+
+    def refuse(self, tool_name: str) -> str | None:
+        if tool_name == ALLOWED_TOOL:
+            if self.open_world:
+                return (
+                    "Google is closed in this task: it already ran commands or read the web, "
+                    "or carries on an earlier task. Tell the user to ask for it as a new task."
+                )
+            self.google = True
+        elif tool_name in _OPEN_WORLD_TOOLS:
+            if self.google:
+                return (
+                    f"{tool_name} is closed in this task: it has read the user's Google. "
+                    "Finish with what you have and tell the user what is left."
+                )
+            self.open_world = True
+        return None
+
+
 def check_tool_call(root: Path, tool_name: str, tool_input: dict[str, Any]) -> str | None:
     """Why this call is refused, or None when it may run."""
     for key in _PATH_KEYS:
@@ -317,6 +356,9 @@ def check_tool_call(root: Path, tool_name: str, tool_input: dict[str, Any]) -> s
         for match, candidate in _command_paths(command, windows=os.name == "nt"):
             if not _inside(root, candidate):
                 return f"{match} is outside the Jarvis folder."
+        for home in _HOME_PATH.finditer(command):
+            if not _inside(root, str(Path.home() / (home.group(1) or ""))):
+                return f"{home.group(0)} is outside the Jarvis folder."
     return None
 
 
@@ -386,15 +428,16 @@ async def _run_in(
             "El ejecutor local no está instalado (falta claude-agent-sdk).", 0.0, False
         )
 
+    lane = _GoogleLane(resuming=bool(resume))
+
     async def guard(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
         tool_input = input_data.get("tool_input")
+        tool_name = str(input_data.get("tool_name", ""))
         reason = check_tool_call(
-            root,
-            str(input_data.get("tool_name", "")),
-            tool_input if isinstance(tool_input, dict) else {},
-        )
+            root, tool_name, tool_input if isinstance(tool_input, dict) else {}
+        ) or lane.refuse(tool_name)
         if reason is None:
             return {}
         logger.info("Executor refused %s: %s", input_data.get("tool_name"), reason)
@@ -450,9 +493,7 @@ async def _run_in(
     if config.permissions == "full_no_push" and google_available(config.google_user_id):
         from claude_agent_sdk import create_sdk_mcp_server, tool
 
-        options.mcp_servers = {
-            SERVER_NAME: google_server(config.google_user_id, tool, create_sdk_mcp_server)
-        }
+        options.mcp_servers = {SERVER_NAME: google_server(tool, create_sdk_mcp_server)}
         options.allowed_tools = [*options.allowed_tools, ALLOWED_TOOL]
     if resume:
         options.resume = resume
@@ -481,7 +522,12 @@ async def _run_in(
                         texts.append(message.result)
     except Exception as e:
         logger.exception("Local executor failed")
-        return ExecutorResult(f"El ejecutor local falló: {e}", cost, False, session_id=session_id)
+        return ExecutorResult(
+            f"El ejecutor local falló: {e}",
+            cost,
+            False,
+            session_id="" if lane.google else session_id,
+        )
 
     final = texts[-1].strip() if texts else "El ejecutor terminó sin decir nada."
-    return ExecutorResult(final, cost, ok, session_id=session_id)
+    return ExecutorResult(final, cost, ok, session_id="" if lane.google else session_id)
