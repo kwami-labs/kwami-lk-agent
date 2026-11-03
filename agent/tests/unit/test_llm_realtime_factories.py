@@ -425,3 +425,16 @@ def test_gemini_live_honours_the_interruption_and_server_vad_choices() -> None:
         == types.StartSensitivity.START_SENSITIVITY_HIGH
     )
     assert config.activity_handling == types.ActivityHandling.NO_INTERRUPTION
+
+
+def test_a_saved_model_openai_withdrew_is_replaced(monkeypatch):
+    from src.factories import llm as llm_factory
+
+    built = {}
+    monkeypatch.setattr(
+        llm_factory, "_openai_llm", lambda _config, model, **_kw: built.setdefault("model", model)
+    )
+
+    llm_factory._build(object(), "openai", "gpt-5.1-chat-latest")
+
+    assert built["model"] == "gpt-4.1-mini"

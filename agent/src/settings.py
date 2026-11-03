@@ -89,6 +89,8 @@ ENV_VAR_NAMES: tuple[str, ...] = (
     "TAVILY_API_KEY",
     "SERPAPI_KEY",
     "KWAMI_BROWSER_PROVIDER",
+    "KWAMI_HEADLESS_CHROMIUM",
+    "KWAMI_HEADLESS_ALLOW_NO_SANDBOX",
     "BROWSER_USE_API_KEY",
     "BROWSERBASE_API_KEY",
     "BROWSERBASE_PROJECT_ID",
@@ -181,6 +183,10 @@ class Settings:
 
     # Cloud browsing
     browser_provider: str = DEFAULT_BROWSER_PROVIDER
+    #: Path to a Chromium the image ships, which makes it the last browser to try.
+    headless_chromium: str = ""
+    #: Run it even where the container forbids its sandbox: see docs/security.md.
+    headless_allow_no_sandbox: bool = False
     browser_use_api_key: str = ""
     browserbase_api_key: str = ""
     browserbase_project_id: str = ""
@@ -236,6 +242,8 @@ class Settings:
             browser_provider=_env_str("KWAMI_BROWSER_PROVIDER", DEFAULT_BROWSER_PROVIDER)
             .strip()
             .lower(),
+            headless_chromium=_env_str("KWAMI_HEADLESS_CHROMIUM"),
+            headless_allow_no_sandbox=_env_bool("KWAMI_HEADLESS_ALLOW_NO_SANDBOX"),
             browser_use_api_key=_env_str("BROWSER_USE_API_KEY"),
             browserbase_api_key=_env_str("BROWSERBASE_API_KEY"),
             browserbase_project_id=_env_str("BROWSERBASE_PROJECT_ID"),

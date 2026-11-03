@@ -30,6 +30,7 @@ from src.tools.builtin import AgentToolsMixin
 
 class FakeBrowserSession:
     runs_locally = False
+    is_builtin = False
 
     def __init__(self, active: bool = True) -> None:
         self.is_active = active
@@ -334,6 +335,21 @@ async def test_closing_reports_that_logins_were_saved() -> None:
 
     assert session.closed == 1
     assert "saved" in result.lower()
+
+
+async def test_the_builtin_browser_promises_no_saved_login_and_no_clicking() -> None:
+    tools, session = _tools()
+    session.is_active = False
+    session.is_builtin = True
+
+    opened = await tools.navigate_to(None, "https://example.com")
+
+    assert "cannot click" in str(opened)
+    assert "remembered" in str(opened)
+
+    closed = await tools.close_navigation(None)
+
+    assert closed == "Browser closed."
 
 
 async def test_a_failed_close_does_not_claim_the_browser_is_gone() -> None:

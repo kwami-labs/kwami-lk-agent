@@ -39,6 +39,7 @@ from .launched import (
     BUSY,
     CREDENTIALS,
     DOWN,
+    HEADLESS,
     LOCAL,
     MISSING,
     BrowserVendorError,
@@ -54,6 +55,7 @@ __all__ = [
     "BUSY",
     "CREDENTIALS",
     "DOWN",
+    "HEADLESS",
     "LOCAL",
     "MISSING",
     "BrowserProviderPort",
@@ -201,6 +203,14 @@ def _browser_use_provider(settings: Settings) -> Any:
     return BrowserUseProvider(api_key=settings.browser_use_api_key)
 
 
+def _headless_provider(settings: Settings) -> Any:
+    from .headless_chrome import HeadlessChromeProvider
+
+    return HeadlessChromeProvider(
+        settings.headless_chromium, allow_no_sandbox=settings.headless_allow_no_sandbox
+    )
+
+
 def _local_provider(settings: Settings) -> Any:
     from .local_chrome import LocalChromeProvider
 
@@ -217,6 +227,13 @@ _PROVIDERS: dict[str, tuple[str, Any]] = {
 
 def _cloud_candidates(vendors: list[str], settings: Settings) -> list[tuple[str, Any]]:
     return [(vendor, lambda v=vendor: _PROVIDERS[v][1](settings)) for vendor in vendors]
+
+
+def _with_builtin(candidates: list[tuple[str, Any]], settings: Settings) -> list[tuple[str, Any]]:
+    """The container's own Chromium, last: free, but it remembers no logins."""
+    if not settings.headless_chromium:
+        return candidates
+    return [*candidates, (HEADLESS, lambda: _headless_provider(settings))]
 
 
 def configured_vendors(settings: Settings | None = None) -> list[str]:
@@ -242,10 +259,13 @@ def create_browser_provider(settings: Settings | None = None) -> BrowserProvider
     if requested == LOCAL:
         # Cloud vendors stay behind it, for a machine with no Chrome to open.
         return FailoverBrowserProvider(
-            [
-                (LOCAL, lambda: _local_provider(settings)),
-                *_cloud_candidates(configured_vendors(settings), settings),
-            ]
+            _with_builtin(
+                [
+                    (LOCAL, lambda: _local_provider(settings)),
+                    *_cloud_candidates(configured_vendors(settings), settings),
+                ],
+                settings,
+            )
         )
 
     if requested not in _PROVIDERS:
@@ -257,6 +277,8 @@ def create_browser_provider(settings: Settings | None = None) -> BrowserProvider
         requested = BROWSERBASE
 
     available = configured_vendors(settings)
+    if not available and settings.headless_chromium:
+        return FailoverBrowserProvider(_with_builtin([], settings))
     if not available:
         raise ProviderUnavailableError(
             "No cloud browser is configured. Set BROWSERBASE_API_KEY "
@@ -276,5 +298,8 @@ def create_browser_provider(settings: Settings | None = None) -> BrowserProvider
     # The chosen vendor first, then the others: a credential says nothing about
     # the balance behind it.
     return FailoverBrowserProvider(
-        _cloud_candidates([chosen, *(v for v in available if v != chosen)], settings)
+        _with_builtin(
+            _cloud_candidates([chosen, *(v for v in available if v != chosen)], settings),
+            settings,
+        )
     )
