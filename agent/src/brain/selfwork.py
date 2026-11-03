@@ -71,9 +71,11 @@ TEST_SECONDS = 900.0
 #: How much of the test output goes in the pull request.
 TEST_TAIL_CHARS = 1500
 
-#: Never published, whatever the task said.
+#: Never published, whatever the task said. The workflows and the actions they call run
+#: with the repository's secrets as soon as the branch is pushed, before anyone reads it.
 _FORBIDDEN_FILE = re.compile(
-    r"(^|/)(\.env(\.|$)|\.git-crypt/|.*\.(pem|key|p12|pfx)$|credentials?(\.|$)|secrets?(\.|$))",
+    r"(^|/)(\.env(\.|$)|\.git-crypt/|.*\.(pem|key|p12|pfx)$|credentials?(\.|$)|secrets?(\.|$)"
+    r"|\.github/(workflows|actions)/)",
     re.IGNORECASE,
 )
 _SECRET_VALUE = re.compile(

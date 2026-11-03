@@ -211,7 +211,7 @@ async def test_touching_its_own_limits_is_flagged(tmp_path: Path, remote: Path, 
 @pytest.mark.parametrize(
     "name",
     [
-        ".github/workflows/ci.yml",
+        ".github/dependabot.yml",
         "migrations/022_x.sql",
         "agent/src/brain/worker.py",
         "agent/src/domain/charter.py",
@@ -220,6 +220,13 @@ async def test_touching_its_own_limits_is_flagged(tmp_path: Path, remote: Path, 
 )
 def test_sensitive_paths(name: str) -> None:
     assert sensitive_files([name]) == [name]
+
+
+@pytest.mark.parametrize(
+    "name", [".github/workflows/ci.yml", ".GitHub/Workflows/x.yaml", ".github/actions/a/action.yml"]
+)
+def test_what_runs_with_the_repos_secrets_is_never_published(name: str) -> None:
+    assert "prohibidos" in refusal([name], "+x = 1\n")
 
 
 def test_ordinary_paths_pass() -> None:
@@ -379,6 +386,18 @@ def _committing_run(calls: list[str], outcomes: list[ExecutorResult]) -> Any:
         return result
 
     return run
+
+
+async def test_changing_its_own_code_never_opens_google(worker_setup: Any) -> None:
+    seen: list[str] = []
+
+    async def run(api_key: str, model: str, task: str, config: Any, **kwargs: Any) -> Any:
+        seen.append(config.google_user_id)
+        return ExecutorResult("No he sabido hacerlo.", 0.0, False)
+
+    worker, _, job = worker_setup(run)
+    await worker.process(job, 0.0)
+    assert seen == [""]
 
 
 async def test_on_the_login_nothing_is_billed(worker_setup: Any, gh: list) -> None:

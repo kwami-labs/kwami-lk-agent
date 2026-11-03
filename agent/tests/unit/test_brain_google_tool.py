@@ -1,4 +1,4 @@
-"""The work thread's way into Google: the key stays here and refusals reach the model."""
+"""The work thread's way into Google: the token stays here and refusals reach the model."""
 
 from __future__ import annotations
 
@@ -10,48 +10,53 @@ from claude_agent_sdk import create_sdk_mcp_server, tool
 from src.brain import google_tool
 from src.brain.executor import check_tool_call
 
-URL = "http://api.test/internal/users/u1/google"
+URL = "http://api.test/google/work-thread"
 
 
 @pytest.fixture
 def settings(monkeypatch):
     class Settings:
         kwami_api_url = "http://api.test/"
-        kwami_api_key = "secret-key"
-        kwami_api_enabled = True
+        kwami_api_url_set = True
+        kwami_api_key = "master-key"
+        google_work_token = "work-token"  # noqa: S105
 
     monkeypatch.setattr(google_tool, "get_settings", lambda: Settings)
     return Settings
 
 
-def test_it_needs_a_user_and_an_api(settings):
+def test_it_needs_a_user_a_token_and_an_api(settings):
     assert google_tool.google_available("u1") is True
     assert google_tool.google_available("") is False
-    settings.kwami_api_enabled = False
+    settings.kwami_api_url_set = False
+    assert google_tool.google_available("u1") is False
+    settings.kwami_api_url_set = True
+    settings.google_work_token = ""
     assert google_tool.google_available("u1") is False
 
 
 @respx.mock
-async def test_a_call_carries_the_key_and_returns_the_result(settings):
+async def test_a_call_carries_the_token_not_the_master_key(settings):
     route = respx.post(URL).respond(json={"result": {"id": "f1", "name": "ñ"}})
-    text = await google_tool.call_google("u1", "drive_read", {"file_id": "f1"})
+    text = await google_tool.call_google("drive_read", {"file_id": "f1"})
     assert text == '{"id": "f1", "name": "ñ"}'
-    assert route.calls.last.request.headers["x-kwami-api-key"] == "secret-key"
+    assert route.calls.last.request.headers["x-kwami-work-token"] == "work-token"
+    assert "x-kwami-api-key" not in route.calls.last.request.headers
 
 
 @respx.mock
 async def test_a_refusal_reaches_the_model_as_text(settings):
     respx.post(URL).respond(400, json={"detail": "Not allowed from the work thread: gmail_send"})
-    text = await google_tool.call_google("u1", "gmail_send", {})
+    text = await google_tool.call_google("gmail_send", {})
     assert text == "Refused (400): Not allowed from the work thread: gmail_send"
     respx.post(URL).respond(500, text="boom")
-    assert await google_tool.call_google("u1", "x", {}) == "Refused (500): "
+    assert await google_tool.call_google("x", {}) == "Refused (500): "
 
 
 @respx.mock
 async def test_a_long_answer_is_cut(settings):
     respx.post(URL).respond(json={"result": "x" * 50_000})
-    text = await google_tool.call_google("u1", "drive_read", {})
+    text = await google_tool.call_google("drive_read", {})
     assert len(text) == google_tool.MAX_ANSWER_CHARS
 
 
@@ -69,7 +74,7 @@ def _handler(captured):
 @respx.mock
 async def test_the_tool_answers_even_when_the_api_is_down(settings):
     captured = []
-    google_tool.google_server("u1", _handler(captured), lambda **_kwargs: None)
+    google_tool.google_server(_handler(captured), lambda **_kwargs: None)
     respx.post(URL).mock(side_effect=httpx.ConnectError("down"))
     answer = await captured[0]({"action": "drive_read"})
     assert "could not be reached" in answer["content"][0]["text"]
@@ -79,7 +84,7 @@ async def test_the_tool_answers_even_when_the_api_is_down(settings):
 
 
 def test_it_builds_a_real_sdk_server():
-    server = google_tool.google_server("u1", tool, create_sdk_mcp_server)
+    server = google_tool.google_server(tool, create_sdk_mcp_server)
     assert server["name"] == google_tool.SERVER_NAME
 
 

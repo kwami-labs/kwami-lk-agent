@@ -305,6 +305,8 @@ class Worker:
         resume: str,
         left: float,
         on_progress: Callable[[str], None],
+        *,
+        google: bool = True,
     ) -> ExecutorResult:
         """Run on the PC's login, and on the API key only if the login cannot do it.
 
@@ -321,7 +323,7 @@ class Worker:
                 folder=str(folder),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=LOGIN_NOTIONAL_USD,
-                google_user_id=job.user_id,
+                google_user_id=job.user_id if google else "",
             ),
             resume=resume,
             effort=effort,
@@ -338,7 +340,7 @@ class Worker:
                 folder=str(folder),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
-                google_user_id=job.user_id,
+                google_user_id=job.user_id if google else "",
             ),
             effort=effort,
             on_progress=on_progress,
@@ -357,8 +359,9 @@ class Worker:
             task = SELF_TASK.format(
                 slug=workspace.repo.slug, branch=workspace.branch, task=job.task
             )
+            # Code that gets pushed is written with nothing read from anyone's mail.
             result = await self._on_login_first(
-                job, task, workspace.path, resume, left, on_progress
+                job, task, workspace.path, resume, left, on_progress, google=False
             )
             if not result.ok:
                 return result

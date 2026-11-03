@@ -1053,6 +1053,21 @@ async def test_runner_online_needs_an_owner_and_a_queue(tmp_path: Path, pc_bridg
     assert await _bridge(tmp_path).runner_online() is False
 
 
+async def test_a_phone_caller_never_reaches_the_owners_pc(pc_bridge) -> None:
+    """No app user in the room: the ledger still knows the owner, and that is not them."""
+    bridge, jobs = pc_bridge
+    bridge.user_id = ""
+    bridge.ledger.user_id = USER  # type: ignore[attr-defined]
+    assert bridge._owner() == USER
+
+    assert await bridge.runner_online() is False
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+
+    assert jobs.queued == []
+    assert task.job_id == ""
+
+
 async def test_the_ceiling_stops_everything_whatever_the_panel_says(tmp_path: Path) -> None:
     bridge = _bridge(tmp_path)
     bridge.config.budget_policy = "inform"

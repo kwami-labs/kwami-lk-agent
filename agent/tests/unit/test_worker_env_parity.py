@@ -51,6 +51,9 @@ ALLOWED_ABSENT = {
     "KWAMI_SELF_REPO_OWNER",
     # A path inside the image, set by the Dockerfile that installs the browser.
     "KWAMI_HEADLESS_CHROMIUM",
+    # One user's token for the work thread on their own PC: a container serves
+    # everyone, and the thread never runs there.
+    "KWAMI_GOOGLE_WORK_TOKEN",
 }
 
 

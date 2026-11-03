@@ -101,6 +101,7 @@ ENV_VAR_NAMES: tuple[str, ...] = (
     "KWAMI_EXECUTOR_MODE",
     "KWAMI_PROVIDER_KEYS_SECRET",
     "KWAMI_SELF_REPO_OWNER",
+    "KWAMI_GOOGLE_WORK_TOKEN",
     "KWAMI_AGENT_NAME",
     *PROVIDER_KEY_NAMES,
 )
@@ -205,6 +206,8 @@ class Settings:
     provider_keys_secret: str = ""
     #: Whose repositories Jarvis may open pull requests on. Empty: nobody's.
     self_repo_owner: str = ""
+    #: One user's way into Google from their PC's work thread. Issued by the API.
+    google_work_token: str = ""
     #: The dispatch name LiveKit routes calls by. A local worker for testing
     #: takes another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not
     #: compete with the deployed agent for real calls.
@@ -249,6 +252,7 @@ class Settings:
             executor_mode=_env_str("KWAMI_EXECUTOR_MODE", "auto").strip().lower(),
             provider_keys_secret=_env_str("KWAMI_PROVIDER_KEYS_SECRET"),
             self_repo_owner=_env_str("KWAMI_SELF_REPO_OWNER").strip(),
+            google_work_token=_env_str("KWAMI_GOOGLE_WORK_TOKEN").strip(),
             agent_name=_env_str("KWAMI_AGENT_NAME").strip() or DEFAULT_AGENT_NAME,
             provider_keys={
                 name: _env_str(name) for name in PROVIDER_KEY_NAMES if os.environ.get(name)
