@@ -206,7 +206,9 @@ def _browser_use_provider(settings: Settings) -> Any:
 def _headless_provider(settings: Settings) -> Any:
     from .headless_chrome import HeadlessChromeProvider
 
-    return HeadlessChromeProvider(settings.headless_chromium)
+    return HeadlessChromeProvider(
+        settings.headless_chromium, allow_no_sandbox=settings.headless_allow_no_sandbox
+    )
 
 
 def _local_provider(settings: Settings) -> Any:

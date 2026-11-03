@@ -108,4 +108,6 @@ def test_the_runtime_stage_ships_the_builtin_browser(path: Path) -> None:
     _, _, runtime = _read(path).partition("AS runtime")
 
     assert "chromium" in runtime
+    # Only a Recommends of chromium, and it does not start without a sandbox.
+    assert "chromium-sandbox" in runtime
     assert "ENV KWAMI_HEADLESS_CHROMIUM=/usr/bin/chromium" in runtime

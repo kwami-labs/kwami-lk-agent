@@ -17,6 +17,7 @@
     "KWAMI_API_URL": "https://api.kwami.io",
     "KWAMI_API_TIMEOUT": "30.0",
     "KWAMI_ALLOW_BROWSER_JS": "false",
+    "KWAMI_HEADLESS_ALLOW_NO_SANDBOX": "false",
     // browserbase (default) or browser_use. Must match what is
     // actually configured as a secret, or the agent falls back to the
     // other vendor and the user loses their saved logins.
@@ -80,6 +81,7 @@
         "KWAMI_API_URL": "https://api.kwami.io",
         "KWAMI_API_TIMEOUT": "30.0",
         "KWAMI_ALLOW_BROWSER_JS": "false",
+        "KWAMI_HEADLESS_ALLOW_NO_SANDBOX": "false",
     // browserbase (default) or browser_use. Must match what is
     // actually configured as a secret, or the agent falls back to the
     // other vendor and the user loses their saved logins.

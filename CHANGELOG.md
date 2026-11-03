@@ -22,7 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **A browser that needs no vendor.** The image ships Chromium, tried last when
   every vendor refuses. It remembers no logins and the panel shows screenshots of
-  it; the risk it adds is in `docs/security.md`.
+  it. It does not start without its sandbox, all its connections go through a proxy
+  that refuses what is not public, and at most 4 run at once. What it still risks is
+  in `docs/security.md`.
 
 ### Changed
 

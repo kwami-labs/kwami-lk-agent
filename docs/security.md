@@ -204,13 +204,24 @@ signature meant this guard never ran.
   residue covers DNS rebinding: the name is resolved once here and again by the
   browser, and nothing guarantees the two answers match. The exposure is a
   request from the vendor's network, not ours
-- **No separation between the built-in browser and the agent.** When no vendor
+- **Little separation between the built-in browser and the agent.** When no vendor
   can provide a browser, Chromium runs in the agent's own container
-  (`browser/headless_chrome.py`). Its environment holds no secrets and its profile
-  is deleted on release, but it runs as the same user, and without its sandbox
-  where the container forbids one (the log says so). A browser exploit on a page
-  could then reach the agent's credentials. Requests after a redirect, and a
-  page's own requests, come from our network rather than a vendor's
+  (`browser/headless_chrome.py`), as the same user. Its environment holds no secrets
+  and its profile is deleted on release. What stands between a page and the agent's
+  credentials is Chromium's sandbox, so without one it does not start: that is
+  `chromium-sandbox` in the image and a container that allows it. Docker's default
+  seccomp profile forbids it. `KWAMI_HEADLESS_ALLOW_NO_SANDBOX=1` runs it anyway, and
+  then a renderer exploit can read `/proc/<agent>/environ` and every provider key
+- **The built-in browser's network.** Its requests come from our network rather than
+  a vendor's, so all of them, redirects, subresources, workers and WebSockets
+  included, go through `browser/egress_proxy.py`. That proxy resolves the name itself,
+  refuses anything that is not public, and connects to the address it checked, which
+  also closes DNS rebinding for this browser. WebRTC's UDP is turned off for the same
+  reason. Public addresses stay reachable: this limits what the browser can touch,
+  not what a public page can ask of it
+- **Frames go to the whole room.** The built-in browser's screenshots are sent without
+  `destination_identities`, which is only right while a room is one person and the
+  agent
 
 ## Checklist for future changes
 

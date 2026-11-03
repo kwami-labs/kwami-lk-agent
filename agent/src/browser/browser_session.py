@@ -28,7 +28,7 @@ from .providers import (
     LaunchedBrowser,
     create_browser_provider,
 )
-from .safety import UnsafeURLError, validate_url
+from .safety import UnsafeURLError, validate_url, validate_url_async
 
 logger = get_logger("browser.session")
 
@@ -37,6 +37,8 @@ IDLE_TIMEOUT_SECONDS = 5 * 60  # 5 minutes
 
 #: Where the browser is sent when a page redirects somewhere refused.
 BLANK_PAGE = "about:blank"
+#: Chromium's own page for a request that failed, the proxy's refusals included.
+ERROR_PAGE_SCHEME = "chrome-error:"
 
 #: How the built-in browser, which has no live view, shows itself in the panel.
 FRAME_TOPIC = "browser_frame"
@@ -160,6 +162,13 @@ class CloudBrowserSession:
                 await self.navigate(url)
             return self._live_url or ""
 
+        # Its connection dropped, but the browser is still there holding what the user
+        # signed in to, and the next line would lose the only handle to it.
+        if self._browser_id:
+            self._cancel_idle_timer()
+            self._stop_frames()
+            await self._release_unusable_browser()
+
         if self._provider is None:
             try:
                 self._provider = create_browser_provider()
@@ -218,6 +227,9 @@ class CloudBrowserSession:
         # Start idle timer
         self._started_at = time.monotonic()
         self._reset_idle_timer()
+        # Before the frames: nothing of a page goes out until it has been checked.
+        if url:
+            await self._verify_landing_url()
         if self.is_builtin:
             self._frame_task = asyncio.create_task(self._stream_frames())
 
@@ -577,12 +589,34 @@ class CloudBrowserSession:
         if task is not None:
             task.cancel()
 
+    async def _page_may_be_shown(self) -> bool:
+        """Whether the page is one we would have opened, leaving it when it is not.
+
+        A click, a meta refresh or the page's own script can move it at any time. No
+        DNS here, once per frame: the proxy has already checked what the name resolved
+        to, and this catches what never went through it.
+        """
+        href = await self._connection.evaluate("location.href")
+        if not isinstance(href, str) or not href:
+            return False
+        if href == BLANK_PAGE or href.startswith(ERROR_PAGE_SCHEME):
+            return True
+        try:
+            await validate_url_async(href, resolve_dns=False)
+        except UnsafeURLError as e:
+            logger.warning("Not showing a refused page: %s", e)
+            await self._leave_unsafe_page()
+            return False
+        return True
+
     async def _stream_frames(self) -> None:
         """Keep the panel showing the page, sending a frame only when it changed."""
         last = ""
         while self.is_active:
             try:
-                frame = await self._connection.screenshot(quality=FRAME_QUALITY)
+                frame = ""
+                if await self._page_may_be_shown():
+                    frame = await self._connection.screenshot(quality=FRAME_QUALITY)
                 if frame and frame != last:
                     await self._publish_frame(base64.b64decode(frame))
                     last = frame
@@ -675,7 +709,8 @@ class CloudBrowserSession:
         """Auto-close the browser after idle timeout."""
         try:
             await asyncio.sleep(IDLE_TIMEOUT_SECONDS)
-            if self.is_active:
+            # Not `is_active`: a dropped connection leaves the browser running.
+            if self._browser_id:
                 logger.info("Cloud browser idle timeout reached, closing")
                 await self.close()
         except asyncio.CancelledError:
