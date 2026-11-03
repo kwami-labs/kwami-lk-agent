@@ -214,7 +214,7 @@ class StrictLLMPlugin:
         self.calls: list[dict] = []
 
     def LLM(self, *, model: str, **kwargs: float):  # noqa: N802
-        assert set(kwargs) <= {"temperature", "_strict_tool_schema"}, kwargs
+        assert set(kwargs) <= {"temperature", "_strict_tool_schema", "caching"}, kwargs
         self.calls.append({"model": model, **kwargs})
         return f"llm:{model}"
 
@@ -224,7 +224,7 @@ class StrictLLMPlugin:
     [
         ("google", "gemini-2.0-flash", {"temperature": 0.25}),
         # Claude 5 answers 400 to any temperature, so none is sent.
-        ("anthropic", "claude-haiku-5-5", {"_strict_tool_schema": False}),
+        ("anthropic", "claude-haiku-5-5", {"_strict_tool_schema": False, "caching": "ephemeral"}),
         ("groq", "openai/gpt-oss-120b", {"temperature": 0.25}),
     ],
 )

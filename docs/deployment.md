@@ -59,6 +59,8 @@ Configure the same variables as `.env.sample` in the Cloud agent secrets UI
 
 - `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` (usually injected)
 - `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, plus any other providers you advertise
+- `KWAMI_PROVIDER_KEYS_SECRET`, the same Fernet key as the API's
+  `PROVIDER_KEYS_SECRET`, to use the model keys users connect from the app
 - `KWAMI_API_URL` — **not** `localhost`. Use the public API origin.
 - `KWAMI_API_KEY` — must match the API
 - Optional: `ZEP_API_KEY`, `TAVILY_API_KEY`, `SERPAPI_KEY`, `BROWSER_USE_API_KEY`

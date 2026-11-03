@@ -25,19 +25,48 @@ from datetime import UTC, datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from ..adapters.supabase import as_user_id, direct_supabase
+from ..adapters.supabase import as_user_id, direct_supabase, get_supabase
+from ..domain.pipelines import TEXT_REALTIME_PREFIXES
 from ..factories.availability import voice_provider_keys
 from ..settings import Settings, get_settings
 from ..utils.logging import get_logger
-from .config import BrainConfig, BrainModel, default_brain, executor_in_cloud
+from .config import (
+    HARD_MONTHLY_CAP_USD,
+    BrainConfig,
+    BrainModel,
+    budget_notice,
+    default_brain,
+    executor_in_cloud,
+)
 from .executor import CloudWorkspace, run_executor
+from .jobs import BrainJob, JobStore
 from .ledger import Ledger, PendingResult, create_ledger
-from .planner import PlanStep, final_step, plan_task, waves
-from .providers import BrainAnswer, BrainRequest, run_anthropic, run_gemini, run_openai
+from .planner import (
+    PLAN_FORMAT,
+    PLANNER_SYSTEM,
+    Plan,
+    PlanStep,
+    final_step,
+    plan_from_text,
+    plan_task,
+    waves,
+)
+from .providers import (
+    COMPATIBLE_URLS,
+    BrainAnswer,
+    BrainRequest,
+    run_anthropic,
+    run_compatible,
+    run_gemini,
+    run_openai,
+    run_xai,
+)
 from .router import (
+    ACCOUNT_MARK,
     PROVIDER_KEYS,
     can_delegate,
     council_members,
+    director_of,
     find_model,
     pick,
     provider_available,
@@ -45,6 +74,8 @@ from .router import (
     tavily_writer,
     usable,
 )
+from .selfwork import REPOS
+from .user_keys import VOICE_PROVIDER_KEYS, load_user_keys
 
 logger = get_logger("brain.bridge")
 
@@ -54,14 +85,45 @@ QUOTA_REST_SECONDS = 15 * 60
 
 #: How long a finished result waits for the user to stop talking.
 PAUSE_WAIT_SECONDS = 120.0
+#: A moment of quiet, on top of knowing no turn is open (`_user_mid_turn`).
+PAUSE_QUIET_SECONDS = 0.4
 #: Results longer than this are summarised in speech; the full text stays in
 #: `check_tasks` and in the app.
 SPOKEN_RESULT_CHARS = 3500
 MAX_TASKS_KEPT = 30
 #: How long the greeting waits for the ledger to load from Supabase.
 LEDGER_READY_SECONDS = 1.5
+#: How long the first pipeline waits for the user's keys before it is built without them.
+VOICE_KEYS_READY_SECONDS = 2.0
 #: How long the end of a call waits for ledger writes to land.
 LEDGER_FLUSH_SECONDS = 4.0
+#: How often a call looks at a job on the PC, and how many looks between renewals
+#: of its interest in the result.
+JOB_POLL_SECONDS = 5.0
+JOB_RENEW_EVERY = 3
+#: How long what the PC last said about itself stands.
+ACCOUNT_FRESH_SECONDS = 30.0
+#: A thought waits this long for a free slot on the PC before going elsewhere.
+THINK_QUEUE_PATIENCE_SECONDS = 25.0
+THINK_TIMEOUT_SECONDS = 600.0
+THINK_POLL_SECONDS = 1.5
+#: The first seconds of a thought, when the answer to something simple arrives.
+THINK_POLL_FAST_SECONDS = 0.4
+THINK_POLL_FAST_FOR_SECONDS = 30.0
+#: What a task carries of the call. Enough to resolve "eso", not a transcript to pay for.
+CONTEXT_TURNS = 8
+CONTEXT_TURN_CHARS = 240
+CONTEXT_MEMORY_CHARS = 1200
+#: A quick answer is spoken as the worker wrote it. Measured 2026-11-02, the voice model
+#: took 2 to 3 s more to say it again in its own words, and could only make it worse.
+QUICK_ANSWER_SECONDS = 25.0
+QUICK_ANSWER_CHARS = 600
+#: With no "I'm on it" first, how long a simple answer may take before something is said.
+STILL_WORKING_SECONDS = 6.0
+#: How often, while the PC thinks, to check that the PC is still there.
+THINK_PC_CHECK_SECONDS = 30.0
+#: How long a job may sit queued before asking whether the PC is still there.
+JOB_QUEUE_PATIENCE_SECONDS = 30.0
 
 WORKER_SYSTEM = """You are part of the brain of {name}, a voice assistant. The voice model
 delegated this task to you and will read your answer aloud to the user.
@@ -106,9 +168,22 @@ class BrainTask:
     sources: list[str] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     finished_at: str = ""
+    seconds: float = 0.0
     delivered: bool = False
+    #: The answer came from the Claude account on the user's PC, not an API key.
+    via_account: bool = False
     #: When the planner split the task: what each part was and who did it.
     steps: list[dict[str, Any]] = field(default_factory=list)
+    #: Work that should outlive the call: it goes to the PC whenever the PC is there.
+    long_running: bool = False
+    #: A task id from this call, or "last": carry on that thread.
+    follow_up: str = ""
+    #: Changing Jarvis's own code, in this repository (`selfwork.REPOS`).
+    repo: str = ""
+    #: Set once the work is on the PC.
+    job_id: str = ""
+    thread_id: str = ""
+    progress: str = ""
     handle: asyncio.Task | None = field(default=None, repr=False)
 
     def public(self, full: bool = False) -> dict[str, Any]:
@@ -121,7 +196,10 @@ class BrainTask:
             "council": self.council,
             "models": self.models,
             "costUsd": round(self.cost_usd, 4),
+            "viaAccount": self.via_account,
             "steps": self.steps,
+            "onPc": bool(self.job_id),
+            "progress": self.progress,
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
         }
@@ -142,11 +220,27 @@ class Bridge:
     ):
         settings = settings or get_settings()
         self._keys = dict(keys)
+        #: What the deployment itself holds, apart from any user's keys.
+        self._deployment_keys = dict(keys)
         self._tavily_key = tavily_key
         self.ledger = ledger if ledger is not None else create_ledger(settings)
         #: The user's Supabase when the agent writes it directly. Where the
         #: cloud executor uploads its files.
         self._store = direct_supabase(settings)
+        #: The queue to the PC. It needs no API in between, so any configured
+        #: Supabase will do, not only when the agent writes it directly.
+        jobs_store = get_supabase(settings)
+        self.jobs: JobStore | None = JobStore(jobs_store) if jobs_store is not None else None
+        self._keys_store = jobs_store
+        self._keys_secret = settings.provider_keys_secret
+        #: The user's own keys for the voice pipeline, by environment name.
+        self.voice_keys: dict[str, str] = {}
+        #: Whose keys this call holds. The first person only: the usage is billed to
+        #: them, so nobody who joins later may bring their keys in, or spend theirs.
+        self._keys_owner = ""
+        self._voice_keys_loaded = asyncio.Event()
+        self.pc_online = False
+        self._account_checked_at: float | None = None
         self._executor_in_cloud = executor_in_cloud(settings.executor_mode)
         self.config: BrainConfig = default_brain()
         self.session: Any = None
@@ -208,6 +302,7 @@ class Bridge:
             return
         self.user_id = resolved
         self._schedule(self.ledger.bind(self.kwami_id, resolved))
+        self._schedule(self._on_user_known())
 
     async def ready(self, kwami_id: str, timeout: float = LEDGER_READY_SECONDS) -> None:
         """Wait, briefly, for the ledger to load this kwami. Never raises."""
@@ -219,6 +314,60 @@ class Bridge:
             logger.warning("Brain ledger not loaded after %.1fs; greeting without it", timeout)
         except Exception:
             logger.exception("Brain ledger failed to load")
+
+    @property
+    def voice_key_providers(self) -> frozenset[str]:
+        """The providers the voice pipeline runs on with the user's own key."""
+        return frozenset(p for p, k in VOICE_PROVIDER_KEYS.items() if self.voice_keys.get(k))
+
+    async def keys_ready(self, timeout: float = VOICE_KEYS_READY_SECONDS) -> None:
+        """Wait, briefly, so the first pipeline is built with the user's keys. Never raises."""
+        if self._keys_store is None:
+            return
+        try:
+            await asyncio.wait_for(self._voice_keys_loaded.wait(), timeout)
+        except TimeoutError:
+            logger.warning("The user's keys not loaded after %.1fs; building without", timeout)
+
+    async def _on_user_known(self) -> None:
+        """Bring in what depends on who this is: their keys, and their PC."""
+        if self._keys_store is not None and self._keys_owner in ("", self.user_id):
+            self._keys_owner = self.user_id
+            try:
+                self._keys.update(
+                    await load_user_keys(self._keys_store, self.user_id, self._keys_secret)
+                )
+                self.voice_keys = await load_user_keys(
+                    self._keys_store, self.user_id, self._keys_secret, VOICE_PROVIDER_KEYS
+                )
+            finally:
+                self._voice_keys_loaded.set()
+        await self._refresh_account(force=True)
+        await self.publish_status()
+        await self._regate_voice()
+
+    async def _refresh_account(self, force: bool = False) -> None:
+        """Whether the Claude account of this user's PC can take work right now.
+
+        Only for the room's own user, not the kwami's owner: on a phone line anyone
+        can talk, and they must not spend the owner's plan.
+        """
+        if self.jobs is None or not self.user_id:
+            return
+        loop = asyncio.get_running_loop()
+        now = loop.time()
+        fresh = (
+            self._account_checked_at is not None
+            and now - self._account_checked_at < ACCOUNT_FRESH_SECONDS
+        )
+        if fresh and not force:
+            return
+        self._account_checked_at = now
+        self.pc_online = await self.jobs.runner_online(self.user_id)
+        if self.pc_online and await self.jobs.account_ready(self.user_id):
+            self._keys[ACCOUNT_MARK] = "1"
+        else:
+            self._keys.pop(ACCOUNT_MARK, None)
 
     def _owner(self) -> str:
         return self.user_id or getattr(self.ledger, "user_id", None) or ""
@@ -264,7 +413,7 @@ class Bridge:
         read before the per-stage maps existed; they stay until no build reads
         them.
         """
-        stages = voice_provider_keys(self._keys)
+        stages = voice_provider_keys({**self._deployment_keys, **self.voice_keys})
         return {**stages["realtime"], **stages}
 
     def status(self) -> dict[str, Any]:
@@ -273,7 +422,17 @@ class Bridge:
             "type": "brain_status",
             "enabled": self.config.enabled,
             "providers": self.providers(),
+            # Whether each provider has an API key, apart from the Claude account.
+            "apiKeys": {p: bool(self._keys.get(k)) for p, k in PROVIDER_KEYS.items()},
+            "account": {
+                "pcOnline": self.pc_online,
+                "loggedIn": bool(self._keys.get(ACCOUNT_MARK)),
+            },
+            "director": getattr(director_of(self.config, self._keys), "id", ""),
             "voiceProviders": self.voice_providers(),
+            # Realtime models (by name prefix) that can answer in text for a
+            # TTS to speak: what the panel allows on "Live + TTS".
+            "hybridRealtime": {p: list(v) for p, v in TEXT_REALTIME_PREFIXES.items()},
             "tavily": bool(self._tavily_key),
             "usableModels": [m.id for m in usable(self.config, self._keys)],
             "spend": {**spend, "budgetUsd": self.config.monthly_budget_usd},
@@ -284,6 +443,7 @@ class Bridge:
         if self.publisher is None:
             return
         try:
+            await self._refresh_account()
             await self.publisher.publish(self.status())
         except Exception:
             logger.debug("Could not publish brain status", exc_info=True)
@@ -311,14 +471,29 @@ class Bridge:
         council: bool = False,
         model: str = "",
         context: str = "",
+        long_running: bool = False,
+        follow_up: str = "",
+        repo: str = "",
     ) -> BrainTask | str:
         """Queue a task. Returns it, or a sentence saying why it cannot run."""
+        if repo:
+            if repo not in REPOS:
+                return f"The repository must be one of: {', '.join(REPOS)}."
+            # The room's identity, not the kwami's owner: on a phone line anyone can talk.
+            if not self.user_id:
+                return "Changing my own code can only be ordered from the app, not by phone."
+            kind, important, council = "code", False, False
         if not self.config.enabled:
             return "The brain is switched off in the Models panel."
         if not usable(self.config, self._keys):
-            return "No brain model is usable: none is enabled with its API key present."
+            return "No brain model is usable: none is enabled with its API key or account present."
 
         spend = self.ledger.month_spend()["usd"]
+        if spend >= HARD_MONTHLY_CAP_USD:
+            return (
+                f"This month's ceiling of {HARD_MONTHLY_CAP_USD:.0f} $ is reached. "
+                "No more tasks until next month."
+            )
         over_budget = self.config.monthly_budget_usd > 0 and spend >= self.config.monthly_budget_usd
         if over_budget and self.config.budget_policy == "stop":
             return f"The monthly brain budget ({self.config.monthly_budget_usd:.0f} $) is spent."
@@ -331,15 +506,23 @@ class Bridge:
         if not convene and pick(self.config, self._keys, kind, difficulty, model) is None:
             if kind == "code":
                 return "The local executor is not enabled or has no Anthropic key."
+            if kind == "x_search":
+                return (
+                    "Nothing can read X: no enabled model has that job. "
+                    "It needs Grok, connected in the Models panel."
+                )
             return "No usable model fits this task."
 
         brain_task = BrainTask(
             id=f"t{next(self._ids)}",
             title=(title or task)[:120],
-            task=task if not context else f"{task}\n\nContext from the conversation:\n{context}",
+            task=self._with_conversation(task, context),
             kind=kind,
             difficulty=difficulty,
             council=convene,
+            long_running=long_running,
+            follow_up=follow_up,
+            repo=repo,
         )
         self.tasks[brain_task.id] = brain_task
         while len(self.tasks) > MAX_TASKS_KEPT:
@@ -350,13 +533,58 @@ class Bridge:
         brain_task.handle = asyncio.create_task(
             self._run(brain_task, model), name=f"brain_{brain_task.id}"
         )
+        if self.config.relay == "everything" and difficulty == "simple" and self.session:
+            self._schedule(self._say_still_working(brain_task))
         self._schedule(self.publish_status())
         return brain_task
+
+    def _with_conversation(self, task: str, context: str) -> str:
+        """The task, with what the worker cannot otherwise know.
+
+        A worker starts from nothing, and the voice model mentions only what it thinks
+        of: "that company" or "como te dije" reached it with nothing to resolve them.
+        """
+        parts = [task]
+        if context:
+            parts.append(f"Context from the conversation:\n{context}")
+        recent = self._recent_conversation()
+        if recent:
+            parts.append(f"The conversation so far, oldest first:\n{recent}")
+        remembered = self._remembered()
+        if remembered:
+            parts.append(f"What is remembered about the user:\n{remembered}")
+        return "\n\n".join(parts)
+
+    def _voice(self) -> Any:
+        """The agent of the call, or None: a scheduled task has no call, a new one no agent."""
+        try:
+            return self.session.current_agent
+        except (AttributeError, RuntimeError):
+            return None
+
+    def _user_mid_turn(self) -> bool:
+        return getattr(self._voice(), "turn_open", False) is True
+
+    def _recent_conversation(self) -> str:
+        history = getattr(self._voice(), "_chat_ctx", None)
+        lines = []
+        for item in getattr(history, "items", []):
+            role = getattr(item, "role", None)
+            said = getattr(item, "text_content", None)
+            if role in ("user", "assistant") and said:
+                lines.append(f"{role}: {said[:CONTEXT_TURN_CHARS]}")
+        return "\n".join(lines[-CONTEXT_TURNS:])
+
+    def _remembered(self) -> str:
+        text = getattr(self._voice(), "_memory_text", "")
+        return text[:CONTEXT_MEMORY_CHARS] if isinstance(text, str) else ""
 
     def cancel(self, task_id: str) -> bool:
         brain_task = self.tasks.get(task_id)
         if brain_task is None or brain_task.status != "running" or brain_task.handle is None:
             return False
+        if brain_task.job_id and self.jobs is not None:
+            self._schedule(self.jobs.request_cancel(brain_task.job_id))
         brain_task.handle.cancel()
         return True
 
@@ -391,26 +619,143 @@ class Bridge:
             tavily_key=tavily,
         )
 
-    async def _ask(self, model: BrainModel, request: BrainRequest) -> BrainAnswer:
-        if model.provider == "anthropic":
-            answer = await run_anthropic(
-                self._keys["ANTHROPIC_API_KEY"], model.id, model.model, request
+    def _brief(self, model: BrainModel) -> str:
+        """What the user told the brain, and this model, to always keep in mind."""
+        parts = []
+        if self.config.instructions:
+            parts.append(
+                f"The user's instructions for the whole brain:\n{self.config.instructions}"
             )
+        if model.instructions:
+            parts.append(f"The user's instructions for you:\n{model.instructions}")
+        return "\n\n".join(parts)
+
+    def _on_account(self, model: BrainModel) -> bool:
+        return (
+            model.provider == "anthropic"
+            and model.access != "api"
+            and bool(self._keys.get(ACCOUNT_MARK))
+        )
+
+    async def _think_on_account(
+        self, model: BrainModel, request: BrainRequest
+    ) -> BrainAnswer | None:
+        """Ask the PC, on the user's Claude account. None when it did not get to it."""
+        if self.jobs is None or as_user_id(self.kwami_id) is None:
+            return None
+        job = BrainJob(
+            user_id=self.user_id,
+            kwami_id=self.kwami_id,
+            title=request.task[:120],
+            task=f"{request.system}\n\n---\n\n{request.task}",
+            difficulty=request.difficulty,
+            model=model.model,
+            mode="research" if request.native_search else "think",
+        )
+        if not await self.jobs.enqueue(job):
+            return None
+        loop = asyncio.get_running_loop()
+        started = checked = loop.time()
+        try:
+            while loop.time() - started < THINK_TIMEOUT_SECONDS:
+                await asyncio.sleep(
+                    THINK_POLL_FAST_SECONDS
+                    if loop.time() - started < THINK_POLL_FAST_FOR_SECONDS
+                    else THINK_POLL_SECONDS
+                )
+                if loop.time() - checked >= THINK_PC_CHECK_SECONDS:
+                    checked = loop.time()
+                    if not await self.jobs.runner_online(self.user_id):
+                        logger.info("The PC went away during a thought on %s", model.id)
+                        break
+                current = await self.jobs.get(job.id)
+                if current is None:
+                    continue
+                if current.finished:
+                    await self.jobs.mark_delivered(job.id)
+                    return BrainAnswer(
+                        current.result,
+                        model.id,
+                        model.model,
+                        ok=current.status == "done",
+                        via_account=True,
+                    )
+                if (
+                    current.status == "queued"
+                    and loop.time() - started >= THINK_QUEUE_PATIENCE_SECONDS
+                ):
+                    break
+        except asyncio.CancelledError:
+            self._schedule(self.jobs.request_cancel(job.id))
+            raise
+        logger.info("No answer from the PC on %s in time", model.id)
+        await self.jobs.request_cancel(job.id)
+        return None
+
+    async def _ask(self, model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        brief = self._brief(model)
+        if brief:
+            request = replace(request, system=f"{request.system}\n\n{brief}")
+        api_key = self._keys.get(PROVIDER_KEYS[model.provider], "")
+        if self._on_account(model):
+            answer = await self._think_on_account(model, request)
+            if answer is not None and (answer.ok or model.access == "account" or not api_key):
+                return answer
+            if answer is not None:
+                logger.info("The account could not answer on %s; using the API key", model.id)
+        if model.provider in ("anthropic", "local") and (not api_key or model.access == "account"):
+            # Chosen as "account only", or the PC went away since it was picked.
+            return BrainAnswer(
+                "La cuenta de Claude de tu ordenador no está disponible ahora.",
+                model.id,
+                model.model,
+                ok=False,
+            )
+        if model.provider == "anthropic":
+            answer = await run_anthropic(api_key, model.id, model.model, request)
         elif model.provider == "google":
-            answer = await run_gemini(self._keys["GOOGLE_API_KEY"], model.id, model.model, request)
+            answer = await run_gemini(api_key, model.id, model.model, request)
         elif model.provider == "openai":
-            answer = await run_openai(self._keys["OPENAI_API_KEY"], model.id, model.model, request)
+            answer = await run_openai(api_key, model.id, model.model, request)
+        elif model.provider == "xai":
+            answer = await run_xai(api_key, model.id, model.model, request)
+        elif model.provider in COMPATIBLE_URLS:
+            answer = await run_compatible(model.provider, api_key, model.id, model.model, request)
         else:
             result = await run_executor(
-                self._keys["ANTHROPIC_API_KEY"],
+                api_key,
                 model.model,
-                request.task,
+                f"{request.task}\n\n{brief}" if brief else request.task,
                 self.config.executor,
                 cloud=self._cloud_workspace(),
             )
             answer = BrainAnswer(result.text, model.id, model.model, result.cost_usd, ok=result.ok)
         self.ledger.add_spend(model.id, answer.cost_usd)
         return answer
+
+    async def _plan(self, director: BrainModel, task: str) -> Plan | None:
+        """Ask the director how to split the work. None when it could not say."""
+        api_key = self._keys.get("ANTHROPIC_API_KEY", "")
+        if director.provider == "anthropic" and api_key and not self._on_account(director):
+            plan = await plan_task(api_key, director.model, task)
+            if plan is not None:
+                self.ledger.add_spend(director.id, plan.cost_usd)
+            return plan
+        # The account, or a director that is not Claude: a plain answer in JSON.
+        answer = await self._ask(
+            director,
+            BrainRequest(
+                task=task,
+                system=PLANNER_SYSTEM + PLAN_FORMAT,
+                difficulty="simple",
+                native_search=False,
+            ),
+        )
+        if not answer.ok:
+            return None
+        plan = plan_from_text(answer.text)
+        plan.cost_usd = answer.cost_usd
+        return plan
 
     def _note_model(self, brain_task: BrainTask, label: str) -> None:
         if label not in brain_task.models:
@@ -524,8 +869,88 @@ class Bridge:
         logger.info("Gemini search failed; answered through Tavily by %s", writer.id)
         return answer, writer
 
+    async def runner_online(self) -> bool:
+        owner = self._owner()
+        return bool(self.jobs and owner and await self.jobs.runner_online(owner))
+
+    async def _on_the_pc(self, brain_task: BrainTask, prefer: str) -> BrainAnswer | None:
+        """Send the work to the PC. None when it is not there: the caller runs it here."""
+        owner = self._owner()
+        if self.jobs is None or not owner or as_user_id(self.kwami_id) is None:
+            return None
+        if not await self.jobs.runner_online(owner):
+            return None
+        model = pick(self.config, self._keys, "code", brain_task.difficulty, prefer)
+        if model is None:
+            return None
+        earlier = self.tasks.get(brain_task.follow_up)
+        thread_id = earlier.thread_id if earlier is not None else ""
+        if not thread_id and brain_task.follow_up == "last":
+            thread_id = await self.jobs.last_thread(self.kwami_id)
+        brief = self._brief(model)
+        job = BrainJob(
+            user_id=owner,
+            kwami_id=self.kwami_id,
+            title=brain_task.title,
+            task=f"{brain_task.task}\n\n{brief}" if brief else brain_task.task,
+            thread_id=thread_id,
+            difficulty=brain_task.difficulty,
+            model=model.model,
+            repo=brain_task.repo,
+        )
+        if not await self.jobs.enqueue(job):
+            return None
+        brain_task.job_id, brain_task.thread_id = job.id, job.thread_id
+        self._note_model(brain_task, model.label or model.model)
+        self._schedule(self.publish_status())
+        return await self._watch_job(self.jobs, brain_task, job.id, model)
+
+    async def _watch_job(
+        self, jobs: JobStore, brain_task: BrainTask, job_id: str, model: BrainModel
+    ) -> BrainAnswer | None:
+        """Wait for the PC. None when it vanished before starting: the job is withdrawn."""
+        loop = asyncio.get_running_loop()
+        queued_since = loop.time()
+        polls = 0
+        while True:
+            await asyncio.sleep(JOB_POLL_SECONDS)
+            polls += 1
+            if polls % JOB_RENEW_EVERY == 0:
+                await jobs.renew_watch(job_id)
+            job = await jobs.get(job_id)
+            if job is None:  # a blip: the row is still there
+                continue
+            brain_task.progress = job.progress
+            if job.finished:
+                await jobs.mark_delivered(job_id)
+                self.ledger.note_spend(model.id, job.cost_usd)
+                brain_task.cost_usd += job.cost_usd
+                return BrainAnswer(
+                    job.result,
+                    model.id,
+                    model.model,
+                    job.cost_usd,
+                    ok=job.status == "done",
+                    via_account=job.cost_usd == 0,
+                )
+            if (
+                job.status == "queued"
+                and loop.time() - queued_since >= JOB_QUEUE_PATIENCE_SECONDS
+                and not await jobs.runner_online(job.user_id)
+            ):
+                await jobs.request_cancel(job_id)
+                job = await jobs.get(job_id)
+                if job is not None and job.status == "cancelled":
+                    logger.info("The PC went away; running %s here", brain_task.id)
+                    brain_task.job_id = ""
+                    return None
+                queued_since = loop.time()
+
     async def _single(self, brain_task: BrainTask, prefer: str) -> BrainAnswer:
         request = self._request(brain_task.task, brain_task.difficulty)
+        if brain_task.kind == "x_search":
+            # Whatever the search setting says: Tavily cannot read X.
+            request.native_search, request.tavily_key = True, ""
         answer, _ = await self._ask_role(
             brain_task, brain_task.kind, brain_task.difficulty, request, prefer
         )
@@ -536,18 +961,17 @@ class Bridge:
         if (
             prefer
             or not self.config.split
-            or brain_task.kind == "code"
+            or brain_task.kind in ("code", "x_search")
             or brain_task.difficulty == "simple"
         ):
             return await self._single(brain_task, prefer)
-        planner = pick(self.config, self._keys, "analysis", "normal")
-        if planner is None or planner.provider != "anthropic":
+        director = director_of(self.config, self._keys)
+        if director is None:
             return await self._single(brain_task, prefer)
 
-        plan = await plan_task(self._keys["ANTHROPIC_API_KEY"], planner.model, brain_task.task)
+        plan = await self._plan(director, brain_task.task)
         if plan is not None:
             brain_task.cost_usd += plan.cost_usd
-            self.ledger.add_spend(planner.id, plan.cost_usd)
         if plan is None or not plan.steps:
             return await self._single(brain_task, prefer)
 
@@ -668,15 +1092,39 @@ class Bridge:
         return synthesis
 
     async def _run(self, brain_task: BrainTask, prefer: str) -> None:
+        spent_before = self.ledger.month_spend()["usd"]
+        started = asyncio.get_running_loop().time()
         try:
-            answer = await (
-                self._council(brain_task)
-                if brain_task.council
-                else self._staged(brain_task, prefer)
-            )
+            answer: BrainAnswer | None = None
+            if (
+                not brain_task.council
+                and brain_task.kind != "x_search"
+                and (brain_task.kind == "code" or brain_task.long_running)
+            ):
+                answer = await self._on_the_pc(brain_task, prefer)
+            if answer is None and brain_task.repo:
+                # Only the PC can publish: the cloud must not hold GitHub credentials.
+                answer = BrainAnswer(
+                    "Cambiar mi propio código necesita el ordenador encendido con el proceso "
+                    "del hilo de trabajo, y ahora no está.",
+                    "",
+                    "",
+                    ok=False,
+                )
+            if answer is None:
+                answer = await (
+                    self._council(brain_task)
+                    if brain_task.council
+                    else self._staged(brain_task, prefer)
+                )
             brain_task.result = answer.text
             brain_task.sources = answer.sources
+            brain_task.via_account = answer.via_account
             brain_task.status = "done" if answer.ok else "failed"
+            if not brain_task.job_id:  # the worker warned about its own spend
+                notice = budget_notice(spent_before, self.ledger.month_spend()["usd"])
+                if notice:
+                    brain_task.result = f"{notice}\n\n{brain_task.result}"
         except asyncio.CancelledError:
             brain_task.status = "cancelled"
             brain_task.result = "Cancelada."
@@ -688,12 +1136,16 @@ class Bridge:
             brain_task.status = "failed"
             brain_task.result = f"La tarea falló: {e}"
         brain_task.finished_at = datetime.now(UTC).isoformat()
+        brain_task.seconds = asyncio.get_running_loop().time() - started
         logger.info(
-            "Brain task %s %s on %s (%.4f $)",
+            "Brain task %s %s on %s in %.1f s (%.4f $, %s, %s)",
             brain_task.id,
             brain_task.status,
             ", ".join(brain_task.models),
+            brain_task.seconds,
             brain_task.cost_usd,
+            brain_task.kind,
+            brain_task.difficulty,
         )
         await self.publish_status()
         await self._deliver(brain_task)
@@ -708,14 +1160,17 @@ class Bridge:
             session = self.session
             if session is None or self._closed:
                 return False
-            quiet = session.user_state != "speaking" and session.agent_state in (
-                "listening",
-                "idle",
+            # The user going quiet is not the turn ending: the end-of-turn wait comes
+            # after it, and a result spoken in that wait took the place of the answer.
+            quiet = (
+                session.user_state != "speaking"
+                and session.agent_state in ("listening", "idle")
+                and not self._user_mid_turn()
             )
             now = loop.time()
             if quiet:
                 quiet_since = quiet_since or now
-                if now - quiet_since >= 1.0:
+                if now - quiet_since >= PAUSE_QUIET_SECONDS:
                     return True
             else:
                 quiet_since = None
@@ -749,6 +1204,43 @@ class Bridge:
             "there is more."
         )
 
+    def _spoken_as_written(self, brain_task: BrainTask) -> str:
+        """The worker's spoken part, when nothing needs adding to it. Else empty.
+
+        A result that took long arrives after the talk moved on and needs introducing;
+        a council's needs comparing; a program's output was not written to be heard;
+        and without a TTS of its own a realtime model has to say it itself.
+        """
+        if (
+            brain_task.status != "done"
+            or self.config.delivery == "on_request"
+            or brain_task.council
+            or brain_task.kind == "code"
+            or brain_task.seconds > QUICK_ANSWER_SECONDS
+            or getattr(self._voice(), "tts", None) is None
+        ):
+            return ""
+        spoken = brain_task.result.split("Detalle:")[0].strip()
+        if len(spoken) > QUICK_ANSWER_CHARS or any(m in spoken for m in ("http", "**", "#", "|")):
+            return ""
+        return spoken
+
+    async def _say_still_working(self, brain_task: BrainTask) -> None:
+        """A simple answer goes unannounced, so if it is slow the silence needs breaking."""
+        await asyncio.sleep(STILL_WORKING_SECONDS)
+        session = self.session
+        if (
+            brain_task.status != "running"
+            or session is None
+            or session.agent_state not in ("listening", "idle")
+            or session.user_state == "speaking"
+            or self._user_mid_turn()
+        ):
+            return
+        session.generate_reply(
+            instructions="Say in very few words that the answer is coming. Nothing else."
+        )
+
     async def _deliver(self, brain_task: BrainTask) -> None:
         if brain_task.status == "cancelled":
             return
@@ -763,14 +1255,42 @@ class Bridge:
         elif not await self._wait_for_pause():
             self._store_pending(brain_task)
             return
+        self._remember(brain_task)
         try:
-            self.session.generate_reply(
-                instructions=self._spoken(brain_task), allow_interruptions=True
-            )
+            as_written = self._spoken_as_written(brain_task)
+            if as_written:
+                self.session.say(as_written, allow_interruptions=True)
+            else:
+                self.session.generate_reply(
+                    instructions=self._spoken(brain_task), allow_interruptions=True
+                )
             brain_task.delivered = True
         except Exception:
             logger.exception("Could not speak the result of %s", brain_task.id)
             self._store_pending(brain_task)
+
+    def _remember(self, brain_task: BrainTask) -> None:
+        """Keep the result in the voice's history, not only in the reply's instructions.
+
+        Instructions last one reply. Without this the next turn saw an answer with no
+        source, and on a real call the voice took it for a guess of its own and apologised
+        for it, right answers included. It also lets the voice answer a follow-up. Only
+        `_chat_ctx`, which is what generation reads: a realtime model keeps its own.
+        """
+        try:
+            history = getattr(self.session.current_agent, "_chat_ctx", None)
+            if history is None or brain_task.status != "done":
+                return
+            result = brain_task.result[:SPOKEN_RESULT_CHARS]
+            history.add_message(
+                role="system",
+                content=(
+                    f"Delegated task {brain_task.id} ({brain_task.title}) finished. Its result, "
+                    f"which you tell the user next:\n{result}"
+                ),
+            )
+        except Exception:
+            logger.debug("Could not keep a result in the voice's history", exc_info=True)
 
     def _store_pending(self, brain_task: BrainTask) -> None:
         if brain_task.delivered or not self.kwami_id:
@@ -800,6 +1320,8 @@ class Bridge:
         self.session = None
         self.publisher = None
         running = [t for t in self.tasks.values() if t.status == "running" and t.handle]
+        await self._let_go_of_jobs([t for t in running if t.job_id])
+        running = [t for t in running if not t.job_id]
         if self.config.on_hangup == "cancel":
             for brain_task in running:
                 brain_task.handle.cancel()  # type: ignore[union-attr]
@@ -816,6 +1338,21 @@ class Bridge:
         # Spend and owed results go out in the background; on the cloud the
         # worker is gone soon after this returns.
         await self.ledger.flush(timeout=LEDGER_FLUSH_SECONDS)
+
+    async def _let_go_of_jobs(self, on_pc: list[BrainTask]) -> None:
+        """Stop watching. The PC carries on, and the next greeting gets the result."""
+        for brain_task in on_pc:
+            brain_task.handle.cancel()  # type: ignore[union-attr]
+        await asyncio.gather(*(t.handle for t in on_pc if t.handle), return_exceptions=True)
+        if self.jobs is None:
+            return
+        stop = self.config.on_hangup == "cancel"
+        for brain_task in on_pc:
+            await (
+                self.jobs.request_cancel(brain_task.job_id)
+                if stop
+                else self.jobs.end_watch(brain_task.job_id)
+            )
 
     def find(self, wanted: str) -> BrainModel | None:
         return find_model(self.config.models, wanted)

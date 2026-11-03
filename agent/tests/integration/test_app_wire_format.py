@@ -134,15 +134,16 @@ async def test_an_unknown_pipeline_type_keeps_the_default(captured, create_agent
     assert captured["config"].voice.pipeline_type == "standard"
 
 
-async def test_hybrid_degrades_to_standard(captured, create_agent_fn) -> None:
-    """`hybrid` is in the SDK's union and has no implementation here.
+async def test_hybrid_reaches_the_config(captured, create_agent_fn) -> None:
+    """`hybrid` is the SDK's Live + TTS: the realtime model thinks, the TTS speaks.
 
-    Resolving it to standard is a decision; leaving it unrecognised would have
-    been the same outcome reached by accident.
+    It used to resolve to standard because nothing built it; the pipeline
+    builder now does, and corrects it to realtime for a Live model that only
+    answers in audio (tests/unit/test_hybrid_pipeline.py).
     """
     await _connect(_app_config_message("hybrid"), create_agent_fn)
 
-    assert captured["config"].voice.pipeline_type == "standard"
+    assert captured["config"].voice.pipeline_type == "hybrid"
 
 
 async def test_a_config_with_no_pipeline_field_keeps_the_default(captured, create_agent_fn):

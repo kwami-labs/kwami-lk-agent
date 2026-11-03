@@ -43,6 +43,7 @@ LISTENING_FIELDS = (
     "vad_threshold",
     "vad_min_speech_duration",
     "vad_min_silence_duration",
+    "stt_keyterms",
 )
 
 #: Wire keys that carry nothing but listening settings. A message made only of
@@ -136,6 +137,11 @@ def parse_listening(voice_data: Any) -> dict[str, Any]:
         flag = flag if flag is not None else boolean(voice_data, wire)
         if flag is not None:
             values[field] = flag
+
+    vocabulary = enhancements.get("vocabulary") if isinstance(enhancements, dict) else None
+    if isinstance(vocabulary, list):
+        words = [w.strip()[:40] for w in vocabulary if isinstance(w, str) and w.strip()]
+        values["stt_keyterms"] = list(dict.fromkeys(words))
 
     vad = section(voice_data, "vad")
     for wire, field, low, high in (

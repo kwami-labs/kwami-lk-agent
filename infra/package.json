@@ -17,10 +17,10 @@
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.4.11",
-    "@types/node": "^26.6.5",
+    "@types/node": "^26.6.6",
     "typescript": "^7.0.2",
     "vitest": "^4.1.12",
-    "wrangler": "4.151.1"
+    "wrangler": "4.156.0"
   },
   "dependencies": {
     "@cloudflare/containers": "^0.3.7"

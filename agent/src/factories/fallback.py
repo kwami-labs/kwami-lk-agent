@@ -79,13 +79,20 @@ GEMINI_FEMALE_VOICES = frozenset(
     }
 )
 
-#: ElevenLabs stock voices the free plan can speak with (library voices are a
-#: 402): George for a male character, Jessica for a female one. They are the
-#: app's Jarvis and Friday voices on that engine.
+#: ElevenLabs stock voices, which every account can speak with: George for a
+#: male character, Jessica for a female one. A backup stays on them because the
+#: app's designed Jarvis and Friday voices exist only in our own account.
 ELEVENLABS_MALE = "JBFqnCBsd6RMkjVDRZzb"
 ELEVENLABS_FEMALE = "cgSgspJ2msm6clMCkdW9"
 ELEVENLABS_FEMALE_IDS = frozenset(
-    {ELEVENLABS_FEMALE, "Xb7hH8MSUJpSbSDYk0k2", "EXAVITQu4vr4xnSDxMaL", "pFZP5JQG7iQjIQuC4Bku"}
+    {
+        ELEVENLABS_FEMALE,
+        "Xb7hH8MSUJpSbSDYk0k2",
+        "EXAVITQu4vr4xnSDxMaL",
+        "pFZP5JQG7iQjIQuC4Bku",
+        "7DhuphZTKDjiMKbUjawV",  # Irlandesa, designed for Friday
+        "r38nWKEfEkdcb3l6HqyC",  # Serena, designed for Friday
+    }
 )
 
 

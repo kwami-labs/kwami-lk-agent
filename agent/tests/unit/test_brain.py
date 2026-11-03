@@ -38,7 +38,7 @@ def test_defaults_are_the_roster_the_user_chose() -> None:
         "claude-code": "code",
     }
     assert config.council == "important"
-    assert config.budget_policy == "inform"
+    assert config.budget_policy == "stop"
     assert config.on_hangup == "finish"
 
 

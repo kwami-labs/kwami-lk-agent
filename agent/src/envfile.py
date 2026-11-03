@@ -36,7 +36,3 @@ def load_env_file(path: Path) -> bool:
     if not path.is_file() or is_git_crypt_locked(path):
         return False
     return load_dotenv(path)
-
-
-#: The name kwami-labs gave the same loader (c9124ea).
-load_unlocked_dotenv = load_env_file

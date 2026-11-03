@@ -46,6 +46,9 @@ ALLOWED_ABSENT = {
     # A knob for a local test worker, so it does not answer real calls. A
     # deployed worker must keep the default dispatch name the API routes to.
     "KWAMI_AGENT_NAME",
+    # Self-improvement runs on the user's PC only: the cloud must not hold GitHub
+    # credentials, so a container has no use for whose repositories they are.
+    "KWAMI_SELF_REPO_OWNER",
     # A path inside the image, set by the Dockerfile that installs the browser.
     "KWAMI_HEADLESS_CHROMIUM",
 }

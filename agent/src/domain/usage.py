@@ -19,6 +19,9 @@ from ..utils.logging import get_logger
 
 logger = get_logger("usage.tracker")
 
+#: The kinds of usage a user's own key can pay for. Tools and memory run on ours.
+OWN_KEY_MODEL_TYPES = frozenset({"llm", "stt", "tts", "realtime"})
+
 
 @dataclass
 class ModelUsage:
@@ -103,6 +106,24 @@ _AUDIO_TOKENS_PER_MINUTE: dict[str, tuple[float, float]] = {
     "google": (1920.0, 1920.0),
     "gemini": (1920.0, 1920.0),
 }
+
+
+#: How a plugin names a provider, where that is not the provider's own name.
+_PROVIDER_LABELS = {"gemini": "google"}
+
+
+def provider_of(model_id: str) -> str:
+    """`api.openai.com/tts-1` -> openai, `ElevenLabs/...` -> elevenlabs, no prefix -> "".
+
+    `livekit/...` comes out as itself: LiveKit Inference is billed to our project
+    whoever the model's maker is, so it can never count as the user's own key.
+    """
+    label, separator, _ = model_id.lower().partition("/")
+    if not separator:
+        return ""
+    if label.startswith("api."):
+        label = label.split(".")[1]
+    return _PROVIDER_LABELS.get(label, label)
 
 
 def _model_id(provider: str, model: str) -> str:
@@ -190,6 +211,12 @@ class UsageTracker:
         self._usage: dict[str, ModelUsage] = {}
         self._lock = Lock()
         self._session_start = time.time()
+        self._own_key_providers: frozenset[str] = frozenset()
+
+    def mark_own_keys(self, providers: frozenset[str]) -> None:
+        """The providers this session runs on with the user's key, not ours."""
+        with self._lock:
+            self._own_key_providers = providers
 
     def _get_or_create(self, model_type: str, model_id: str) -> ModelUsage:
         """Get or create a usage entry for a model."""
@@ -434,6 +461,11 @@ class UsageTracker:
                         item["text_output_tokens"] = entry.text_output_tokens
                     if entry.request_count:
                         item["request_count"] = entry.request_count
+                    if (
+                        entry.model_type in OWN_KEY_MODEL_TYPES
+                        and provider_of(entry.model_id) in self._own_key_providers
+                    ):
+                        item["own_key"] = True
                     items.append(item)
             return items
 

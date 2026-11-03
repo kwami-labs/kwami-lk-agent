@@ -381,6 +381,15 @@ async def test_a_negative_index_is_clamped_rather_than_sent() -> None:
     assert tools.publisher.published[0]["index"] == 0
 
 
+async def test_a_card_number_is_never_typed_into_a_page() -> None:
+    tools, session = _tools()
+
+    result = await tools.type_in_navigation(None, "4111 1111 1111 1111")
+
+    assert "Refused" in result
+    assert not session.actions
+
+
 async def test_a_window_on_the_computer_is_called_that() -> None:
     tools, session = _tools(active=False)
     session.runs_locally = True

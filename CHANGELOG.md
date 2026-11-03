@@ -9,9 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Any model can take any job.** A brain model holds several jobs and a brief of its own,
+  one model directs the rest, and Grok, OpenRouter, Groq, DeepSeek and Mistral join.
+- **The work thread.** A process on the user's PC takes queued work, with Claude on that PC's
+  own login first and on the API key only when the login cannot.
+- **Live + TTS.** A realtime model hears and thinks, and a TTS speaks.
+- **A voice pipeline on the user's own keys.** The keys someone connects power their voice
+  stages too. That usage is reported as theirs, and the API charges for the platform instead.
+- **`KWAMI_BROWSER_PROVIDER=local`**, a real Chrome window for an agent running on
+  the user's own computer. Free, with its own profile, and never chosen unless
+  asked for.
+
 - **A browser that needs no vendor.** The image ships Chromium, tried last when
   every vendor refuses. It remembers no logins and the panel shows screenshots of
   it; the risk it adds is in `docs/security.md`.
+
+### Changed
+
+- **The whole turn is heard.** A turn whose words say it has not finished is held, and the
+  pieces are answered and remembered as one. A quick answer is spoken as the worker wrote it.
 
 ### Fixed
 
@@ -30,13 +46,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a site is already signed in until the page shows it.
 - **The calendar tools are the last client tools to be trimmed** when the list
   goes over the provider's limit.
-
-### Added
-
-- **`KWAMI_BROWSER_PROVIDER=local`**, a real Chrome window for an agent running on
-  the user's own computer. Free, with its own profile, and never chosen unless
-  asked for.
-
 - **Voice, speed and language changes are no longer lost.** `change_voice`,
   `change_speaking_speed` and `change_language` retuned the live TTS/STT and
   never wrote back to `kwami_config.voice`, so `get_current_voice_settings`
