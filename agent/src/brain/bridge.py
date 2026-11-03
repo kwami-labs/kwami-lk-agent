@@ -870,15 +870,17 @@ class Bridge:
         return answer, writer
 
     async def runner_online(self) -> bool:
-        owner = self._owner()
-        return bool(self.jobs and owner and await self.jobs.runner_online(owner))
+        return bool(self.jobs and self.user_id and await self.jobs.runner_online(self.user_id))
 
     async def _on_the_pc(self, brain_task: BrainTask, prefer: str) -> BrainAnswer | None:
-        """Send the work to the PC. None when it is not there: the caller runs it here."""
-        owner = self._owner()
-        if self.jobs is None or not owner or as_user_id(self.kwami_id) is None:
+        """Send the work to the PC. None when it is not there: the caller runs it here.
+
+        Only the room's own user, never the kwami's owner: on a phone line anyone can
+        talk, and the PC runs commands on its owner's login.
+        """
+        if self.jobs is None or not self.user_id or as_user_id(self.kwami_id) is None:
             return None
-        if not await self.jobs.runner_online(owner):
+        if not await self.jobs.runner_online(self.user_id):
             return None
         model = pick(self.config, self._keys, "code", brain_task.difficulty, prefer)
         if model is None:
@@ -889,7 +891,7 @@ class Bridge:
             thread_id = await self.jobs.last_thread(self.kwami_id)
         brief = self._brief(model)
         job = BrainJob(
-            user_id=owner,
+            user_id=self.user_id,
             kwami_id=self.kwami_id,
             title=brain_task.title,
             task=f"{brain_task.task}\n\n{brief}" if brief else brain_task.task,
