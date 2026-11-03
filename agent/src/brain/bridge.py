@@ -235,7 +235,7 @@ class Bridge:
         self._keys_secret = settings.provider_keys_secret
         #: The user's own keys for the voice pipeline, by environment name.
         self.voice_keys: dict[str, str] = {}
-        #: Whose keys this call holds. The first person only: the usage is billed to
+        #: Whose keys this call may hold. The first person only: the usage is billed to
         #: them, so nobody who joins later may bring their keys in, or spend theirs.
         self._keys_owner = ""
         self._voice_keys_loaded = asyncio.Event()
@@ -332,16 +332,22 @@ class Bridge:
     async def _on_user_known(self) -> None:
         """Bring in what depends on who this is: their keys, and their PC."""
         if self._keys_store is not None and self._keys_owner in ("", self.user_id):
-            self._keys_owner = self.user_id
+            self._keys_owner = owner = self.user_id
             try:
-                self._keys.update(
-                    await load_user_keys(self._keys_store, self.user_id, self._keys_secret)
+                keys = await load_user_keys(self._keys_store, owner, self._keys_secret)
+                voice_keys = await load_user_keys(
+                    self._keys_store, owner, self._keys_secret, VOICE_PROVIDER_KEYS
                 )
-                self.voice_keys = await load_user_keys(
-                    self._keys_store, self.user_id, self._keys_secret, VOICE_PROVIDER_KEYS
-                )
+                # They may have been replaced while these were on their way.
+                if self.user_id == owner:
+                    self._keys.update(keys)
+                    self.voice_keys = voice_keys
             finally:
                 self._voice_keys_loaded.set()
+        elif self._keys_store is not None:
+            # Somebody else is speaking now, and the first person's keys are not theirs.
+            self._keys = dict(self._deployment_keys)
+            self.voice_keys = {}
         await self._refresh_account(force=True)
         await self.publish_status()
         await self._regate_voice()

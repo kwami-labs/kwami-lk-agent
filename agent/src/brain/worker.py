@@ -92,9 +92,13 @@ THREAD_MAX_TASK_USD = 2.0
 #: On the PC's Claude Code login no money moves and the plan's limits apply, but the SDK
 #: still needs a figure, in what the run would have cost on the API.
 LOGIN_NOTIONAL_USD = 25.0
-#: A login that cannot do the work: the API key takes over.
+#: A login that cannot do the work: the API key takes over. What Claude Code and the API
+#: say, not single words: taking over runs the whole job again, and a job's own text can
+#: mention OAuth, an author, or logging in to some site.
 _LOGIN_TROUBLE = re.compile(
-    r"log ?in|auth|credit|rate.?limit|usage limit|quota|ejecutor local falló", re.IGNORECASE
+    r"not logged in|/login\b|invalid api key|authentication[_ ](?:error|failed)|oauth token"
+    r"|\bcredits?\b|rate.?limit|usage limit|quota|ejecutor local falló",
+    re.IGNORECASE,
 )
 
 Runner = Callable[..., Coroutine[Any, Any, ExecutorResult]]

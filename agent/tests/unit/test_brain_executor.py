@@ -391,6 +391,48 @@ def test_the_home_by_another_name_is_outside(tmp_path: Path, monkeypatch, comman
     assert "outside" in (check_tool_call(root, "Bash", {"command": command}) or "")
 
 
+@pytest.mark.parametrize("tool", ["Grep", "Glob"])
+def test_a_search_cannot_walk_into_what_stays_shut(tmp_path: Path, monkeypatch, tool: str) -> None:
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    profile = tmp_path / "profile"
+    (profile / "projects").mkdir(parents=True)
+    (profile / "AppData" / "Chrome").mkdir(parents=True)
+    (profile / "AppData" / "Chrome" / "Login Data").write_text("secret")
+    monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(profile))
+
+    call = {"pattern": "x"}
+    assert "narrower" in (check_tool_call(root, tool, {**call, "path": str(profile)}) or "")
+    assert check_tool_call(root, tool, {**call, "path": str(profile / "projects")}) is None
+
+
+def test_a_search_of_a_huge_folder_is_told_to_narrow(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "jarvis"
+    root.mkdir()
+    opened = tmp_path / "opened"
+    (opened / "a" / "b").mkdir(parents=True)
+    monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(opened))
+    monkeypatch.setattr(executor, "_SEARCH_WALK_LIMIT", 1)
+
+    assert "narrower" in (
+        check_tool_call(root, "Grep", {"pattern": "x", "path": str(opened)}) or ""
+    )
+
+
+def test_inside_the_jarvis_folder_a_search_goes_anywhere(tmp_path: Path) -> None:
+    (tmp_path / ".claude").mkdir()
+    assert check_tool_call(tmp_path, "Grep", {"pattern": "x"}) is None
+    assert check_tool_call(tmp_path, "Glob", {"pattern": "**/*.py", "path": "."}) is None
+
+
+@pytest.mark.parametrize(
+    "pattern", ["/etc/*", "C:/Users/me/**", "~/.ssh/*", "$HOME/*", "%USERPROFILE%/*", "../**/*"]
+)
+def test_a_glob_pattern_cannot_name_another_place(tmp_path: Path, pattern: str) -> None:
+    assert "narrow" not in (check_tool_call(tmp_path, "Glob", {"pattern": pattern}) or "")
+    assert "Search inside" in (check_tool_call(tmp_path, "Glob", {"pattern": pattern}) or "")
+
+
 @pytest.mark.parametrize(
     "command",
     ["cat ~/jarvis/notes.md", "git diff HEAD~1", "echo $HOMEBREW_PREFIX", "ls backup~"],

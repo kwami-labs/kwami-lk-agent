@@ -262,6 +262,37 @@ _NEVER_OPENED = frozenset(
 )
 
 
+#: How many folders of an opened folder a search is checked through. Past this it is
+#: told to be narrower, rather than the check taking as long as the search.
+_SEARCH_WALK_LIMIT = 5000
+
+
+def _search_reaches_shut(root: Path, raw: str) -> bool:
+    """Whether searching this folder would walk into what `_inside` keeps shut.
+
+    That check sees only the path it is given, and a search over the user's whole profile
+    names the profile. Inside the Jarvis folder everything is open anyway.
+    """
+    target = (root / raw).resolve()
+    if target == root or root in target.parents:
+        return False
+    for walked, (_, folders, files) in enumerate(os.walk(target)):
+        if walked >= _SEARCH_WALK_LIMIT or {n.lower() for n in (*folders, *files)} & _NEVER_OPENED:
+            return True
+        folders[:] = [folder for folder in folders if folder not in _SKIP_DIRS]
+    return False
+
+
+def _glob_leaves_folder(pattern: str) -> bool:
+    """A pattern can name a place by itself, whatever folder the call says it is in."""
+    return bool(
+        Path(pattern).is_absolute()
+        or PureWindowsPath(pattern).drive
+        or pattern.startswith(("/", "\\", "~", "$", "%"))
+        or _PARENT.search(pattern)
+    )
+
+
 def _inside(root: Path, raw: str) -> bool:
     # A drive-letter or UNC path is absolute only on Windows. On the Linux cloud
     # executor Path() reads "C:\Users\..." as a relative name under root and
@@ -339,6 +370,12 @@ def check_tool_call(root: Path, tool_name: str, tool_input: dict[str, Any]) -> s
                 return ".env files are off limits."
             if not _inside(root, value):
                 return f"{value} is outside the Jarvis folder."
+    if tool_name == "Glob" and _glob_leaves_folder(str(tool_input.get("pattern", ""))):
+        return "Search inside the folder: name it with `path`, not in the pattern."
+    if tool_name in ("Grep", "Glob") and _search_reaches_shut(
+        root, str(tool_input.get("path", "."))
+    ):
+        return "That folder holds keys or sessions, or is too large: search a narrower one."
     # A run ends at its first result, with a member still working and its answer lost.
     # Seen on 2026-11-01: a pull request opened while its reviewer was still reading.
     if tool_name in ("Agent", "Task") and tool_input.get("run_in_background"):

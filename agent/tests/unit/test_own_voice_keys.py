@@ -211,7 +211,9 @@ class TestNothingLeaks:
 
 
 class TestTheFirstPersonOwnsTheKeys:
-    async def test_someone_joining_later_brings_no_keys(self, monkeypatch) -> None:
+    async def test_someone_joining_later_neither_brings_keys_nor_spends_the_first(
+        self, monkeypatch
+    ) -> None:
         from src.brain import bridge as bridge_module
         from src.brain.bridge import Bridge
 
@@ -221,6 +223,7 @@ class TestTheFirstPersonOwnsTheKeys:
         monkeypatch.setattr(bridge_module, "load_user_keys", load)
         bridge = Bridge.__new__(Bridge)
         bridge._keys = {}
+        bridge._deployment_keys = {"GOOGLE_API_KEY": "ours"}
         bridge._keys_store = object()
         bridge._keys_secret = KEY
         bridge._keys_owner = ""
@@ -236,8 +239,11 @@ class TestTheFirstPersonOwnsTheKeys:
 
         bridge.user_id = "first"
         await bridge._on_user_known()
+        assert bridge.voice_keys == {"OPENAI_API_KEY": "key-of-first"}
+        assert bridge._keys == {"OPENAI_API_KEY": "key-of-first"}
+
         bridge.user_id = "second"
         await bridge._on_user_known()
 
-        assert bridge.voice_keys == {"OPENAI_API_KEY": "key-of-first"}
-        assert bridge._keys == {"OPENAI_API_KEY": "key-of-first"}
+        assert bridge.voice_keys == {}
+        assert bridge._keys == {"GOOGLE_API_KEY": "ours"}
