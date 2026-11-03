@@ -614,9 +614,8 @@ class CloudBrowserSession:
         last = ""
         while self.is_active:
             try:
-                frame = ""
-                if await self._page_may_be_shown():
-                    frame = await self._connection.screenshot(quality=FRAME_QUALITY)
+                shown = await self._page_may_be_shown()
+                frame = await self._connection.screenshot(quality=FRAME_QUALITY) if shown else ""
                 if frame and frame != last:
                     await self._publish_frame(base64.b64decode(frame))
                     last = frame
