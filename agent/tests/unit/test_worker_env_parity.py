@@ -46,6 +46,8 @@ ALLOWED_ABSENT = {
     # A knob for a local test worker, so it does not answer real calls. A
     # deployed worker must keep the default dispatch name the API routes to.
     "KWAMI_AGENT_NAME",
+    # A path inside the image, set by the Dockerfile that installs the browser.
+    "KWAMI_HEADLESS_CHROMIUM",
 }
 
 

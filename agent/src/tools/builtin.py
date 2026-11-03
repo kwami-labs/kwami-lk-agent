@@ -888,12 +888,21 @@ class AgentToolsMixin:
                 result = await session.navigate(url)
             else:
                 await session.start(user_id=user_id, url=url)
-                where = (
-                    "a Chrome window on the user's computer"
-                    if session.runs_locally is True
-                    else "the browser panel"
-                )
-                result = f"Opening {url}. The user can see and interact with the page in {where}."
+                if session.is_builtin is True:
+                    result = (
+                        f"Opening {url}. The user sees the page in the browser panel but cannot "
+                        "click in it, so do the clicking and typing for them. Nothing they sign "
+                        "in to here is remembered after the browser closes."
+                    )
+                else:
+                    where = (
+                        "a Chrome window on the user's computer"
+                        if session.runs_locally is True
+                        else "the browser panel"
+                    )
+                    result = (
+                        f"Opening {url}. The user can see and interact with the page in {where}."
+                    )
         except ValueError as e:
             return refusal(f"Cannot open browser: {e}")
         except ProviderUnavailableError as e:
@@ -936,7 +945,10 @@ class AgentToolsMixin:
         if not session.is_active:
             return "No browser is currently open."
         try:
+            builtin = session.is_builtin is True
             await session.close(quit_browser=True)
+            if builtin:
+                return "Browser closed."
             return "Browser closed. Login state has been saved for next time."
         except Exception as e:
             # Reporting success here told the user their session was over while a

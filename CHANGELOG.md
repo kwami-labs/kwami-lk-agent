@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A browser that needs no vendor.** The image ships Chromium, tried last when
+  every vendor refuses. It remembers no logins and the panel shows screenshots of
+  it; the risk it adds is in `docs/security.md`.
+
 ### Fixed
 
 - **A browser vendor with no credit no longer ends the browsing.** A key says

@@ -92,6 +92,19 @@ async def _version_info(port: int) -> dict | None:
     return data if isinstance(data, dict) else None
 
 
+async def wait_for_port(process: subprocess.Popen, profile: Path) -> int | None:
+    """The debugging port once Chrome answers on it, or None if it never does."""
+    deadline = time.monotonic() + START_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        port = _active_port(profile)
+        if port and await _version_info(port):
+            return port
+        if process.poll() not in (None, 0):
+            return None
+        await asyncio.sleep(_POLL_SECONDS)
+    return None
+
+
 class LocalChromeProvider:
     """Opens, or finds again, the user's Chrome window on this machine."""
 
@@ -118,14 +131,9 @@ class LocalChromeProvider:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        deadline = time.monotonic() + START_TIMEOUT_SECONDS
-        while time.monotonic() < deadline:
-            port = _active_port(profile)
-            if port and await _version_info(port):
-                return port
-            if process.poll() not in (None, 0):
-                break
-            await asyncio.sleep(_POLL_SECONDS)
+        port = await wait_for_port(process, profile)
+        if port:
+            return port
         raise BrowserVendorError(LOCAL, MISSING, "Chrome did not start on this computer.")
 
     async def launch(self, user_id: str) -> LaunchedBrowser:

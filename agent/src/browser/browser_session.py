@@ -14,13 +14,20 @@ publishing to the frontend -- is the same whoever is running the browser.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
 from typing import Any
 
 from ..utils.logging import get_logger
 from .cloud_browser import CDPConnection
-from .providers import LOCAL, BrowserProviderPort, LaunchedBrowser, create_browser_provider
+from .providers import (
+    HEADLESS,
+    LOCAL,
+    BrowserProviderPort,
+    LaunchedBrowser,
+    create_browser_provider,
+)
 from .safety import UnsafeURLError, validate_url
 
 logger = get_logger("browser.session")
@@ -30,6 +37,11 @@ IDLE_TIMEOUT_SECONDS = 5 * 60  # 5 minutes
 
 #: Where the browser is sent when a page redirects somewhere refused.
 BLANK_PAGE = "about:blank"
+
+#: How the built-in browser, which has no live view, shows itself in the panel.
+FRAME_TOPIC = "browser_frame"
+FRAME_INTERVAL_SECONDS = 1.5
+FRAME_QUALITY = 50
 
 
 class CloudBrowserSession:
@@ -65,6 +77,7 @@ class CloudBrowserSession:
         self._room = room
         self._current_url: str = ""
         self._idle_timer: asyncio.Task | None = None
+        self._frame_task: asyncio.Task | None = None
         # Cloud browsers bill per minute, with a US proxy on top. This is the
         # single most expensive resource the agent can hold, and it was the one
         # resource never metered -- pure, invisible margin loss.
@@ -80,6 +93,11 @@ class CloudBrowserSession:
     def runs_locally(self) -> bool:
         """Whether this is a window on the user's computer, not the app's panel."""
         return self._vendor == LOCAL
+
+    @property
+    def is_builtin(self) -> bool:
+        """Whether this is Chromium in our own container: no live view, no vendor bill."""
+        return self._vendor == HEADLESS
 
     @property
     def live_url(self) -> str | None:
@@ -101,7 +119,7 @@ class CloudBrowserSession:
         the user closed.
         """
         started, self._started_at = self._started_at, None
-        if started is None or self._usage_tracker is None or self.runs_locally:
+        if started is None or self._usage_tracker is None or self.runs_locally or self.is_builtin:
             return
         minutes = max(0.0, (time.monotonic() - started)) / 60.0
         if minutes <= 0:
@@ -200,6 +218,8 @@ class CloudBrowserSession:
         # Start idle timer
         self._started_at = time.monotonic()
         self._reset_idle_timer()
+        if self.is_builtin:
+            self._frame_task = asyncio.create_task(self._stream_frames())
 
         logger.info(
             "Cloud browser started: vendor=%s, id=%s, profile=%s, url=%s",
@@ -222,6 +242,7 @@ class CloudBrowserSession:
         window on their computer, which otherwise outlives the session.
         """
         self._cancel_idle_timer()
+        self._stop_frames()
         self._record_browser_minutes()
 
         if self._cdp:
@@ -534,8 +555,8 @@ class CloudBrowserSession:
         if not self._room:
             return
         msg: dict[str, Any] = {"type": "browser_session", "action": action}
-        if self._live_url and action == "open":
-            msg["liveUrl"] = self._embeddable_live_url()
+        if action == "open" and (self._live_url or self.is_builtin):
+            msg["liveUrl"] = self._embeddable_live_url() if self._live_url else ""
             msg["vendor"] = self._vendor
             # The panel shows a "not signed in" hint when persistence is off,
             # rather than letting the user discover it by being logged out.
@@ -550,6 +571,34 @@ class CloudBrowserSession:
             logger.debug("Published browser_session event: action=%s", action)
         except Exception as e:
             logger.warning("Failed to publish browser_session event: %s", e)
+
+    def _stop_frames(self) -> None:
+        task, self._frame_task = self._frame_task, None
+        if task is not None:
+            task.cancel()
+
+    async def _stream_frames(self) -> None:
+        """Keep the panel showing the page, sending a frame only when it changed."""
+        last = ""
+        while self.is_active:
+            try:
+                frame = await self._connection.screenshot(quality=FRAME_QUALITY)
+                if frame and frame != last:
+                    await self._publish_frame(base64.b64decode(frame))
+                    last = frame
+            except Exception as e:
+                # A page mid-navigation has nothing to capture. The next try will.
+                logger.debug("Could not send a browser frame: %s", e)
+            await asyncio.sleep(FRAME_INTERVAL_SECONDS)
+
+    async def _publish_frame(self, jpeg: bytes) -> None:
+        if not self._room:
+            return
+        writer = await self._room.local_participant.stream_bytes(
+            "frame.jpg", total_size=len(jpeg), mime_type="image/jpeg", topic=FRAME_TOPIC
+        )
+        await writer.write(jpeg)
+        await writer.aclose()
 
     def _embeddable_live_url(self) -> str:
         """The live view URL, tuned for an iframe.

@@ -204,6 +204,13 @@ signature meant this guard never ran.
   residue covers DNS rebinding: the name is resolved once here and again by the
   browser, and nothing guarantees the two answers match. The exposure is a
   request from the vendor's network, not ours
+- **No separation between the built-in browser and the agent.** When no vendor
+  can provide a browser, Chromium runs in the agent's own container
+  (`browser/headless_chrome.py`). Its environment holds no secrets and its profile
+  is deleted on release, but it runs as the same user, and without its sandbox
+  where the container forbids one (the log says so). A browser exploit on a page
+  could then reach the agent's credentials. Requests after a redirect, and a
+  page's own requests, come from our network rather than a vendor's
 
 ## Checklist for future changes
 

@@ -37,6 +37,15 @@ FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
+# The browser of last resort: see agent/src/browser/headless_chrome.py.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+  && rm -rf /var/lib/apt/lists/*
+RUN chromium --version
+ENV KWAMI_HEADLESS_CHROMIUM=/usr/bin/chromium
+
 ARG UID=10001
 RUN adduser \
     --disabled-password \

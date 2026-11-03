@@ -13,6 +13,8 @@ BROWSERBASE = "browserbase"
 #: Chrome on the agent's own machine: see `local_chrome`. Never a fallback for a
 #: cloud vendor, because on a server it would open a window nobody can see.
 LOCAL = "local"
+#: Chromium in the agent's own container: see `headless_chrome`.
+HEADLESS = "headless"
 
 #: Why a vendor could not give us a browser. The first two do not fix themselves
 #: on a retry, so the vendor is left alone for a while.
@@ -22,7 +24,12 @@ BUSY = "busy"
 DOWN = "down"
 MISSING = "missing"
 
-_LABELS = {BROWSERBASE: "Browserbase", BROWSER_USE: "Browser Use", LOCAL: "The local browser"}
+_LABELS = {
+    BROWSERBASE: "Browserbase",
+    BROWSER_USE: "Browser Use",
+    LOCAL: "The local browser",
+    HEADLESS: "The built-in browser",
+}
 
 
 @dataclass(frozen=True)
