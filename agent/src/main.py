@@ -190,7 +190,9 @@ async def _run_session(ctx: JobContext) -> None:
     def build_agent(config, vad, memory=None, skip_greeting=False):
         """Build on the keys this user connected, and report those parts as theirs."""
         config.voice.user_keys = deps.bridge.voice_keys
-        state.usage_tracker.mark_own_keys(deps.bridge.voice_key_providers)
+        own_keys = deps.bridge.voice_key_providers
+        state.usage_tracker.mark_own_keys(own_keys)
+        logger.info("Voice on the user's own keys: %s", sorted(own_keys) or "none")
         return create_agent_from_config(config, vad, memory, skip_greeting=skip_greeting)
 
     state = create_session_state(
