@@ -30,6 +30,7 @@ from ..domain.pipelines import TEXT_REALTIME_PREFIXES
 from ..factories.availability import voice_provider_keys
 from ..settings import Settings, get_settings
 from ..utils.logging import get_logger
+from .browser_tool import SIGN_IN_TOOL
 from .config import (
     HARD_MONTHLY_CAP_USD,
     BrainConfig,
@@ -41,6 +42,7 @@ from .config import (
 from .executor import CloudWorkspace, run_executor
 from .jobs import BrainJob, JobStore
 from .ledger import Ledger, PendingResult, create_ledger
+from .orders import LOGIN, MERGE, merge_approved
 from .planner import (
     PLAN_FORMAT,
     PLANNER_SYSTEM,
@@ -110,6 +112,8 @@ THINK_POLL_SECONDS = 1.5
 #: The first seconds of a thought, when the answer to something simple arrives.
 THINK_POLL_FAST_SECONDS = 0.4
 THINK_POLL_FAST_FOR_SECONDS = 30.0
+#: Merging takes seconds, and a sign-in only has a window to open.
+ORDER_TIMEOUT_SECONDS = 120.0
 #: What a task carries of the call. Enough to resolve "eso", not a transcript to pay for.
 CONTEXT_TURNS = 8
 CONTEXT_TURN_CHARS = 240
@@ -178,6 +182,8 @@ class BrainTask:
     long_running: bool = False
     #: A task id from this call, or "last": carry on that thread.
     follow_up: str = ""
+    #: The user was told to sign in once, for this task.
+    asked_to_sign_in: bool = False
     #: Changing Jarvis's own code, in this repository (`selfwork.REPOS`).
     repo: str = ""
     #: Set once the work is on the PC.
@@ -581,6 +587,16 @@ class Bridge:
                 lines.append(f"{role}: {said[:CONTEXT_TURN_CHARS]}")
         return "\n".join(lines[-CONTEXT_TURNS:])
 
+    def _last_user_turn(self) -> str:
+        history = getattr(self._voice(), "_chat_ctx", None)
+        turns = [
+            said
+            for item in getattr(history, "items", [])
+            if getattr(item, "role", None) == "user"
+            and (said := getattr(item, "text_content", None))
+        ]
+        return turns[-1] if turns else ""
+
     def _remembered(self) -> str:
         text = getattr(self._voice(), "_memory_text", "")
         return text[:CONTEXT_MEMORY_CHARS] if isinstance(text, str) else ""
@@ -875,6 +891,48 @@ class Bridge:
         logger.info("Gemini search failed; answered through Tavily by %s", writer.id)
         return answer, writer
 
+    async def merge_pull_request(self, repo: str, number: int, user_words: str) -> str:
+        """Merge a pull request of Jarvis's, on the user's own words. What to tell them."""
+        if not merge_approved(user_words, self._last_user_turn()):
+            return (
+                "Not merged. Ask the user whether they tried the change by hand and want it "
+                "merged. It needs their own last words saying both."
+            )
+        return await self._order_on_pc(MERGE, f"Fusionar {repo}#{number}", f"{repo}#{number}")
+
+    async def connect_claude_account(self) -> str:
+        """Open Claude's own sign-in on the PC. What to tell the user."""
+        return await self._order_on_pc(LOGIN, "Conectar la cuenta de Claude", "login")
+
+    async def _order_on_pc(self, mode: str, title: str, order: str) -> str:
+        """Only the room's own user, as with any work on the PC: anyone can talk on a phone."""
+        if self.jobs is None or not self.user_id or as_user_id(self.kwami_id) is None:
+            return "This can only be ordered from the app."
+        if not await self.jobs.runner_online(self.user_id):
+            return "The user's PC is not there now, so this cannot be done."
+        job = BrainJob(self.user_id, self.kwami_id, title, order, mode=mode)
+        if not await self.jobs.enqueue(job):
+            return "The order could not be queued."
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        while loop.time() - started < ORDER_TIMEOUT_SECONDS:
+            await asyncio.sleep(THINK_POLL_FAST_SECONDS)
+            current = await self.jobs.get(job.id)
+            if current is not None and current.finished:
+                await self.jobs.mark_delivered(job.id)
+                return current.result
+        await self.jobs.request_cancel(job.id)
+        return "The PC did not get to it in time."
+
+    async def sites_to_connect(self) -> str:
+        """The user's sites and how each one stands, for the voice to go through."""
+        if self.jobs is None or not self.user_id:
+            return "This can only be asked from the app."
+        sites = await self.jobs.sites(self.user_id)
+        if not sites:
+            return "The user has signed in to no sites through you yet."
+        return "\n".join(f"{site['host']} ({site['url']}): {site['state']}" for site in sites)
+
     async def runner_online(self) -> bool:
         return bool(self.jobs and self.user_id and await self.jobs.runner_online(self.user_id))
 
@@ -929,6 +987,9 @@ class Bridge:
             if job is None:  # a blip: the row is still there
                 continue
             brain_task.progress = job.progress
+            if job.progress.startswith(SIGN_IN_TOOL) and not brain_task.asked_to_sign_in:
+                brain_task.asked_to_sign_in = True
+                self._ask_to_sign_in(job.progress)
             if job.finished:
                 await jobs.mark_delivered(job_id)
                 self.ledger.note_spend(model.id, job.cost_usd)
@@ -1232,6 +1293,19 @@ class Bridge:
         if len(spoken) > QUICK_ANSWER_CHARS or any(m in spoken for m in ("http", "**", "#", "|")):
             return ""
         return spoken
+
+    def _ask_to_sign_in(self, progress: str) -> None:
+        """A run is waiting on the user, and only speaking up gets them to the window."""
+        if self.session is None:
+            return
+        site = progress.partition(": ")[2] or "A website"
+        self.session.generate_reply(
+            instructions=(
+                f"Tell the user, in very few words, that {site} asks them to sign in, that "
+                "the page is open in the Chrome window on their computer, and that you carry "
+                "on by yourself once they are in. You never see what they type."
+            )
+        )
 
     async def _say_still_working(self, brain_task: BrainTask) -> None:
         """A simple answer goes unannounced, so if it is slow the silence needs breaking."""

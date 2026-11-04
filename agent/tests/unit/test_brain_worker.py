@@ -397,7 +397,16 @@ async def test_the_loop_survives_a_failing_tick_and_stops(
             stop.set()
         raise RuntimeError("down")
 
-    worker.tick = failing  # type: ignore[method-assign]
+    worker.start_next = failing  # type: ignore[method-assign]
     await asyncio.wait_for(worker.run_forever(stop), 2)
     assert calls == 2
     assert "tick failed" in caplog.text
+
+
+async def test_with_the_slots_full_the_loop_waits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(worker_module, "IDLE_POLL_SECONDS", 0.001)
+    monkeypatch.setattr(worker_module, "WORK_SLOTS", 0)
+    worker = _worker(FakeJobs(), Recorder(), tmp_path)
+    assert await worker.start_next() is False

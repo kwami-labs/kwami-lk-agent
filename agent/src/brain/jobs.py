@@ -24,6 +24,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
 from ..adapters.supabase import SupabaseClient
 
@@ -263,6 +264,45 @@ class JobStore:
         # Before migration 024: being seen matters more than saying what it can do.
         return await self._store.insert(
             "brain_runners", row, on_conflict="user_id,runner_id", what="the worker's heartbeat"
+        )
+
+    async def sites(self, user_id: str) -> list[dict[str, Any]]:
+        rows = await self._store.select(
+            "brain_sites",
+            {"select": "*", "user_id": f"eq.{user_id}", "order": "created_at.asc"},
+            what="the user's sites",
+        )
+        return list(rows or [])
+
+    async def due_sites(self, user_id: str, older_than_seconds: float) -> list[dict[str, Any]]:
+        """Sites worth another look: the ones that refuse this browser never change."""
+        rows = await self._store.select(
+            "brain_sites",
+            {
+                "select": "*",
+                "user_id": f"eq.{user_id}",
+                "state": "in.(connected,signed_out)",
+                "checked_at": f"lt.{_ago(older_than_seconds)}",
+            },
+            what="the sites due a check",
+        )
+        return list(rows or [])
+
+    async def note_site(
+        self, user_id: str, kwami_id: str, url: str, state: str, host: str = ""
+    ) -> bool:
+        return await self._store.insert(
+            "brain_sites",
+            {
+                "user_id": user_id,
+                "kwami_id": kwami_id,
+                "host": host or (urlparse(url).hostname or "").lower(),
+                "url": url,
+                "state": state,
+                "checked_at": _now(),
+            },
+            on_conflict="user_id,host",
+            what="a site's state",
         )
 
     async def claim(self, user_id: str, runner_id: str, thinking: bool = False) -> BrainJob | None:

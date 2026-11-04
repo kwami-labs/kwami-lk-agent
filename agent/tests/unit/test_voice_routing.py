@@ -22,7 +22,7 @@ from src.brain.config import BrainConfig, BrainModel, default_brain
 from src.brain.ledger import Ledger
 from src.brain.providers import BrainAnswer, BrainRequest
 from src.brain.router import can_delegate, tavily_writer
-from src.domain.prompt import SEARCH_DELEGATION_NOTE
+from src.domain.prompt import QUICK_LOOKUP_NOTE, SEARCH_DELEGATION_NOTE
 from src.domain.tool_gating import BRAIN_SEARCH_TOOLS
 from src.settings import Settings, set_settings
 
@@ -50,7 +50,7 @@ def test_the_brain_delegates_with_a_remote_model_only() -> None:
     assert not can_delegate(local_only, BRAIN_KEYS)
 
 
-def test_with_the_brain_on_the_voice_has_no_search_tool() -> None:
+def test_with_the_brain_on_the_voice_keeps_only_the_quick_search() -> None:
     from src.agent import KwamiAgent
 
     set_settings(Settings(**SEARCH_CREDENTIALS, provider_keys=dict(BRAIN_KEYS)))
@@ -60,7 +60,8 @@ def test_with_the_brain_on_the_voice_has_no_search_tool() -> None:
         assert not (BRAIN_SEARCH_TOOLS & names)
         assert "delegate_task" in names
         assert SEARCH_DELEGATION_NOTE in agent.instructions
-        assert "web_search" not in {_tool.info.name for _tool in agent.available_builtin_tools()}
+        assert "web_search" in names
+        assert QUICK_LOOKUP_NOTE in agent.instructions
     finally:
         set_settings(None)
 

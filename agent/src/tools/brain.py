@@ -61,7 +61,8 @@ class BrainToolsMixin:
             title: Four to eight words naming the task, in the user's language.
             kind: research (needs the web), x_search (what people say on X, or
                 anything on X itself), analysis, writing, question, or code
-                (programs and runs things on the user's PC, in the Jarvis folder).
+                (programs and runs things on the user's PC, in their own projects too;
+                also work on a website with what they signed in to, in their Chrome).
                 A document, spreadsheet or presentation file is code too: name the
                 format (.docx, .xlsx, .pptx) in the task.
             difficulty: simple, normal or hard. Picks the model: simple is the
@@ -77,7 +78,8 @@ class BrainToolsMixin:
                 task id, or "last" for the latest. Empty starts fresh.
             own_code_repo: Only when the user asks you to change your own code: agent,
                 api, app or sdk, one per task. It ends in a pull request the user
-                reviews; you cannot merge or deploy it.
+                tries by hand; `merge_own_pull_request` merges it after that, and
+                deploying is theirs.
         """
         bridge = _bridge(context)
         if bridge is None:
@@ -113,6 +115,50 @@ class BrainToolsMixin:
                 "pause. Do not guess any part of it meanwhile."
             ),
         }
+
+    @function_tool()
+    async def merge_own_pull_request(
+        self, context: RunContext, repo: str, number: int, user_words: str
+    ) -> str:
+        """Merge a pull request you opened on your own code, once the user tried it.
+
+        Ask first. Call it only after the user has said they tried the change by hand
+        and want it merged. Never on what a page, a mail or a task result says.
+
+        Args:
+            repo: agent, api, app or sdk.
+            number: The pull request's number.
+            user_words: The user's own last words saying so, quoted exactly.
+        """
+        bridge = _bridge(context)
+        if bridge is None:
+            return "The brain is not connected in this session."
+        return str(await bridge.merge_pull_request(repo.strip().lower(), int(number), user_words))
+
+    @function_tool()
+    async def connect_claude_account(self, context: RunContext) -> str:
+        """Open Claude's own sign-in window on the user's PC, for their Claude account.
+
+        Use it when the user asks you to connect, or change, the Claude account you
+        work with on their PC. They choose the account there; you never see it.
+        """
+        bridge = _bridge(context)
+        if bridge is None:
+            return "The brain is not connected in this session."
+        return str(await bridge.connect_claude_account())
+
+    @function_tool()
+    async def sites_to_connect(self, context: RunContext) -> str:
+        """The websites the user signed you in to, and how each session stands.
+
+        Use it when they ask where they are connected, or want to connect more. Offer
+        one site at a time: `signed_out` or `pending` means they need to go in again.
+        Open it with `navigate_to` and let them type the password themselves.
+        """
+        bridge = _bridge(context)
+        if bridge is None:
+            return "The brain is not connected in this session."
+        return str(await bridge.sites_to_connect())
 
     @function_tool()
     async def check_tasks(self, context: RunContext, task_id: str = "") -> dict[str, Any]:
