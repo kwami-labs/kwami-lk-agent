@@ -27,6 +27,7 @@ the folder is deleted.
 
 from __future__ import annotations
 
+import contextlib
 import mimetypes
 import os
 import re
@@ -40,8 +41,29 @@ from pathlib import Path, PureWindowsPath
 from typing import TYPE_CHECKING, Any
 
 from ..utils.logging import get_logger
-from .config import ExecutorConfig, extra_executor_folders, resolve_executor_folder
+from .audit import back_up, record
+from .browser_tool import ALLOWED_TOOLS as BROWSER_TOOLS
+from .browser_tool import GUIDANCE as BROWSER_GUIDANCE
+from .browser_tool import SERVER_NAME as BROWSER_SERVER
+from .browser_tool import (
+    SIGN_IN_TOOL,
+    BrowserTools,
+    browser_available,
+    browser_server,
+    sign_in_progress,
+)
+from .browser_tool import TOOL_PREFIX as BROWSER_PREFIX
+from .config import (
+    ExecutorConfig,
+    executor_in_cloud,
+    extra_executor_folders,
+    resolve_executor_folder,
+    shut_executor_folders,
+)
 from .google_tool import ALLOWED_TOOL, SERVER_NAME, google_available, google_server
+from .supabase_tool import ALLOWED_TOOL as SUPABASE_TOOL
+from .supabase_tool import SERVER_NAME as SUPABASE_SERVER
+from .supabase_tool import supabase_available, supabase_server
 from .team import TEAM_GUIDANCE, agent_definitions
 
 if TYPE_CHECKING:
@@ -72,6 +94,8 @@ _FULL_TOOLS = [*_EDIT_TOOLS, "Bash", "Agent", "Task"]
 _THINK_TOOLS = ["WebSearch", "WebFetch"]
 #: What can carry data out of a run, or bring in orders from outside it.
 _OPEN_WORLD_TOOLS = frozenset({"Bash", "WebSearch", "WebFetch", "Agent", "Task"})
+#: All a run with the browser keeps: nothing here reaches the user's files or sessions.
+_BROWSER_COMPANY = frozenset({"WebSearch", "WebFetch", "TodoWrite"})
 #: Where a path that starts with "/" may begin in a command: its start, or after
 #: whitespace, a quote, `=`, a bracket or a shell operator -- not mid-word, where
 #: the "/a/" of "/home/u/a/b.txt" or "src/a/b.py" is no path of its own.
@@ -121,7 +145,10 @@ def _system_append() -> str:
     if not folders:
         return SYSTEM_APPEND
     named = "\n".join(f"  {folder}" for folder in folders)
-    return f"{SYSTEM_APPEND}\nThe user opened these folders of their PC to you:\n{named}\n"
+    return (
+        f"{SYSTEM_APPEND}\nThe user opened these folders of their PC to you, and their projects "
+        f"are there:\n{named}\n"
+    )
 
 
 @dataclass
@@ -225,6 +252,9 @@ def child_env(api_key: str) -> dict[str, str]:
         # On a login, Claude Code would load the account's connectors (seen 2026-11-02:
         # Docs and Supabase): what a web page says must not get near them.
         "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
+        # The browser's `sign_in` waits for the user, for minutes.
+        "MCP_TOOL_TIMEOUT": "900000",
+        "CLAUDE_CODE_STREAM_CLOSE_TIMEOUT": "900000",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_TERMINAL_PROMPT": "0",
@@ -240,6 +270,8 @@ def child_env(api_key: str) -> dict[str, str]:
 def _progress_line(block: Any) -> str:
     """A tool call in a few words, for whoever asks how the task is going."""
     tool_input = block.input if isinstance(block.input, dict) else {}
+    if block.name == SIGN_IN_TOOL:
+        return sign_in_progress(str(tool_input.get("url", "")))
     who = tool_input.get("subagent_type")
     if who:
         what = tool_input.get("description") or ""
@@ -258,7 +290,32 @@ _NEVER_OPENED = frozenset(
         ".credentials.json",
         "login data",
         "cookies",
+        # The work thread's own secrets and the Chrome profile it signs in with.
+        ".jarvis",
+        ".claude.json",
+        ".docker",
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        "credentials",
     }
+)
+#: Shut below an opened folder: where programs keep their tokens and their sessions.
+#: All but the system's temporary folder, which ordinary programs work in.
+_SHUT_BELOW_OPENED = "appdata"
+_TEMP_BELOW_OPENED = ("appdata", "local", "temp")
+#: This checkout: the guard itself, and the mirrors that publish with credentials
+#: (`selfwork`). Code that rewrites its own guard has no guard from the next restart on.
+_OWN_CODE = Path(__file__).resolve().parents[3]
+#: The same places as a command names them. `cd ~` is allowed once the profile is open,
+#: and from there a relative path has no drive or home for the scan below to read.
+_SHUT_IN_COMMAND = re.compile(
+    r"""(^|[\\/\s"'=])("""
+    r"\.ssh|\.aws|\.azure|\.gnupg|\.kube|\.claude|\.claude\.json|\.credentials\.json"
+    r"|\.jarvis|\.docker|\.git-credentials|\.netrc|\.npmrc|\.pypirc|appdata(?![\\/]local[\\/]temp)|[\w.-]+\.env"
+    r""")($|[\\/\s"'])""",
+    re.IGNORECASE,
 )
 
 
@@ -293,6 +350,15 @@ def _glob_leaves_folder(pattern: str) -> bool:
     )
 
 
+def _within(target: Path, folder: Path) -> bool:
+    return target == folder or folder in target.parents
+
+
+def _shut_below(relative: Path) -> bool:
+    parts = tuple(part.lower() for part in relative.parts)
+    return _SHUT_BELOW_OPENED in parts and parts[:3] != _TEMP_BELOW_OPENED
+
+
 def _inside(root: Path, raw: str) -> bool:
     # A drive-letter or UNC path is absolute only on Windows. On the Linux cloud
     # executor Path() reads "C:\Users\..." as a relative name under root and
@@ -309,7 +375,14 @@ def _inside(root: Path, raw: str) -> bool:
     # whole profile. A name, not a location, because they can sit at any depth.
     if {part.lower() for part in target.parts} & _NEVER_OPENED:
         return False
-    return any(target == folder or folder in target.parents for folder in extra_executor_folders())
+    if target.name.lower().endswith(".env") or _within(target, _OWN_CODE):
+        return False
+    if any(_within(target, folder) for folder in shut_executor_folders()):
+        return False
+    return any(
+        _within(target, folder) and not _shut_below(target.relative_to(folder))
+        for folder in extra_executor_folders()
+    )
 
 
 def _command_paths(command: str, *, windows: bool) -> list[tuple[str, str]]:
@@ -329,7 +402,7 @@ def _command_paths(command: str, *, windows: bool) -> list[tuple[str, str]]:
     return paths
 
 
-class _GoogleLane:
+class _Lanes:
     """One run reaches the user's Google or the open world, never both.
 
     Mail and web pages are written by outsiders. A run that could read a message and
@@ -337,17 +410,44 @@ class _GoogleLane:
     and a prompt line is no defence. So the first of the two to be used closes the other.
     A run that carries on an earlier one may hold anything already, so it starts closed
     to Google, and a run that touched Google leaves no session to carry on.
+
+    The browser is both at once: pages written by outsiders, with what the user signed
+    in to, and a way out for anything it is given. So a run has it and only the web, or
+    has everything else and not it.
     """
 
     def __init__(self, resuming: bool) -> None:
         self.open_world = resuming
         self.google = False
+        self.browser = False
+        self.acted = resuming
+
+    @property
+    def closed_session(self) -> bool:
+        """Whether this run leaves no session for another to carry on."""
+        return self.google or self.browser
 
     def refuse(self, tool_name: str) -> str | None:
-        if tool_name == ALLOWED_TOOL:
-            if self.open_world:
+        if tool_name.startswith(BROWSER_PREFIX):
+            if self.acted or self.google:
                 return (
-                    "Google is closed in this task: it already ran commands or read the web, "
+                    "The browser is closed in this task: it already used commands, files or "
+                    "Google, or carries on an earlier task. Say so: it goes as a new task."
+                )
+            self.browser = True
+            return None
+        if tool_name not in _BROWSER_COMPANY:
+            if self.browser:
+                return (
+                    f"{tool_name} is closed in this task: it has used the browser. Finish "
+                    "with what you have and tell the user what is left."
+                )
+            self.acted = True
+        if tool_name in (ALLOWED_TOOL, SUPABASE_TOOL):
+            if self.open_world:
+                what = "Google" if tool_name == ALLOWED_TOOL else "The database"
+                return (
+                    f"{what} is closed in this task: it already ran commands or read the web, "
                     "or carries on an earlier task. Tell the user to ask for it as a new task."
                 )
             self.google = True
@@ -396,6 +496,8 @@ def check_tool_call(root: Path, tool_name: str, tool_input: dict[str, Any]) -> s
         for home in _HOME_PATH.finditer(command):
             if not _inside(root, str(Path.home() / (home.group(1) or ""))):
                 return f"{home.group(0)} is outside the Jarvis folder."
+        if _SHUT_IN_COMMAND.search(command):
+            return "That place holds keys or sessions, and it stays shut."
     return None
 
 
@@ -465,17 +567,21 @@ async def _run_in(
             "El ejecutor local no está instalado (falta claude-agent-sdk).", 0.0, False
         )
 
-    lane = _GoogleLane(resuming=bool(resume))
+    lane = _Lanes(resuming=bool(resume))
+    on_the_pc = not executor_in_cloud()
 
     async def guard(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
     ) -> HookJSONOutput:
         tool_input = input_data.get("tool_input")
         tool_name = str(input_data.get("tool_name", ""))
-        reason = check_tool_call(
-            root, tool_name, tool_input if isinstance(tool_input, dict) else {}
-        ) or lane.refuse(tool_name)
+        call = tool_input if isinstance(tool_input, dict) else {}
+        reason = check_tool_call(root, tool_name, call) or lane.refuse(tool_name)
+        if on_the_pc:
+            record(tool_name, call, reason)
         if reason is None:
+            if on_the_pc:
+                back_up(root, tool_name, call)
             return {}
         logger.info("Executor refused %s: %s", input_data.get("tool_name"), reason)
         return {
@@ -517,7 +623,7 @@ async def _run_in(
         options.allowed_tools = list(_FULL_TOOLS)
         options.permission_mode = "bypassPermissions"
         # Only here: a member with its own tool list must not widen a narrower mode.
-        options.agents = agent_definitions(AgentDefinition)
+        options.agents = agent_definitions(AgentDefinition, root if on_the_pc else None)
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",
@@ -532,6 +638,31 @@ async def _run_in(
 
         options.mcp_servers = {SERVER_NAME: google_server(tool, create_sdk_mcp_server)}
         options.allowed_tools = [*options.allowed_tools, ALLOWED_TOOL]
+    if config.permissions == "full_no_push" and supabase_available(config.google_user_id):
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+
+        servers = options.mcp_servers if isinstance(options.mcp_servers, dict) else {}
+        options.mcp_servers = {
+            **servers,
+            SUPABASE_SERVER: supabase_server(tool, create_sdk_mcp_server),
+        }
+        options.allowed_tools = [*options.allowed_tools, SUPABASE_TOOL]
+    browser: BrowserTools | None = None
+    if config.permissions == "full_no_push" and browser_available(config.browser_user_id):
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+
+        browser = BrowserTools(config.browser_user_id)
+        servers = options.mcp_servers if isinstance(options.mcp_servers, dict) else {}
+        options.mcp_servers = {
+            **servers,
+            BROWSER_SERVER: browser_server(browser, tool, create_sdk_mcp_server),
+        }
+        options.allowed_tools = [*options.allowed_tools, *BROWSER_TOOLS]
+        options.system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": _system_append() + TEAM_GUIDANCE + BROWSER_GUIDANCE,
+        }
     if resume:
         options.resume = resume
     if effort:
@@ -563,8 +694,13 @@ async def _run_in(
             f"El ejecutor local falló: {e}",
             cost,
             False,
-            session_id="" if lane.google else session_id,
+            session_id="" if lane.closed_session else session_id,
         )
 
+    finally:
+        if browser is not None:
+            with contextlib.suppress(Exception):
+                await browser.close()
+
     final = texts[-1].strip() if texts else "El ejecutor terminó sin decir nada."
-    return ExecutorResult(final, cost, ok, session_id="" if lane.google else session_id)
+    return ExecutorResult(final, cost, ok, session_id="" if lane.closed_session else session_id)

@@ -15,8 +15,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
+import re
 import time
+from collections.abc import Callable
 from typing import Any
 
 from ..utils.logging import get_logger
@@ -39,6 +42,17 @@ IDLE_TIMEOUT_SECONDS = 5 * 60  # 5 minutes
 BLANK_PAGE = "about:blank"
 #: Chromium's own page for a request that failed, the proxy's refusals included.
 ERROR_PAGE_SCHEME = "chrome-error:"
+
+#: What a sign-in looks like. A second step (a code, a phone) has no password field,
+#: so the address counts too.
+_PASSWORD_FIELD = "!!document.querySelector('input[type=password]')"  # noqa: S105
+_SIGN_IN_ADDRESS = re.compile(
+    r"(^|[/._-])(signin|sign-in|login|log-in|logon|challenge|oauth|sso|mfa|2fa|two-factor"
+    r"|identifier|sessions)([/._?#-]|$)",
+    re.IGNORECASE,
+)
+#: Google's refusal of a browser it does not trust: no password will get through.
+_SIGN_IN_REFUSED = re.compile(r"may not be secure|no sean? segur", re.I)
 
 #: How the built-in browser, which has no live view, shows itself in the panel.
 FRAME_TOPIC = "browser_frame"
@@ -414,11 +428,13 @@ class CloudBrowserSession:
         self,
         element_id: str = "",
         description: str = "",
+        refuse: Callable[[str], str | None] | None = None,
     ) -> str:
         """Click an element on the page.
 
         Uses element_id (from read_page) for precise coordinate clicks,
-        or falls back to description-based matching.
+        or falls back to description-based matching. `refuse` reads the label of
+        what was found, and what it returns is said instead of clicking.
         """
         self._ensure_active()
         self._reset_idle_timer()
@@ -456,6 +472,10 @@ class CloudBrowserSession:
 
         if not target:
             return f"Could not find element to click: {element_id or description}"
+
+        refusal = refuse(target.get("label") or "") if refuse else None
+        if refusal:
+            return refusal
 
         x = target.get("x", 0)
         y = target.get("y", 0)
@@ -530,6 +550,31 @@ class CloudBrowserSession:
             return f"JavaScript executed successfully. Result: {result}"
         except Exception as e:
             return f"Failed to execute JavaScript: {e}"
+
+    async def on_sign_in_page(self) -> bool:
+        """Whether the page in front is asking the user to sign in. False when unsure."""
+        self._ensure_active()
+        self._reset_idle_timer()
+        try:
+            address = str(await self._connection.evaluate("location.host + location.pathname"))
+            if _SIGN_IN_ADDRESS.search(address):
+                return True
+            return bool(await self._connection.evaluate(_PASSWORD_FIELD))
+        except Exception:
+            return False
+
+    async def sign_in_refused(self) -> bool:
+        """Whether the site says it will not let this browser sign in. False when unsure."""
+        try:
+            text = await self._connection.evaluate("document.body.innerText.slice(0, 2000)")
+        except Exception:
+            return False
+        return bool(_SIGN_IN_REFUSED.search(str(text)))
+
+    async def bring_to_front(self) -> None:
+        """Put this tab in front of the user. Nothing happens if it cannot."""
+        with contextlib.suppress(Exception):
+            await self._connection.send("Page.bringToFront")
 
     # -- Internal helpers ----------------------------------------------------
 

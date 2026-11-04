@@ -18,6 +18,7 @@ exactly one entry point.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -410,3 +411,137 @@ async def test_no_vendor_able_to_browse_is_refused_in_its_own_words() -> None:
 
     assert was_refused(result)
     assert str(result) == "No browser could be opened. Browser Use has no credit."
+
+
+class _SignInSession:
+    is_active = True
+    is_builtin = False
+    runs_locally = True
+
+    def __init__(self, answer: Any) -> None:
+        self.answer = answer
+        self.typed: list[str] = []
+
+    async def on_sign_in_page(self) -> Any:
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return self.answer
+
+    async def navigate(self, url: str) -> str:
+        return "Opened."
+
+    async def read_page(self) -> str:
+        return "Page title: x"
+
+    async def type_text(self, text: str, **kwargs: Any) -> str:
+        self.typed.append(text)
+        return "typed"
+
+
+def _with_session(tools: Any, session: _SignInSession) -> Any:
+    async def get() -> _SignInSession:
+        return session
+
+    tools._get_browser_session = get
+    return tools
+
+
+async def _front() -> None:
+    return None
+
+
+async def test_a_page_that_asks_to_sign_in_joins_the_list(monkeypatch) -> None:
+    tools, _ = _tools()
+    from src.tools import builtin
+
+    noted: list[tuple[str, str]] = []
+
+    class Jobs:
+        fails = False
+
+        async def note_site(self, _user: str, _kwami: str, url: str, state: str) -> bool:
+            if self.fails:
+                raise RuntimeError("down")
+            noted.append((url, state))
+            return True
+
+    bridge = SimpleNamespace(jobs=Jobs(), user_id="u", kwami_id="k")
+    monkeypatch.setattr(builtin, "deps_from_context", lambda _c: SimpleNamespace(bridge=bridge))
+    await tools._remember_site(None, "https://a.b")
+    assert noted == [("https://a.b", "signed_out")]
+    bridge.jobs.fails = True
+    await tools._remember_site(None, "https://c.d")  # Never in the way of the call.
+    assert len(noted) == 1
+    bridge.jobs = None
+    await tools._remember_site(None, "https://e.f")
+    assert len(noted) == 1
+
+
+async def test_the_voice_is_told_a_page_asks_to_sign_in(monkeypatch) -> None:
+    tools, _ = _tools()
+    from src.tools import builtin
+
+    async def public(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(builtin, "validate_url_async", public)
+    session = _SignInSession(True)
+    session.bring_to_front = _front  # type: ignore[attr-defined]
+    _with_session(tools, session)
+    assert builtin.SIGN_IN_HINT in await tools.navigate_to(None, "https://github.com/login")
+    assert builtin.SIGN_IN_HINT in await tools.read_navigation_page(None)
+
+
+async def test_the_voice_never_types_on_a_sign_in_page() -> None:
+    tools, _ = _tools()
+    from src.tools import builtin
+
+    session = _SignInSession(True)
+    _with_session(tools, session)
+    assert await tools.type_in_navigation(None, "hola") == builtin.SIGN_IN_HINT
+    assert session.typed == []
+
+
+@pytest.mark.parametrize("answer", [False, RuntimeError("x")])
+async def test_elsewhere_the_voice_carries_on(answer: Any) -> None:
+    tools, _ = _tools()
+    from src.tools import builtin
+
+    session = _SignInSession(answer)
+    _with_session(tools, session)
+    assert builtin.SIGN_IN_HINT not in await tools.read_navigation_page(None)
+    assert await tools.type_in_navigation(None, "hola") == "typed"
+
+
+async def test_a_sign_in_page_in_the_panel_is_not_remembered(monkeypatch) -> None:
+    tools, _ = _tools()
+    from src.tools import builtin
+
+    async def public(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(builtin, "validate_url_async", public)
+    session = _SignInSession(True)
+    session.runs_locally = False  # type: ignore[misc]
+    _with_session(tools, session)
+    assert builtin.SIGN_IN_HINT in await tools.navigate_to(None, "https://github.com/login")
+
+
+async def test_the_built_in_browser_says_it_cannot_sign_in(monkeypatch) -> None:
+    """Its panel shows pictures, so "type it yourself" would leave the user stuck."""
+    tools, _ = _tools()
+    from src.tools import builtin
+
+    async def public(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(builtin, "validate_url_async", public)
+    session = _SignInSession(True)
+    session.is_builtin = True  # type: ignore[misc]
+    session.runs_locally = False  # type: ignore[misc]
+    _with_session(tools, session)
+    opened = await tools.navigate_to(None, "https://github.com/login")
+    assert builtin.NO_SIGN_IN_HINT in opened and builtin.SIGN_IN_HINT not in opened
+    assert builtin.NO_SIGN_IN_HINT in await tools.read_navigation_page(None)
+    assert await tools.type_in_navigation(None, "hola") == builtin.NO_SIGN_IN_HINT
+    assert session.typed == []

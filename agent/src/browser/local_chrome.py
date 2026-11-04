@@ -81,6 +81,12 @@ def _active_port(profile: Path) -> int | None:
         return None
 
 
+async def window_open(user_id: str) -> bool:
+    """Whether this user's Chrome is open now: someone may be working in it."""
+    port = _active_port(profile_dir_for(user_id))
+    return bool(port and await _version_info(port))
+
+
 async def _version_info(port: int) -> dict | None:
     """What Chrome says about itself on `port`, or None if nothing answers."""
     try:
