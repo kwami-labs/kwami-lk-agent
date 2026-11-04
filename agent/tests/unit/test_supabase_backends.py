@@ -477,6 +477,43 @@ async def test_an_unknown_owner_bills_the_identity(store: SupabaseClient) -> Non
     assert bill.await_args.args[0] == USER
 
 
+@respx.mock
+async def test_an_owner_lookup_that_blows_up_bills_the_identity(
+    store: SupabaseClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    respx.post(f"{REST}/agent_usage").mock(return_value=httpx.Response(201))
+    monkeypatch.setattr(
+        "src.adapters.supabase.kwami_owner", AsyncMock(side_effect=RuntimeError("no"))
+    )
+    reporter, bill = _billed(store)
+
+    assert await reporter.report(USER, "room-1", _tracker_with_usage(), kwami_id=KWAMI) is True
+
+    assert bill.await_args.args[0] == USER
+
+
+@respx.mock
+async def test_a_copy_that_blows_up_does_not_undo_the_bill(
+    store: SupabaseClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    reporter, _ = _billed(store)
+    monkeypatch.setattr(reporter._copy, "report", AsyncMock(side_effect=RuntimeError("no")))
+
+    assert await reporter.report(USER, "room-1", _tracker_with_usage()) is True
+
+
+@respx.mock
+async def test_a_bill_that_blows_up_is_a_failed_report_and_keeps_the_copy(
+    store: SupabaseClient,
+) -> None:
+    copy = respx.post(f"{REST}/agent_usage").mock(return_value=httpx.Response(201))
+    reporter, bill = _billed(store)
+    bill.side_effect = RuntimeError("no")
+
+    assert await reporter.report(USER, "room-1", _tracker_with_usage()) is False
+    assert copy.called
+
+
 def test_writing_supabase_directly_still_bills_through_the_api() -> None:
     settings = _direct()
     assert isinstance(create_usage_reporter(settings), SupabaseUsageReporter)
