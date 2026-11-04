@@ -44,8 +44,12 @@ BLANK_PAGE = "about:blank"
 ERROR_PAGE_SCHEME = "chrome-error:"
 
 #: What a sign-in looks like. A second step (a code, a phone) has no password field,
-#: so the address counts too.
-_PASSWORD_FIELD = "!!document.querySelector('input[type=password]')"  # noqa: S105
+#: so the address counts too. A field that is not showing does not count: plenty of pages
+#: carry a hidden login form, and they would look signed out and refuse all typing.
+_SIGN_IN_FIELD_SHOWING = (
+    "[...document.querySelectorAll('input[type=password]')]"
+    ".some(e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden')"
+)
 _SIGN_IN_ADDRESS = re.compile(
     r"(^|[/._-])(signin|sign-in|login|log-in|logon|challenge|oauth|sso|mfa|2fa|two-factor"
     r"|identifier|sessions)([/._?#-]|$)",
@@ -559,7 +563,7 @@ class CloudBrowserSession:
             address = str(await self._connection.evaluate("location.host + location.pathname"))
             if _SIGN_IN_ADDRESS.search(address):
                 return True
-            return bool(await self._connection.evaluate(_PASSWORD_FIELD))
+            return bool(await self._connection.evaluate(_SIGN_IN_FIELD_SHOWING))
         except Exception:
             return False
 
