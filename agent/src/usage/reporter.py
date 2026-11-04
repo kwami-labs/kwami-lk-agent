@@ -3,13 +3,15 @@
 Called when a session ends to report AI resource consumption
 so the credits system can deduct from the user's balance.
 
-Without a Kwami API (LiveKit Cloud writing the user's Supabase directly),
+Where the agent writes the user's Supabase directly (LiveKit Cloud),
 `SupabaseUsageReporter` records the same summary as rows in `agent_usage`:
-counted, not billed. `create_usage_reporter()` picks one.
+counted, not billed. `BilledUsageReporter` does both, so writing Supabase directly
+does not stop a session being charged. `create_usage_reporter()` picks one.
 """
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import aiohttp
@@ -26,6 +28,8 @@ logger = get_logger("usage.reporter")
 # Kept below SessionState.USAGE_REPORT_TIMEOUT_SECONDS so the inner call
 # fails first and we log the HTTP cause rather than a bare cancellation.
 REPORT_TIMEOUT_SECONDS = 4.0
+# What is left of that budget for finding who to bill.
+OWNER_LOOKUP_SECONDS = 0.75
 
 
 class UsageReporter:
@@ -183,11 +187,63 @@ class SupabaseUsageReporter:
         return stored
 
 
+class BilledUsageReporter:
+    """Charges the session through the Kwami API, and keeps the `agent_usage` copy.
+
+    The copy never decides the result: a session is reported when it was charged.
+    The bill goes to the kwami's owner, as the copy does: the identity handed over
+    can be the kwami id, or a phone caller's.
+    """
+
+    def __init__(self, billing: UsageReporter, store: SupabaseClient) -> None:
+        self._billing = billing
+        self._store = store
+        self._copy = SupabaseUsageReporter(store)
+
+    async def _owner(self, kwami_id: str | None) -> str | None:
+        from ..adapters.supabase import kwami_owner
+
+        if not kwami_id:
+            return None
+        try:
+            return await asyncio.wait_for(
+                kwami_owner(self._store, kwami_id), timeout=OWNER_LOOKUP_SECONDS
+            )
+        except Exception:
+            logger.warning("Could not read the kwami's owner; billing the session's identity")
+            return None
+
+    async def report(
+        self,
+        user_id: str,
+        session_id: str,
+        tracker: UsageTracker,
+        *,
+        kwami_id: str | None = None,
+    ) -> bool:
+        owner = await self._owner(kwami_id)
+        billed, copied = await asyncio.gather(
+            self._billing.report(owner or user_id, session_id, tracker, kwami_id=kwami_id),
+            self._copy.report(user_id, session_id, tracker, kwami_id=kwami_id),
+            return_exceptions=True,
+        )
+        if isinstance(copied, BaseException):
+            logger.warning("Could not keep the usage copy: %s", type(copied).__name__)
+        if isinstance(billed, BaseException):
+            logger.error("Could not bill session %s: %s", session_id, type(billed).__name__)
+            return False
+        return billed
+
+
 def create_usage_reporter(settings: Settings | None = None) -> Any:
-    """`agent_usage` in Supabase when there is no Kwami API, the API otherwise."""
+    """The API when there is one, with a copy in `agent_usage` when writing Supabase too."""
     from ..adapters.supabase import direct_supabase
 
+    settings = settings or get_settings()
     store = direct_supabase(settings)
-    if store is not None:
+    if store is None:
+        return UsageReporter()
+    if not settings.kwami_api_enabled:
         return SupabaseUsageReporter(store)
-    return UsageReporter()
+    billing = UsageReporter(api_url=settings.kwami_api_url, api_key=settings.kwami_api_key)
+    return BilledUsageReporter(billing, store)

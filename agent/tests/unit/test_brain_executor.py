@@ -20,8 +20,8 @@ import claude_agent_sdk
 import pytest
 from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ThinkingBlock, ToolUseBlock
 
+from src.brain import audit, executor
 from src.brain import config as brain_config
-from src.brain import executor
 from src.brain.config import ExecutorConfig
 from src.brain.executor import (
     FILES_BUCKET,
@@ -35,6 +35,13 @@ from src.brain.executor import (
 from src.brain.team import TEAM
 
 USER = "11111111-1111-4111-8111-111111111111"
+
+
+@pytest.fixture(autouse=True)
+def audit_places(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard keeps a record on the PC: not in the real one, from a test."""
+    monkeypatch.setattr(audit, "AUDIT_DIR", tmp_path / "audit-logs")
+    monkeypatch.setattr(audit, "BACKUP_DIR", tmp_path / "audit-backups")
 
 
 class FakeSDKClient:
@@ -619,6 +626,65 @@ class TestOpenedFolders:
         refusal = check_tool_call(tmp_path / "root", "Read", {"file_path": str(tmp_path / secret)})
         assert "outside" in str(refusal)
 
+    @pytest.mark.parametrize(
+        "secret",
+        [
+            ".jarvis/brain-worker.env",
+            ".jarvis/browser-profiles/a/Preferences",
+            ".claude.json",
+            ".git-credentials",
+            ".npmrc",
+            "AppData/Roaming/Slack/token",
+            "AppData/Local/Google/Chrome/User Data/Local State",
+            "keys/brain-worker.env",
+        ],
+    )
+    def test_the_whole_profile_open_leaves_these_shut(self, tmp_path, monkeypatch, secret):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        refusal = check_tool_call(tmp_path / "root", "Read", {"file_path": str(tmp_path / secret)})
+        assert "outside" in str(refusal)
+
+    def test_the_system_temporary_folder_stays_usable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        temp = tmp_path / "AppData" / "Local" / "Temp" / "build.log"
+        assert check_tool_call(tmp_path / "root", "Read", {"file_path": str(temp)}) is None
+
+    def test_a_project_in_the_open_profile_can_be_used(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        path = tmp_path / "Documents" / "Web" / "index.html"
+        assert check_tool_call(tmp_path / "root", "Write", {"file_path": str(path)}) is None
+
+    def test_the_code_of_the_guard_stays_shut(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", executor._OWN_CODE.parent.as_posix())
+        for own in (Path(executor.__file__), executor._OWN_CODE / "agent" / ".data" / "mirrors"):
+            refusal = check_tool_call(tmp_path / "root", "Edit", {"file_path": str(own)})
+            assert "outside" in str(refusal)
+
+    def test_a_folder_the_user_shut_stays_shut_inside_an_opened_one(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+        monkeypatch.setenv("KWAMI_EXECUTOR_SHUT", str(tmp_path / "Kwami"))
+        root = tmp_path / "root"
+        shut = {"file_path": str(tmp_path / "Kwami" / "a.py")}
+        assert "outside" in str(check_tool_call(root, "Read", shut))
+        assert check_tool_call(root, "Read", {"file_path": str(tmp_path / "Web" / "a.py")}) is None
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            "cd ~ && cat .jarvis/brain-worker.env",
+            "cat keys/brain-worker.env",
+            "type AppData\\Roaming\\Slack\\token",
+            "cp .ssh/id_rsa here",
+        ],
+    )
+    def test_a_relative_path_does_not_get_a_command_to_them(self, tmp_path, monkeypatch, command):
+        monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(Path.home()))
+        assert "shut" in str(check_tool_call(tmp_path, "Bash", {"command": command}))
+
+    @pytest.mark.parametrize("command", ["npm run dev", "python build.py", "ls .github/workflows"])
+    def test_an_ordinary_command_passes(self, tmp_path, command):
+        assert check_tool_call(tmp_path, "Bash", {"command": command}) is None
+
     def test_env_files_stay_shut_in_an_opened_folder(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
         refusal = check_tool_call(
@@ -631,3 +697,70 @@ class TestOpenedFolders:
         assert "opened these folders" not in executor._system_append()
         monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
         assert str(tmp_path.resolve()) in executor._system_append()
+
+
+async def test_the_work_thread_has_chrome_on_the_pc_and_gives_it_back(
+    sdk, jarvis: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed: list[bool] = []
+
+    class FakeTools:
+        def __init__(self, user_id: str) -> None:
+            assert user_id == "u1"
+
+        async def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(executor, "browser_available", lambda _user: True)
+    monkeypatch.setattr(executor, "BrowserTools", FakeTools)
+    monkeypatch.setattr(executor, "browser_server", lambda *_: {"name": "browser"})
+    config = ExecutorConfig(str(jarvis), browser_user_id="u1")
+    await executor.run_executor("ak", "claude-sonnet-5-5", "busca", config)
+    options = sdk.last.options
+    assert "browser" in options.mcp_servers
+    assert set(executor.BROWSER_TOOLS) <= set(options.allowed_tools)
+    assert "real Chrome" in options.system_prompt["append"]
+    assert closed == [True]
+
+
+async def test_a_task_that_used_the_browser_leaves_no_session(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [{"tool_name": "mcp__browser__open", "tool_input": {}}]
+    sdk.messages = [_result("Hecho")]
+    result = await run_executor("ak", "claude-sonnet-5-5", "busca", ExecutorConfig(str(jarvis)))
+    assert result.session_id == ""
+
+
+async def test_the_pc_keeps_a_record_and_a_copy(
+    sdk, jarvis: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path / "web"))
+    page = tmp_path / "web" / "index.html"
+    page.parent.mkdir()
+    page.write_text("antes")
+    sdk.tool_calls = [{"tool_name": "Edit", "tool_input": {"file_path": str(page)}}]
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "claude-sonnet-5-5", "edita", ExecutorConfig(str(jarvis)))
+    assert next((tmp_path / "audit-logs").glob("*.jsonl")).read_text(encoding="utf-8")
+    assert [p.read_text() for p in (tmp_path / "audit-backups").rglob("index.html")] == ["antes"]
+
+
+async def test_in_the_cloud_nothing_is_kept_on_disk(
+    sdk, jarvis: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(executor, "executor_in_cloud", lambda: True)
+    sdk.tool_calls = [{"tool_name": "Bash", "tool_input": {"command": "ls"}}]
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "claude-sonnet-5-5", "lista", ExecutorConfig(str(jarvis)))
+    assert not (tmp_path / "audit-logs").exists()
+
+
+async def test_a_task_on_the_pc_gets_the_database_when_switched_on(
+    sdk, jarvis: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(executor, "supabase_available", lambda _user: True)
+    monkeypatch.setattr(executor, "supabase_server", lambda *_: {"name": "kwami_db"})
+    config = ExecutorConfig(str(jarvis), google_user_id="u1")
+    await executor.run_executor("ak", "claude-sonnet-5-5", "mira", config)
+    options = sdk.last.options
+    assert "kwami_db" in options.mcp_servers
+    assert executor.SUPABASE_TOOL in options.allowed_tools

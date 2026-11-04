@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1125,3 +1126,85 @@ def test_own_code_cannot_be_ordered_by_phone(pc_bridge) -> None:
     bridge.user_id = ""
     out = bridge.start(task="t", title="t", kind="code", difficulty="normal", repo="agent")
     assert isinstance(out, str) and "not by phone" in out
+
+
+class _Voice:
+    def __init__(self, *turns: str) -> None:
+        self._chat_ctx = SimpleNamespace(
+            items=[SimpleNamespace(role="user", text_content=turn) for turn in turns]
+        )
+
+
+async def test_merging_needs_the_users_own_last_words(pc_bridge, monkeypatch) -> None:
+    bridge, jobs = pc_bridge
+    monkeypatch.setattr(bridge, "_voice", lambda: _Voice("lo probé, fusiona", "qué tal"))
+    said = await bridge.merge_pull_request("agent", 7, "lo probé, fusiona")
+    assert "Not merged" in said and jobs.queued == []
+
+
+async def test_merging_goes_to_the_pc_with_that_approval(pc_bridge, monkeypatch) -> None:
+    bridge, jobs = pc_bridge
+    monkeypatch.setattr(bridge_module, "THINK_POLL_FAST_SECONDS", 0.001)
+    monkeypatch.setattr(bridge, "_voice", lambda: _Voice("lo probé, fusiona"))
+    jobs.script = [_job("done", result="Fusionado")]
+    assert await bridge.merge_pull_request("agent", 7, "lo probé, fusiona") == "Fusionado"
+    assert jobs.queued[0].mode == "merge" and jobs.queued[0].task == "agent#7"
+
+
+async def test_signing_in_goes_to_the_pc(pc_bridge, monkeypatch) -> None:
+    bridge, jobs = pc_bridge
+    monkeypatch.setattr(bridge_module, "THINK_POLL_FAST_SECONDS", 0.001)
+    jobs.script = [_job("done", result="Abierta")]
+    assert await bridge.connect_claude_account() == "Abierta"
+    assert jobs.queued[0].mode == "login"
+
+
+async def test_an_order_cannot_come_by_phone(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    bridge.user_id = ""
+    assert "app" in await bridge.connect_claude_account()
+    assert jobs.queued == []
+
+
+async def test_an_order_needs_the_pc_there(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online = False
+    assert "not there" in await bridge.connect_claude_account()
+    assert jobs.queued == []
+
+
+async def test_an_order_the_pc_never_takes_is_withdrawn(pc_bridge, monkeypatch) -> None:
+    bridge, jobs = pc_bridge
+    monkeypatch.setattr(bridge_module, "THINK_POLL_FAST_SECONDS", 0.001)
+    monkeypatch.setattr(bridge_module, "ORDER_TIMEOUT_SECONDS", 0.01)
+    jobs.script = [_job("queued")] * 100
+    assert "in time" in await bridge.connect_claude_account()
+    assert jobs.cancelled
+
+
+async def test_an_order_that_cannot_be_queued_says_so(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.enqueues = False
+    assert "queued" in await bridge.connect_claude_account()
+
+
+async def test_the_voice_asks_to_sign_in_once_while_the_pc_waits(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    said: list[str] = []
+    bridge.session = SimpleNamespace(
+        generate_reply=lambda instructions: said.append(instructions),
+        agent_state="idle",
+        user_state="listening",
+    )
+    waiting = _job("running", progress="mcp__browser__sign_in: github.com")
+    jobs.script = [waiting, waiting, waiting, _job("done", result="Hecho")]
+    _run(bridge, kind="code")
+    await _finish(bridge)
+    asked = [line for line in said if "sign in" in line]
+    assert len(asked) == 1 and "github.com" in asked[0]
+
+
+def test_with_no_call_there_is_nobody_to_ask(pc_bridge) -> None:
+    bridge, _ = pc_bridge
+    bridge.session = None
+    bridge._ask_to_sign_in("mcp__browser__sign_in: github.com")

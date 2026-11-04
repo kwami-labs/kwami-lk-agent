@@ -302,3 +302,10 @@ async def test_an_unusable_plan_runs_the_task_whole(planner, stop: str, text: st
 async def test_a_failed_planner_call_is_no_plan(planner) -> None:
     planner.reply = anthropic.APIConnectionError(request=httpx.Request("POST", "https://x"))
     assert await plan_task("k", "claude-sonnet-5-5", "t") is None
+
+
+def test_an_opened_folder_can_be_where_a_task_starts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("KWAMI_EXECUTOR_FOLDERS", str(tmp_path))
+    monkeypatch.setenv("KWAMI_EXECUTOR_SHUT", str(tmp_path / "shut"))
+    assert resolve_executor_folder(str(tmp_path / "web")) == (tmp_path / "web").resolve()
+    assert resolve_executor_folder(str(tmp_path / "shut" / "a")) == EXECUTOR_ROOT.resolve()

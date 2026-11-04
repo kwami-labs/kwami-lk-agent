@@ -65,14 +65,14 @@ async def test_after_a_job_it_looks_at_the_queue_again_at_once(tmp_path: Path) -
     stop = asyncio.Event()
     looks = 0
 
-    async def tick() -> bool:
+    async def start_next() -> bool:
         nonlocal looks
         looks += 1
         if looks == 2:
             stop.set()
         return True
 
-    worker.tick = tick  # type: ignore[method-assign]
+    worker.start_next = start_next  # type: ignore[method-assign]
     await asyncio.wait_for(worker.run_forever(stop), 2)
     assert looks == 2
 

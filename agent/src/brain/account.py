@@ -27,7 +27,7 @@ logger = get_logger("brain.account")
 STATUS_TIMEOUT_SECONDS = 20.0
 
 
-def _binary() -> str | None:
+def binary() -> str | None:
     """The Claude Code the executor itself runs: the SDK's, else the one on PATH."""
     try:
         import claude_agent_sdk
@@ -46,11 +46,11 @@ async def sign_in() -> int:
     The same binary the worker runs, which may be the only one on this PC: it is
     usually not on PATH.
     """
-    binary = _binary()
-    if binary is None:
+    claude = binary()
+    if claude is None:
         logger.error("Claude Code is not installed here")
         return 2
-    process = await asyncio.create_subprocess_exec(binary, "auth", "login")
+    process = await asyncio.create_subprocess_exec(claude, "auth", "login")
     return await process.wait()
 
 
@@ -69,14 +69,14 @@ def read_login(raw: str) -> bool:
 
 async def account_login() -> bool:
     """Whether Claude Code on this PC is signed in to a Claude account. Never raises."""
-    binary = _binary()
-    if binary is None:
+    claude = binary()
+    if claude is None:
         return False
     # An API key in the environment would be reported instead of the login.
     env = {k: v for k, v in os.environ.items() if k != "ANTHROPIC_API_KEY"}
     try:
         process = await asyncio.create_subprocess_exec(
-            binary,
+            claude,
             "auth",
             "status",
             stdout=asyncio.subprocess.PIPE,

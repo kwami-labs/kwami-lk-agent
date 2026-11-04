@@ -40,7 +40,7 @@ VOICE_SWITCH_TOOLS: frozenset[str] = frozenset(
 #: user's rule, 2026-10-09). Offered both ways, the voice model kept searching
 #: itself -- slower, on its own Tavily credit, and with the conversation stalled
 #: while it read the results.
-BRAIN_SEARCH_TOOLS: frozenset[str] = frozenset({"web_search", "deep_research", "product_search"})
+BRAIN_SEARCH_TOOLS: frozenset[str] = frozenset({"deep_research", "product_search"})
 
 
 @dataclass(frozen=True)

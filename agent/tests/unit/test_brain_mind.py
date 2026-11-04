@@ -810,7 +810,7 @@ async def test_account_login_asks_the_binary_without_the_api_key(
         seen.update(args=args, env=kwargs["env"])
         return FakeProcess(b'{"loggedIn": true, "authMethod": "claude.ai"}')
 
-    monkeypatch.setattr(account_module, "_binary", lambda: "claude")
+    monkeypatch.setattr(account_module, "binary", lambda: "claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert await account_login() is True
     assert seen["args"] == ("claude", "auth", "status")
@@ -824,16 +824,16 @@ async def test_signing_in_is_claude_codes_own(monkeypatch: pytest.MonkeyPatch) -
         seen.append(args)
         return FakeProcess(b"")
 
-    monkeypatch.setattr(account_module, "_binary", lambda: "claude")
+    monkeypatch.setattr(account_module, "binary", lambda: "claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert await sign_in() == 0
     assert seen == [("claude", "auth", "login")]
-    monkeypatch.setattr(account_module, "_binary", lambda: None)
+    monkeypatch.setattr(account_module, "binary", lambda: None)
     assert await sign_in() == 2
 
 
 async def test_account_login_with_no_binary_is_no(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(account_module, "_binary", lambda: None)
+    monkeypatch.setattr(account_module, "binary", lambda: None)
     assert await account_login() is False
 
 
@@ -841,7 +841,7 @@ async def test_account_login_that_cannot_start_is_no(monkeypatch: pytest.MonkeyP
     async def spawn(*args: Any, **kwargs: Any) -> Any:
         raise OSError("nope")
 
-    monkeypatch.setattr(account_module, "_binary", lambda: "claude")
+    monkeypatch.setattr(account_module, "binary", lambda: "claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert await account_login() is False
 
@@ -852,7 +852,7 @@ async def test_account_login_that_hangs_is_no(monkeypatch: pytest.MonkeyPatch) -
     async def spawn(*args: Any, **kwargs: Any) -> FakeProcess:
         return process
 
-    monkeypatch.setattr(account_module, "_binary", lambda: "claude")
+    monkeypatch.setattr(account_module, "binary", lambda: "claude")
     monkeypatch.setattr(account_module, "STATUS_TIMEOUT_SECONDS", 0.0)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     assert await account_login() is False and process.killed
@@ -867,9 +867,9 @@ def test_the_binary_is_the_one_the_sdk_ships(
     bundled.mkdir()
     monkeypatch.setattr(claude_agent_sdk, "__file__", str(tmp_path / "__init__.py"))
     monkeypatch.setattr(account_module.shutil, "which", lambda name: "/on/path/claude")
-    assert account_module._binary() == "/on/path/claude"
+    assert account_module.binary() == "/on/path/claude"
     (bundled / "claude").write_text("")
-    assert account_module._binary() == str(bundled / "claude")
+    assert account_module.binary() == str(bundled / "claude")
 
 
 # -- users' keys -------------------------------------------------------------------
@@ -1049,7 +1049,7 @@ async def test_a_chat_provider_with_no_text_is_not_an_answer(
 def test_without_the_sdk_the_binary_is_the_one_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "claude_agent_sdk", None)
     monkeypatch.setattr(account_module.shutil, "which", lambda name: "/on/path/claude")
-    assert account_module._binary() == "/on/path/claude"
+    assert account_module.binary() == "/on/path/claude"
 
 
 async def test_a_kwami_that_is_no_uuid_cannot_queue_a_thought(
@@ -1296,7 +1296,7 @@ async def test_a_login_check_cancelled_leaves_no_process_behind(
     async def spawn(*args: Any, **kwargs: Any) -> FakeProcess:
         return process
 
-    monkeypatch.setattr(account_module, "_binary", lambda: "claude")
+    monkeypatch.setattr(account_module, "binary", lambda: "claude")
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     running = asyncio.create_task(account_login())
     await asyncio.sleep(0)

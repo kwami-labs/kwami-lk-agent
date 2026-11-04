@@ -10,12 +10,19 @@ PreToolUse hook, so none of them can do what the executor could not.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
+
+from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
     from claude_agent_sdk import AgentDefinition
     from claude_agent_sdk.types import EffortLevel
+
+logger = get_logger("brain.team")
 
 HAIKU = "claude-haiku-5-5"
 SONNET = "claude-sonnet-5-5"
@@ -23,6 +30,12 @@ OPUS = "claude-opus-5-5"
 
 _READ = ["Read", "Glob", "Grep"]
 _WEB = ["WebSearch", "WebFetch"]
+
+AGENTS_FOLDER = "agents"
+MAX_OWN_MEMBERS = 30
+MAX_OWN_TEXT_CHARS = 8000
+OWN_MEMBER_TOOLS = frozenset({*_READ, *_WEB, "Write", "Edit", "Bash"})
+_OWN_NAME = re.compile(r"[a-z][a-z0-9-]{1,39}")
 
 
 @dataclass(frozen=True)
@@ -104,11 +117,56 @@ researcher (facts from the web), reasoner (hard decisions and maths), reviewer
 - Wait for each member's answer. Have the reviewer check work that will be relied on,
   and fix what it finds.
 - Report only what you have verified, and say what you could not check.
+- Need a specialist you will want again? Save it in `agents/<name>.json` in the Jarvis
+  folder, with description, prompt, and optionally model, tools and effort. It joins the
+  team from the next task on, under the same rules as everyone here.
 """
 
 
-def agent_definitions(definition: type[AgentDefinition]) -> dict[str, AgentDefinition]:
+def _own_member(path: Path) -> TeamMember | None:
+    """One agent Jarvis saved, or None when the file does not hold one. Never raises."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    description, prompt = data.get("description"), data.get("prompt")
+    if not (isinstance(description, str) and description and isinstance(prompt, str) and prompt):
+        logger.warning("Agent %s needs a description and a prompt", path.name)
+        return None
+    tools = data.get("tools")
+    effort = data.get("effort")
+    return TeamMember(
+        description=description[:MAX_OWN_TEXT_CHARS],
+        prompt=prompt[:MAX_OWN_TEXT_CHARS],
+        model=data["model"] if data.get("model") in (HAIKU, SONNET, OPUS) else SONNET,
+        # Never more than the executor has, whatever the file says.
+        tools=[t for t in tools if t in OWN_MEMBER_TOOLS] if isinstance(tools, list) else _READ,
+        effort=effort if effort in ("low", "medium", "high") else "medium",
+    )
+
+
+def own_members(root: Path) -> dict[str, TeamMember]:
+    """The agents Jarvis made for itself, in `<Jarvis folder>/agents/<name>.json`.
+
+    The team's names stay the team's: a file cannot take over the reviewer.
+    """
+    members: dict[str, TeamMember] = {}
+    for path in sorted((root / AGENTS_FOLDER).glob("*.json"))[:MAX_OWN_MEMBERS]:
+        name = path.stem.lower()
+        if _OWN_NAME.fullmatch(name) and name not in TEAM:
+            member = _own_member(path)
+            if member is not None:
+                members[name] = member
+    return members
+
+
+def agent_definitions(
+    definition: type[AgentDefinition], root: Path | None = None
+) -> dict[str, AgentDefinition]:
     """The team as the SDK's `AgentDefinition`s. It imports the SDK lazily, as we do."""
+    team = {**TEAM, **(own_members(root) if root is not None else {})}
     return {
         name: definition(
             description=member.description,
@@ -118,5 +176,5 @@ def agent_definitions(definition: type[AgentDefinition]) -> dict[str, AgentDefin
             effort=member.effort,
             background=False,
         )
-        for name, member in TEAM.items()
+        for name, member in team.items()
     }

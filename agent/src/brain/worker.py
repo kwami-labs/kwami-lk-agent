@@ -42,6 +42,7 @@ from ..envfile import load_env_file
 from ..settings import get_settings
 from ..utils.logging import get_logger
 from .account import account_login, sign_in
+from .browser_tool import SIGN_IN_TOOL
 from .config import (
     EXECUTOR_ROOT,
     HARD_MONTHLY_CAP_USD,
@@ -53,6 +54,8 @@ from .executor import ExecutorResult, run_executor
 from .jobs import BEAT_SECONDS, BrainJob, JobStore
 from .ledger import DATA_DIR, Ledger, PendingResult, SupabaseLedger
 from .local import LOCAL_ID, LocalJobs
+from .orders import MODES as ORDER_MODES
+from .orders import SITE, run_order
 from .selfwork import (
     REPOS,
     SELF_TASK,
@@ -63,6 +66,7 @@ from .selfwork import (
     run_tests,
     spoken_title,
 )
+from .sites import check_site
 from .team import SONNET
 
 if TYPE_CHECKING:
@@ -77,11 +81,16 @@ THINK_POLL_SECONDS = 2.0
 THINK_POLL_FAST_SECONDS = 0.4
 THINK_POLL_FAST_FOR_SECONDS = 120.0
 THINK_SLOTS = 3
+#: Long jobs at once: a slow one must not hold back the next.
+WORK_SLOTS = 3
 THINK_MAX_TURNS = 12
 #: How often the worker checks the PC is still signed in to Claude.
 LOGIN_CHECK_SECONDS = 600.0
 #: How often a running job reports, and looks for a cancellation.
 RUNNING_POLL_SECONDS = 5.0
+#: Once a day per site is enough to keep a session in use and to notice it gone.
+SITE_CHECK_SECONDS = 86400.0
+SITE_POLL_SECONDS = 1800.0
 #: How long a watching call gets to take charge of a result.
 HANDOVER_SECONDS = 15.0
 HANDOVER_POLL_SECONDS = 2.0
@@ -137,27 +146,32 @@ class Worker:
         self.claude_login = False
         self._login_checked_at: float | None = None
         self._thinking: set[asyncio.Task[None]] = set()
+        self._working: set[asyncio.Task[None]] = set()
 
     # -- the loop --------------------------------------------------------------
 
     async def run_forever(self, stop: asyncio.Event) -> None:
         beat = asyncio.create_task(self._beat_forever(stop), name="brain_worker_beat")
         think = asyncio.create_task(self._think_forever(stop), name="brain_worker_think")
+        sites = asyncio.create_task(self._check_sites_forever(stop), name="brain_worker_sites")
         logger.info("Work thread ready on %s, in %s", self.runner_id, self._folder)
         try:
             while not stop.is_set():
                 worked = False
                 try:
-                    worked = await self.tick()
+                    worked = await self.start_next()
                 except Exception:
                     logger.exception("The work thread's tick failed")
                 if not worked:
                     with contextlib.suppress(TimeoutError):
                         await asyncio.wait_for(stop.wait(), IDLE_POLL_SECONDS)
+            # The jobs under way finish, as the one under way always did.
+            await asyncio.gather(*self._working, return_exceptions=True)
         finally:
             beat.cancel()
             think.cancel()
-            await asyncio.gather(beat, think, *self._thinking, return_exceptions=True)
+            sites.cancel()
+            await asyncio.gather(beat, think, sites, *self._thinking, return_exceptions=True)
 
     async def _beat_forever(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
@@ -165,6 +179,24 @@ class Worker:
             await self._jobs.beat(self.user_id, self.runner_id, platform.node(), self.claude_login)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), BEAT_SECONDS)
+
+    async def _check_sites_forever(self, stop: asyncio.Event) -> None:
+        while not stop.is_set():
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(stop.wait(), SITE_POLL_SECONDS)
+            if stop.is_set():
+                return
+            try:
+                await self._check_sites()
+            except Exception:
+                logger.exception("Checking the sites failed")
+
+    async def _check_sites(self) -> None:
+        for site in await self._jobs.due_sites(self.user_id, SITE_CHECK_SECONDS):
+            state = await check_site(site["url"], site["kwami_id"])
+            if state is None:
+                return  # Chrome is in use: another round will do.
+            await self._jobs.note_site(self.user_id, site["kwami_id"], site["url"], state)
 
     async def _note_login(self) -> None:
         now = asyncio.get_running_loop().time()
@@ -174,18 +206,34 @@ class Worker:
             if not self.claude_login:
                 logger.warning("Claude Code is not signed in here: run this with --login")
 
-    async def tick(self) -> bool:
-        """One look at the queue. True when a job was taken."""
+    async def _next_job(self) -> tuple[BrainJob, float] | None:
         await self._fail_stale()
         spent = await self._jobs.month_spend(self.user_id)
         if spent is None:
             # Not knowing the spend is not the same as having money left.
             logger.warning("Monthly spend unreadable; leaving the queue alone")
-            return False
+            return None
         job = await self._jobs.claim(self.user_id, self.runner_id)
-        if job is None:
+        return None if job is None else (job, spent)
+
+    async def tick(self) -> bool:
+        """One look at the queue, and the job through to its end. True when one was taken."""
+        taken = await self._next_job()
+        if taken is None:
             return False
-        await self.process(job, spent)
+        await self.process(*taken)
+        return True
+
+    async def start_next(self) -> bool:
+        """Start the next job if a slot is free. True when one started."""
+        if len(self._working) >= WORK_SLOTS:
+            return False
+        taken = await self._next_job()
+        if taken is None:
+            return False
+        running = asyncio.create_task(self.process(*taken), name=f"brain_work_{taken[0].id}")
+        self._working.add(running)
+        running.add_done_callback(self._working.discard)
         return True
 
     # -- thinking --------------------------------------------------------------
@@ -222,6 +270,38 @@ class Worker:
         running.add_done_callback(self._thinking.discard)
         return True
 
+    async def _carry_out(self, job: BrainJob) -> None:
+        """An order that needs no model. Never runs for a call that is gone: it acts."""
+        if not job.watched():
+            await self._jobs.finish(job.id, "cancelled", "Caducada.", 0.0, "")
+            return
+
+        async def note_site(state: str) -> None:
+            await self._jobs.note_site(job.user_id, job.kwami_id, job.task, state)
+
+        running = asyncio.create_task(
+            run_order(
+                job.mode,
+                job.task,
+                job.kwami_id or job.user_id,
+                note_site if job.mode == SITE else None,
+            ),
+            name=f"brain_order_{job.id}",
+        )
+        # A site stays open while the user signs in: it has to look alive, and be stoppable.
+        if await self._watch(job, running, []):
+            await self._jobs.finish(job.id, "cancelled", "Cancelada.", 0.0, "")
+            return
+        try:
+            text, status = running.result(), "done"
+        except SelfWorkError as e:
+            logger.warning("Order %s: %s", job.id, e)
+            text, status = str(e), "failed"
+        except Exception as e:
+            logger.exception("Order %s crashed", job.id)
+            text, status = f"No he podido hacerlo: {type(e).__name__}", "failed"
+        await self._jobs.finish(job.id, status, text, 0.0, "")
+
     async def think(self, job: BrainJob) -> None:
         """Answer on the login, with the web at most. The call that asked hears the result.
 
@@ -229,6 +309,9 @@ class Worker:
         chose for this model. Nor a pending result: a thought is a part of a task the
         bridge is still running, and it stores what the user should hear.
         """
+        if job.mode in ORDER_MODES:
+            await self._carry_out(job)
+            return
         if not job.watched():
             # Queued by a call that is gone, or that gave up: it would spend the plan
             # on an answer nobody will hear.
@@ -328,6 +411,8 @@ class Worker:
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=LOGIN_NOTIONAL_USD,
                 google_user_id=job.user_id if google else "",
+                # The voice's profile, so what the user signs in to is there for both.
+                browser_user_id=(job.kwami_id or job.user_id) if google else "",
             ),
             resume=resume,
             effort=effort,
@@ -345,6 +430,8 @@ class Worker:
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
                 google_user_id=job.user_id if google else "",
+                # The voice's profile, so what the user signs in to is there for both.
+                browser_user_id=(job.kwami_id or job.user_id) if google else "",
             ),
             effort=effort,
             on_progress=on_progress,
@@ -380,11 +467,20 @@ class Worker:
 
     async def _watch(self, job: BrainJob, running: asyncio.Task, progress: list[str]) -> bool:
         """Report until the job ends. True when it was cancelled instead."""
+        noted = ""
         while not running.done():
             await asyncio.wait({running}, timeout=RUNNING_POLL_SECONDS)
             if running.done():
                 break
-            await self._jobs.update_running(job.id, progress[-1] if progress else "")
+            now_doing = progress[-1] if progress else ""
+            await self._jobs.update_running(job.id, now_doing)
+            # A site that asked this task to sign in joins the user's list by itself.
+            if now_doing.startswith(SIGN_IN_TOOL) and now_doing != noted:
+                noted = now_doing
+                host = now_doing.split(": ", 1)[-1]
+                await self._jobs.note_site(
+                    job.user_id, job.kwami_id, f"https://{host}", "signed_out"
+                )
             current = await self._jobs.get(job.id)
             if current is not None and current.cancel_requested:
                 running.cancel()

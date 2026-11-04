@@ -119,6 +119,8 @@ class BrainModel:
 @dataclass
 class ExecutorConfig:
     folder: str = str(EXECUTOR_ROOT)
+    #: Whose Chrome this run may use (`browser_tool`). Empty: none.
+    browser_user_id: str = ""
     #: full_no_push: edits and runs freely, but never pushes, never touches
     #: `.env` and never leaves the folder. edit_only: edits but runs nothing.
     #: read_only: reads and proposes.
@@ -260,16 +262,26 @@ def extra_executor_folders() -> list[Path]:
     return [Path(item.strip()).expanduser().resolve() for item in raw.split(";") if item.strip()]
 
 
+def shut_executor_folders() -> list[Path]:
+    """Folders that stay shut even inside an opened one: KWAMI_EXECUTOR_SHUT, as above."""
+    raw = os.environ.get("KWAMI_EXECUTOR_SHUT", "")
+    return [Path(item.strip()).expanduser().resolve() for item in raw.split(";") if item.strip()]
+
+
 def resolve_executor_folder(folder: str) -> Path:
     """The folder the executor may use: the requested one if it is inside the
-    root, the root otherwise."""
+    root or a folder the user opened, the root otherwise."""
     root = EXECUTOR_ROOT.resolve()
     try:
         candidate = Path(folder).expanduser().resolve() if folder else root
     except (OSError, ValueError):
         return root
-    if candidate == root or root in candidate.parents:
-        return candidate
+    shut = shut_executor_folders()
+    if any(candidate == place or place in candidate.parents for place in shut):
+        return root
+    for allowed in (root, *extra_executor_folders()):
+        if candidate == allowed or allowed in candidate.parents:
+            return candidate
     return root
 
 
