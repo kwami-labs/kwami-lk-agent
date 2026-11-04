@@ -62,10 +62,43 @@ async def test_an_update_needs_a_filter(store: _Store) -> None:
     assert "filter" in said and store.calls == []
 
 
-@pytest.mark.parametrize("table", ["kwami_google_accounts", "transcript_turns", "kwamis"])
+@pytest.mark.parametrize(
+    "table",
+    [
+        "kwami_google_accounts",
+        "transcript_turns",
+        "kwamis",
+        "kwami_assistant_settings",  # Where a user's reports go: writing it redirects them.
+        "kwami_assistant_notifications",
+        "kwami_assistant_tasks",
+        "kwami_outbound_audit",
+        "payment_events",
+        "waitlist_signups",
+        "a_table_nobody_has_thought_about_yet",
+    ],
+)
 async def test_keys_and_what_people_wrote_stay_shut(store: _Store, table: str) -> None:
     assert "shut" in await call_database("select", {"table": table})
+    assert "shut" in await call_database("insert", {"table": table, "rows": []})
     assert store.calls == []
+
+
+@pytest.mark.parametrize("params", [{}, {"select": "id"}, {"limit": "1", "order": "id"}])
+async def test_an_update_with_only_options_has_no_filter(
+    store: _Store, params: dict[str, str]
+) -> None:
+    said = await call_database(
+        "update", {"table": "profiles", "values": {"a": 1}, "params": params}
+    )
+    assert "filter" in said and store.calls == []
+
+
+@pytest.mark.parametrize("column", ["id", "user_id", "author_id"])
+async def test_a_row_keeps_its_id_and_its_owner(store: _Store, column: str) -> None:
+    said = await call_database(
+        "update", {"table": "user_kwamis", "values": {column: "x"}, "params": {"id": "eq.1"}}
+    )
+    assert said.startswith("Refused") and store.calls == []
 
 
 @pytest.mark.parametrize(
@@ -85,7 +118,17 @@ async def test_a_shut_table_cannot_be_read_through_a_related_one(
 
 
 @pytest.mark.parametrize(
-    "table", ["user_credits", "brain_spend", "brain_jobs", "wallet_identities"]
+    "table",
+    [
+        "user_credits",
+        "brain_spend",
+        "brain_jobs",
+        "wallet_identities",
+        "game_sessions",
+        "kwami_channels",
+        "livekit_sessions",
+        "valuations",
+    ],
 )
 async def test_money_and_limits_are_read_only(store: _Store, table: str) -> None:
     assert "only be read" in await call_database("insert", {"table": table, "rows": []})
