@@ -996,3 +996,25 @@ async def test_the_users_own_pc_keeps_its_shell(sdk, jarvis: Path) -> None:
     assert "Bash" in options.allowed_tools and "Bash" not in options.disallowed_tools
     assert executor.NO_SHELL not in options.system_prompt["append"]
     assert sdk.last.decisions == [{}]
+
+
+async def test_the_sdk_is_imported_off_the_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    seen: list[bool] = []
+
+    def import_module(name: str) -> object:
+        seen.append(threading.current_thread() is threading.main_thread())
+        return object()
+
+    monkeypatch.setattr(executor.importlib, "import_module", import_module)
+    await executor.load_sdk()
+    assert seen == [False]
+
+
+async def test_a_missing_sdk_is_left_for_the_run_to_report(monkeypatch: pytest.MonkeyPatch) -> None:
+    def missing(name: str) -> object:
+        raise ImportError(name)
+
+    monkeypatch.setattr(executor.importlib, "import_module", missing)
+    await executor.load_sdk()

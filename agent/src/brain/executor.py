@@ -27,8 +27,10 @@ the folder is deleted.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
+import importlib
 import mimetypes
 import os
 import re
@@ -609,6 +611,20 @@ def check_tool_call(root: Path, tool_name: str, tool_input: dict[str, Any]) -> s
     return None
 
 
+#: The SDK the executor runs Claude Code through.
+SDK_MODULE = "claude_agent_sdk"
+
+
+async def load_sdk() -> None:
+    """Import the SDK off the event loop. Never raises: `_run_in` says when it is missing.
+
+    Its first import takes most of a second (782 ms in production, 2026-11-06, in
+    `mcp_types`), and the loop it would block is a call's, or the worker's own.
+    """
+    with contextlib.suppress(ImportError):
+        await asyncio.to_thread(importlib.import_module, SDK_MODULE)
+
+
 async def run_executor(
     api_key: str,
     model: str,
@@ -631,6 +647,7 @@ async def run_executor(
     Both are runs on a host other users share -- the voice agent's container, the
     cloud work thread -- and neither gets a shell (`NO_SHELL`).
     """
+    await load_sdk()
     if root is not None:
         return await _run_in(
             root, api_key, model, task, config, resume, effort, on_progress, shell=False
