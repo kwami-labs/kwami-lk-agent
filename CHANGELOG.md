@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The app can see which tools reach the model.** A `tool_inventory` message names the
+  built-ins that are on and the client tools the 128-tool trim left out, after entering
+  the room and after every tools update.
+- **More room for client tools.** Built-ins withheld for a missing credential, a locked
+  voice or searches given to the brain no longer take a client tool's place in the trim.
+- **A client tool cannot end the session.** One whose name a provider refuses, or whose
+  parameters are not an object schema, is skipped with a warning instead of making every
+  request fail; the SDK's shorthand schema is wrapped as the SDK wraps it.
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.
