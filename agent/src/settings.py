@@ -103,6 +103,9 @@ ENV_VAR_NAMES: tuple[str, ...] = (
     "KWAMI_SELF_REPO_OWNER",
     "KWAMI_GOOGLE_WORK_TOKEN",
     "KWAMI_AGENT_NAME",
+    "KWAMI_CLOUD_WORKER",
+    "KWAMI_CLOUD_OWNERS",
+    "KWAMI_CLOUD_REPO_OWNER",
     *PROVIDER_KEY_NAMES,
 )
 
@@ -212,6 +215,14 @@ class Settings:
     #: takes another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not
     #: compete with the deployed agent for real calls.
     agent_name: str = DEFAULT_AGENT_NAME
+    #: Whether this worker also runs the brain's cloud work thread (`brain/cloud.py`):
+    #: the jobs of users who let the cloud work for them while their PC is off.
+    cloud_worker: bool = False
+    #: Users whose cloud work may spend this deployment's own Anthropic key. Everyone
+    #: else needs their own key, connected from the app.
+    cloud_owners: tuple[str, ...] = ()
+    #: Where the cloud clones Jarvis's own code from, read-only and without credentials.
+    cloud_repo_owner: str = "kwami-labs"
 
     # Provider credentials the livekit plugins read themselves. Mirrored here so
     # that "is this provider usable?" is answerable without touching os.environ.
@@ -254,6 +265,11 @@ class Settings:
             self_repo_owner=_env_str("KWAMI_SELF_REPO_OWNER").strip(),
             google_work_token=_env_str("KWAMI_GOOGLE_WORK_TOKEN").strip(),
             agent_name=_env_str("KWAMI_AGENT_NAME").strip() or DEFAULT_AGENT_NAME,
+            cloud_worker=_env_bool("KWAMI_CLOUD_WORKER"),
+            cloud_owners=tuple(
+                part.strip() for part in _env_str("KWAMI_CLOUD_OWNERS").split(",") if part.strip()
+            ),
+            cloud_repo_owner=_env_str("KWAMI_CLOUD_REPO_OWNER").strip() or "kwami-labs",
             provider_keys={
                 name: _env_str(name) for name in PROVIDER_KEY_NAMES if os.environ.get(name)
             },

@@ -27,6 +27,7 @@ from src.brain.executor import (
     FILES_BUCKET,
     THINK_SYSTEM,
     CloudWorkspace,
+    ExecutorResult,
     check_tool_call,
     child_env,
     run_executor,
@@ -764,3 +765,106 @@ async def test_a_task_on_the_pc_gets_the_database_when_switched_on(
     options = sdk.last.options
     assert "kwami_db" in options.mcp_servers
     assert executor.SUPABASE_TOOL in options.allowed_tools
+
+
+# -- a cloud thread's folder, kept between runs -------------------------------------------
+
+
+class _ThreadStore:
+    """Storage with a thread's files in it, and a record of what went up."""
+
+    def __init__(self, files: dict[str, bytes], listing_ok: bool = True) -> None:
+        self.files = files
+        self.listing_ok = listing_ok
+        self.uploaded: list[str] = []
+
+    async def list_objects(
+        self, bucket: str, prefix: str, *, limit: int = 1000
+    ) -> list[str] | None:
+        return list(self.files) if self.listing_ok else None
+
+    async def download(self, bucket: str, path: str) -> bytes | None:
+        return self.files.get(path)
+
+    async def upload(self, bucket: str, path: str, data: bytes, *, content_type: str) -> bool:
+        self.uploaded.append(path)
+        return True
+
+
+async def test_a_thread_folder_comes_back_and_only_what_changed_goes_up(tmp_path: Path) -> None:
+    from src.brain.executor import restore_files, upload_results
+
+    prefix = "u/k/threads/t1"
+    store = _ThreadStore(
+        {
+            f"{prefix}/same.md": b"igual",
+            f"{prefix}/edit.md": b"antes",
+            f"{prefix}/gone.md": None,  # type: ignore[dict-item]
+            f"{prefix}/.env": b"SECRET=1",
+            f"{prefix}/../escape.md": b"fuera",
+            prefix: b"the folder itself",
+        }
+    )
+    workspace = CloudWorkspace(store=store, user_id="u", kwami_id="k", folder="threads/t1")  # type: ignore[arg-type]
+
+    known = await restore_files(tmp_path, workspace, "threads/t1")
+
+    assert sorted(known) == ["edit.md", "same.md"]
+    assert (tmp_path / "same.md").read_bytes() == b"igual"
+    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path.parent / "escape.md").exists()
+
+    (tmp_path / "edit.md").write_bytes(b"despues")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "new.md").write_bytes(b"nuevo")
+    _, stored = await upload_results(tmp_path, workspace, "threads/t1", known)
+
+    assert stored == 2
+    assert sorted(store.uploaded) == [f"{prefix}/edit.md", f"{prefix}/sub/new.md"]
+
+
+async def test_nothing_comes_back_without_an_owner_or_a_listing(tmp_path: Path) -> None:
+    from src.brain.executor import restore_files
+
+    assert await restore_files(tmp_path, CloudWorkspace(store=None), "t") == {}
+    store = _ThreadStore({}, listing_ok=False)
+    workspace = CloudWorkspace(store=store, user_id="u")  # type: ignore[arg-type]
+    assert await restore_files(tmp_path, workspace, "t") == {}
+
+
+async def test_a_cloud_run_in_a_thread_folder_restores_it_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _ThreadStore({"u/k/threads/t1/a.md": b"previo"})
+    seen: list[bool] = []
+
+    async def run_in(root: Path, *args: Any) -> ExecutorResult:
+        seen.append((root / "a.md").read_bytes() == b"previo")
+        (root / "b.md").write_bytes(b"nuevo")
+        return ExecutorResult("Hecho.", 0.1, True)
+
+    monkeypatch.setattr(executor, "_run_in", run_in)
+    result = await executor.run_executor(
+        "k",
+        "m",
+        "t",
+        ExecutorConfig(),
+        cloud=CloudWorkspace(store=store, user_id="u", kwami_id="k", folder="threads/t1"),  # type: ignore[arg-type]
+    )
+    assert seen == [True]
+    assert result.uploaded == 1 and result.uploaded_to == "jarvis-files/u/k/threads/t1"
+    assert store.uploaded == ["u/k/threads/t1/b.md"]
+
+
+async def test_a_given_folder_is_used_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots: list[Path] = []
+
+    async def run_in(root: Path, *args: Any) -> ExecutorResult:
+        roots.append(root)
+        return ExecutorResult("Hecho.", 0.1, True)
+
+    monkeypatch.setattr(executor, "_run_in", run_in)
+    result = await executor.run_executor("k", "m", "t", ExecutorConfig(), root=tmp_path)
+    assert roots == [tmp_path] and result.uploaded == 0

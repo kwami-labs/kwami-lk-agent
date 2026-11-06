@@ -28,6 +28,7 @@ the folder is deleted.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import mimetypes
 import os
 import re
@@ -174,6 +175,9 @@ class CloudWorkspace:
     store: SupabaseClient | None
     user_id: str = ""
     kwami_id: str = ""
+    #: A folder that outlives the run (`threads/<thread>`): what the earlier runs of the
+    #: thread left is brought back first, and only what changed goes up again.
+    folder: str = ""
 
     def prefix(self, folder: str) -> str:
         return "/".join((self.user_id, self.kwami_id or "default", folder))
@@ -195,8 +199,54 @@ def _files_to_upload(root: Path) -> list[Path]:
     return out
 
 
-async def upload_results(root: Path, workspace: CloudWorkspace, folder: str) -> tuple[str, int]:
-    """Copy what the executor left in `root` to Storage. (prefix, files stored)."""
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def restore_files(root: Path, workspace: CloudWorkspace, folder: str) -> dict[str, str]:
+    """Bring back what earlier runs of this folder stored. {relative path: sha256}.
+
+    Never raises: a file that cannot be read back is simply not there this time, and
+    an upload of the same name later replaces it.
+    """
+    if workspace.store is None or not workspace.user_id:
+        return {}
+    prefix = workspace.prefix(folder)
+    paths = await workspace.store.list_objects(FILES_BUCKET, prefix, limit=MAX_UPLOAD_FILES)
+    known: dict[str, str] = {}
+    for path in paths or []:
+        rel = path[len(prefix) :].lstrip("/")
+        target = _restore_target(root, rel)
+        if target is None:
+            continue
+        data = await workspace.store.download(FILES_BUCKET, path)
+        if data is None:
+            continue
+        _write_file(target, data)
+        known[rel] = _digest(data)
+    return known
+
+
+def _restore_target(root: Path, rel: str) -> Path | None:
+    """Where a stored file goes back to, or None for a name that would leave the folder."""
+    if not rel or _ENV_FILE.search(f"/{rel}"):
+        return None
+    target = (root / rel).resolve()
+    return target if target.is_relative_to(root.resolve()) else None
+
+
+def _write_file(target: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+
+async def upload_results(
+    root: Path, workspace: CloudWorkspace, folder: str, known: dict[str, str] | None = None
+) -> tuple[str, int]:
+    """Copy what the executor left in `root` to Storage. (prefix, files stored).
+
+    `known` is what was there before the run: those files go up again only if they changed.
+    """
     if workspace.store is None or not workspace.user_id:
         return "", 0
     prefix = workspace.prefix(folder)
@@ -214,6 +264,8 @@ async def upload_results(root: Path, workspace: CloudWorkspace, folder: str) -> 
             data = path.read_bytes()
         except OSError:
             skipped += 1
+            continue
+        if known and known.get(path.relative_to(root).as_posix()) == _digest(data):
             continue
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         rel = path.relative_to(root).as_posix()
@@ -508,6 +560,7 @@ async def run_executor(
     config: ExecutorConfig,
     *,
     cloud: CloudWorkspace | None = None,
+    root: Path | None = None,
     resume: str = "",
     effort: EffortLevel | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -515,17 +568,23 @@ async def run_executor(
     """Run the task. Locally in the Jarvis folder; with `cloud`, in a temporary
     folder whose files are uploaded to Storage and then deleted.
 
+    `root` is a folder the caller made and will clean up, used as it is and confined
+    to by the same guard: the cloud's clone of one of Jarvis's repositories.
     `resume` carries on an earlier run of the same folder, with what it knew.
     """
+    if root is not None:
+        return await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
     if cloud is None:
         root = resolve_executor_folder(config.folder)
         root.mkdir(parents=True, exist_ok=True)
         return await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
 
     root = Path(tempfile.mkdtemp(prefix="jarvis-"))
+    folder = cloud.folder or _task_folder()
     try:
+        known = await restore_files(root, cloud, folder) if cloud.folder else {}
         result = await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
-        prefix, stored = await upload_results(root, cloud, _task_folder())
+        prefix, stored = await upload_results(root, cloud, folder, known)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     if stored:
