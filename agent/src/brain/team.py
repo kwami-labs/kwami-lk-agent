@@ -14,7 +14,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..utils.logging import get_logger
 
@@ -36,6 +36,8 @@ MAX_OWN_MEMBERS = 30
 MAX_OWN_TEXT_CHARS = 8000
 OWN_MEMBER_TOOLS = frozenset({*_READ, *_WEB, "Write", "Edit", "Bash"})
 _OWN_NAME = re.compile(r"[a-z][a-z0-9-]{1,39}")
+#: The same rule the API keeps for the agents of the app (`brain_agents.name`).
+AGENT_NAME = _OWN_NAME
 
 
 @dataclass(frozen=True)
@@ -120,6 +122,8 @@ researcher (facts from the web), reasoner (hard decisions and maths), reviewer
 - Need a specialist you will want again? Save it in `agents/<name>.json` in the Jarvis
   folder, with description, prompt, and optionally model, tools and effort. It joins the
   team from the next task on, under the same rules as everyone here.
+- Any other member listed for the Agent tool is one the user defined in the app: use it
+  for what its description says.
 """
 
 
@@ -129,11 +133,16 @@ def _own_member(path: Path) -> TeamMember | None:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
+    return member_from(data, path.name)
+
+
+def member_from(data: Any, label: str) -> TeamMember | None:
+    """A member from what a file or the app says, or None. Never more than the executor."""
     if not isinstance(data, dict):
         return None
     description, prompt = data.get("description"), data.get("prompt")
     if not (isinstance(description, str) and description and isinstance(prompt, str) and prompt):
-        logger.warning("Agent %s needs a description and a prompt", path.name)
+        logger.warning("Agent %s needs a description and a prompt", label)
         return None
     tools = data.get("tools")
     effort = data.get("effort")
@@ -162,11 +171,44 @@ def own_members(root: Path) -> dict[str, TeamMember]:
     return members
 
 
+def platform_members(rows: list[Any]) -> dict[str, TeamMember]:
+    """The agents the user defined in the app (`brain_agents`), as members of the team.
+
+    They reach the cloud as well as the PC, where the folder's own do not. The same
+    rules apply: names are slugs, the team's names stay the team's, and the tools
+    are never more than the executor's.
+    """
+    members: dict[str, TeamMember] = {}
+    for row in rows[:MAX_OWN_MEMBERS]:
+        if not isinstance(row, dict):
+            continue
+        name = str(row.get("name") or "").lower()
+        if _OWN_NAME.fullmatch(name) and name not in TEAM:
+            member = member_from(row, name)
+            if member is not None:
+                members[name] = member
+    return members
+
+
+def permissions_for(tools: list[str]) -> str:
+    """The narrowest executor mode that has every tool an agent was given."""
+    if "Bash" in tools:
+        return "full_no_push"
+    if "Write" in tools or "Edit" in tools:
+        return "edit_only"
+    return "read_only"
+
+
 def agent_definitions(
-    definition: type[AgentDefinition], root: Path | None = None
+    definition: type[AgentDefinition],
+    root: Path | None = None,
+    extra: dict[str, TeamMember] | None = None,
 ) -> dict[str, AgentDefinition]:
-    """The team as the SDK's `AgentDefinition`s. It imports the SDK lazily, as we do."""
-    team = {**TEAM, **(own_members(root) if root is not None else {})}
+    """The team as the SDK's `AgentDefinition`s. It imports the SDK lazily, as we do.
+
+    `extra` are the user's agents from the app; a file of the same name wins on the PC.
+    """
+    team = {**TEAM, **(extra or {}), **(own_members(root) if root is not None else {})}
     return {
         name: definition(
             description=member.description,

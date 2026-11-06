@@ -1265,3 +1265,77 @@ def test_with_no_call_there_is_nobody_to_ask(pc_bridge) -> None:
     bridge, _ = pc_bridge
     bridge.session = None
     bridge._ask_to_sign_in("mcp__browser__sign_in: github.com")
+
+
+# -- the user's agents ------------------------------------------------------------------
+
+
+def _agents(jobs: FakeJobs, *rows: dict[str, Any]) -> None:
+    async def agents(user_id: str) -> list[dict[str, Any]]:
+        return list(rows)
+
+    jobs.agents = agents  # type: ignore[attr-defined]
+
+
+async def test_a_named_agent_gets_the_job_on_the_pc(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    _agents(jobs, {"id": "a1", "name": "facturas", "target": "auto"})
+    jobs.script = [_job("done", result="Revisadas")]
+    task = bridge.start(
+        task="revisa",
+        title="Facturas",
+        kind="question",
+        difficulty="normal",
+        important=True,
+        council=True,
+        agent="facturas",
+    )
+    assert not isinstance(task, str) and task.council is False
+    await _finish(bridge)
+    assert (jobs.queued[0].agent_id, jobs.queued[0].target) == ("a1", "auto")
+    assert task.result == "Revisadas"
+
+
+async def test_an_agent_for_the_cloud_goes_there_even_with_the_pc_on(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.cloud = True
+    _agents(jobs, {"id": "a1", "name": "facturas", "target": "cloud"})
+    jobs.script = [_job("done", result="Hecho")]
+    _run(bridge, agent="facturas")
+    await _finish(bridge)
+    assert jobs.queued[0].target == "cloud"
+
+
+@pytest.mark.parametrize(
+    ("online", "cloud", "target"),
+    [(True, False, "cloud"), (False, True, "pc"), (False, False, "auto")],
+)
+async def test_an_agent_with_nowhere_to_work_is_not_stood_in_for(
+    pc_bridge, online: bool, cloud: bool, target: str
+) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online, jobs.cloud = online, cloud
+    _agents(jobs, {"id": "a1", "name": "facturas", "target": target})
+    task = _run(bridge, agent="facturas")
+    await _finish(bridge)
+    assert jobs.queued == [] and task.status == "failed"
+    assert "Tus agentes trabajan en el ordenador o en la nube" in task.result
+
+
+async def test_an_agent_that_does_not_exist_is_said(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    _agents(jobs)
+    task = _run(bridge, agent="nadie")
+    await _finish(bridge)
+    assert jobs.queued == [] and "ningún agente activo llamado nadie" in task.result
+
+
+def test_an_agents_name_and_who_may_ask_are_checked(pc_bridge) -> None:
+    bridge, _ = pc_bridge
+    out = bridge.start(
+        task="t", title="t", kind="question", difficulty="normal", agent="Mal Nombre"
+    )
+    assert isinstance(out, str) and "lowercase" in out
+    bridge.user_id = ""
+    out = bridge.start(task="t", title="t", kind="question", difficulty="normal", agent="facturas")
+    assert isinstance(out, str) and "not by phone" in out

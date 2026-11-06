@@ -149,3 +149,12 @@ async def test_a_refusal_is_answered_on_a_text_llm_too(
     agent.kwami_config.voice.pipeline_type = "standard"
     bridge.refuse = "No"
     assert await agent.delegate_task(_ctx(bridge), "task", "title") == {"error": "No"}
+
+
+async def test_an_agent_named_by_the_user_goes_to_the_bridge(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    await agent.delegate_task(_ctx(bridge), "revisa octubre", "Facturas", agent=" Facturas ")
+    await agent.delegate_task(_ctx(bridge), "otra cosa", "Otra")
+    assert bridge.started[0]["agent"] == "facturas"
+    assert bridge.started[1]["agent"] == ""

@@ -88,6 +88,18 @@ class FakeJobs:
     async def mark_delivered(self, job_id: str) -> bool:
         return True
 
+    async def agents(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "a1",
+                "name": "facturas",
+                "description": "Facturas",
+                "prompt": "Revisa",
+                "tools": ["Read"],
+                "model": "claude-haiku-5-5",
+            }
+        ]
+
     async def add_sync(self, job: BrainJob, kind: str, prefix: str, **extra: Any) -> bool:
         self.syncs.append({"job": job.id, "kind": kind, "prefix": prefix, **extra})
         return self.sync_ok
@@ -542,3 +554,42 @@ def test_control_c_stops_it_quietly(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cloud_module, "set_settings", lambda settings: None)
     monkeypatch.setattr(cloud_module.asyncio, "run", interrupted)
     cloud_module.main([])
+
+
+async def test_the_users_agents_join_the_cloud_team_too() -> None:
+    jobs, run = FakeJobs(), Recorder()
+    jobs.add(OWNER, agent_id="a1")
+    await _worker(jobs, run).tick()
+    config = run.calls[0]["config"]
+    assert set(config.members) == {"facturas"} and config.permissions == "read_only"
+    assert run.calls[0]["task"].startswith("You are facturas")
+
+
+async def test_the_sandboxs_placeholders_never_reach_the_patch(public_repo: str) -> None:
+    jobs, store = FakeJobs(), FakeStore()
+    jobs.add(OWNER, repo="agent")
+
+    def act(root: Path) -> None:
+        (root / "real.py").write_text("x = 1\n", encoding="utf-8")
+        (root / "package.json").write_bytes(b"")  # left untracked
+        (root / "sub").mkdir()
+        (root / "sub" / ".npmrc").write_bytes(b"")
+        _git("add", "sub/.npmrc", "real.py", cwd=root)  # one the model committed
+        _git("-c", "user.name=m", "-c", "user.email=m@m", "commit", "-q", "-m", "feat: x", cwd=root)
+        (root / "yarn.lock").write_bytes(b"")  # untracked, but stays out too
+
+    await _worker(jobs, Recorder(act=act), store=store, repo_base=public_repo).tick()
+
+    patch = next(iter(store.uploads.values())).decode()
+    assert "real.py" in patch
+    assert "package.json" not in patch and "yarn.lock" not in patch
+    assert jobs.syncs[0]["files"] == 1
+
+
+async def test_no_placeholders_means_nothing_extra_to_commit(public_repo: str) -> None:
+    jobs, store = FakeJobs(), FakeStore()
+    jobs.add(OWNER, repo="agent")
+    await _worker(
+        jobs, Recorder(act=_writes("a.py", commit=True)), store=store, repo_base=public_repo
+    ).tick()
+    assert "drop the sandbox" not in next(iter(store.uploads.values())).decode()

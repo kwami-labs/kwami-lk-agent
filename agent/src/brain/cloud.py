@@ -37,14 +37,20 @@ import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..adapters.supabase import SupabaseClient, get_supabase
 from ..envfile import load_env_file
 from ..settings import Settings, get_settings, set_settings
 from ..utils.logging import get_logger
 from .config import ExecutorConfig
-from .executor import FILES_BUCKET, CloudWorkspace, ExecutorResult, run_executor
+from .executor import (
+    FILES_BUCKET,
+    CloudWorkspace,
+    ExecutorResult,
+    run_executor,
+    sandbox_leftover,
+)
 from .jobs import BEAT_SECONDS, CLOUD_RUNNER_PREFIX, BrainJob, JobStore
 from .selfwork import REPOS, SELF_TASK, SelfWorkError, _clean_env, _must, _run, refusal
 from .team import SONNET
@@ -53,6 +59,8 @@ from .worker import THREAD_MAX_TASK_USD, THREAD_MAX_TURNS, Runner, Worker
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import EffortLevel
+
+    from .config import Permissions
 
 logger = get_logger("brain.cloud")
 
@@ -242,8 +250,10 @@ class CloudWorker(Worker):
             await self._brief(job, task),
             ExecutorConfig(
                 folder=str(folder),
+                permissions=cast("Permissions", job.permissions),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
+                members=job.members,
                 google_user_id=job.user_id if google else "",
             ),
             cloud=CloudWorkspace(
@@ -273,15 +283,48 @@ class CloudWorker(Worker):
         key = await self._key_for(job.user_id)
         if not key:
             return ExecutorResult(NO_KEY, 0.0, False)
+        # The public copy has the same name under its own owner, whoever owns the user's.
+        name = repo.name.rsplit("/", 1)[-1]
         parent = Path(tempfile.mkdtemp(prefix="jarvis-repo-"))
-        root = parent / repo.name
+        root = parent / name
         try:
-            return await self._work_on_clone(job, repo.name, root, key, left, on_progress)
+            return await self._work_on_clone(job, name, root, key, left, on_progress)
         except SelfWorkError as e:
             logger.warning("Job %s: %s", job.id, e)
             return ExecutorResult(f"No he podido terminar en la nube: {e}", 0.0, False)
         finally:
             await asyncio.to_thread(_remove_tree, parent)
+
+    async def _drop_leftovers(self, root: Path, base: str, clean: dict[str, str]) -> None:
+        """Keep the sandbox's empty placeholders out of the patch, wherever they ended up.
+
+        Left untracked they are deleted; committed by the model, they are taken out again.
+        """
+        _, untracked = await _run(
+            "git", "-C", str(root), "ls-files", "--others", "--exclude-standard", env=clean
+        )
+        for name in await _leftovers_in(root, untracked.splitlines()):
+            await asyncio.to_thread((root / name).unlink, True)
+        _, added = await _run(
+            "git", "-C", str(root), "diff", "--diff-filter=A", "--name-only", base, env=clean
+        )
+        committed = await _leftovers_in(root, added.splitlines())
+        if committed:
+            await _run("git", "-C", str(root), "rm", "-q", "--", *committed, env=clean)
+            await _run(
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.name=Jarvis",
+                "-c",
+                "user.email=jarvis@kwami.io",
+                "commit",
+                "-q",
+                "-m",
+                "chore: drop the sandbox's empty placeholders",
+                env=clean,
+            )
 
     async def _work_on_clone(
         self,
@@ -324,6 +367,7 @@ class CloudWorker(Worker):
                 folder=str(root),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
+                members=job.members,
             ),
             root=root,
             effort=effort,
@@ -333,6 +377,7 @@ class CloudWorker(Worker):
         if not result.ok:
             return result
         on_progress("Preparando el cambio para el ordenador")
+        await self._drop_leftovers(root, base, clean)
         # Work the model forgot to commit is still its work.
         await _run("git", "-C", str(root), "add", "-A", env=clean)
         await _run(
@@ -393,6 +438,13 @@ class CloudWorker(Worker):
                 f"lo comprobará y abrirá el PR.\n\n{result.text}"
             ),
         )
+
+
+async def _leftovers_in(root: Path, names: list[str]) -> list[str]:
+    def check() -> list[str]:
+        return [name for name in names if sandbox_leftover(root / name)]
+
+    return await asyncio.to_thread(check)
 
 
 def cloud_worker(settings: Settings | None = None) -> CloudWorker | None:

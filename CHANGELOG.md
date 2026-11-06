@@ -68,6 +68,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that refuses what is not public, and at most 4 run at once. What it still risks is
   in `docs/security.md`.
 
+- **Jarvis keeps working with the PC off.** A cloud work thread (`KWAMI_CLOUD_WORKER`)
+  takes the work of users who allow it from the app, on their own Anthropic key, keeps
+  each thread's files in Storage, and leaves changes to Jarvis's own code as patches.
+  When the PC is on again it brings everything home without stopping either side:
+  files into `Jarvis\nube`, never over the user's own, and patches as pull requests.
+- **The user's own agents.** Specialists defined in the app join the executor's team on
+  the PC and in the cloud, a job can run as one of them with its model and tools, and
+  the voice can hand a task to one by name.
+
 ### Changed
 
 - **A session's thread is created with its first message.** Every session created a Zep
@@ -83,6 +92,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No shell on a server other users share.** On LiveKit Cloud a code task ran Claude
+  Code with Bash in the agent's own container, as the agent's system user, so a script
+  written into the task folder could read the agent's environment from `/proc` -- the
+  Supabase service key and every other deployment secret -- and other users' folders.
+  The voice agent's cloud runs and the cloud work thread now edit files without a
+  shell; the user's own PC keeps it.
 - **The kwami learns the user's name in their language.** Name detection only knew English
   ("my name is"), so a user who said "me llamo Daniel" was never greeted by name and every
   message was stored as from "User". It now reads the user's own Zep node first (Zep

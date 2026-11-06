@@ -40,10 +40,15 @@ def no_real_login(monkeypatch: pytest.MonkeyPatch) -> None:
 
 class Jobs:
     thinking_ready = False
+    sync_ready = True
 
     def __init__(self, stored: bool = True) -> None:
         self.stored = stored
         self.beats = 0
+        self.sync_looks = 0
+
+    async def claim_sync(self, user_id: str, runner_id: str) -> None:
+        self.sync_looks += 1
 
     async def beat(self, *args: Any) -> bool:
         self.beats += 1

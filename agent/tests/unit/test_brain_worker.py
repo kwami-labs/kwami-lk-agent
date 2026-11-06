@@ -88,6 +88,16 @@ class FakeJobs:
     async def beat(self, *args: Any) -> bool:
         return True
 
+    agent_rows: list[dict[str, Any]] = []
+
+    async def agents(self, user_id: str) -> list[dict[str, Any]]:
+        return self.agent_rows
+
+    sync_ready = False
+
+    async def claim_sync(self, user_id: str, runner_id: str) -> None:
+        return None
+
 
 class FakeLedger:
     instances: list[FakeLedger] = []
@@ -410,3 +420,53 @@ async def test_with_the_slots_full_the_loop_waits(
     monkeypatch.setattr(worker_module, "WORK_SLOTS", 0)
     worker = _worker(FakeJobs(), Recorder(), tmp_path)
     assert await worker.start_next() is False
+
+
+# -- the user's agents from the app ------------------------------------------------------
+
+AGENT_ROW = {
+    "id": "a1",
+    "name": "facturas",
+    "description": "Revisa las facturas",
+    "prompt": "Lee cada factura y di cuál falta por pagar.",
+    "model": "claude-haiku-5-5",
+    "tools": ["Read", "Edit"],
+    "effort": "low",
+}
+
+
+async def test_the_users_agents_join_every_jobs_team(tmp_path: Path) -> None:
+    jobs, run = FakeJobs(), Recorder()
+    jobs.agent_rows = [AGENT_ROW]
+    jobs.add()
+    await _worker(jobs, run, tmp_path).tick()
+    config = run.calls[0]["config"]
+    assert set(config.members) == {"facturas"} and config.permissions == "full_no_push"
+    assert run.calls[0]["task"] == "Haz algo"
+
+
+async def test_a_job_for_an_agent_runs_as_that_agent(tmp_path: Path) -> None:
+    jobs, run = FakeJobs(), Recorder()
+    jobs.agent_rows = [AGENT_ROW]
+    jobs.add(agent_id="a1", model="claude-opus-5-5")
+    await _worker(jobs, run, tmp_path).tick()
+    call = run.calls[0]
+    assert call["model"] == "claude-haiku-5-5"
+    assert call["config"].permissions == "edit_only"
+    assert call["task"].startswith("You are facturas, one of the user's own agents")
+    assert "Lee cada factura" in call["task"] and call["task"].endswith("Haz algo")
+
+
+async def test_a_job_whose_agent_is_gone_does_not_run(tmp_path: Path) -> None:
+    jobs, run = FakeJobs(), Recorder()
+    jobs.agent_rows = [{**AGENT_ROW, "prompt": ""}]
+    job = jobs.add(agent_id="a1")
+    other = jobs.add(agent_id="zz")
+    worker = _worker(jobs, run, tmp_path)
+    await worker.tick()
+    await worker.tick()
+    assert run.calls == []
+    assert [(f[0], f[1], f[2]) for f in jobs.finished] == [
+        (job.id, "failed", worker_module.AGENT_GONE),
+        (other.id, "failed", worker_module.AGENT_GONE),
+    ]

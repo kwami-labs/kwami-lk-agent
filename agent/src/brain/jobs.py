@@ -26,7 +26,7 @@ it could not be done, and the caller decides what that means.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -89,6 +89,10 @@ class BrainJob:
     #: The user's agent this job runs as (`brain_agents`), if any.
     agent_id: str = ""
     runner_id: str = ""
+    #: Set by the worker before the run, never stored: the executor's mode for the
+    #: agent the job runs as, and the user's agents that join the team.
+    permissions: str = "full_no_push"
+    members: dict[str, Any] = field(default_factory=dict)
     status: str = "queued"
     cancel_requested: bool = False
     progress: str = ""
