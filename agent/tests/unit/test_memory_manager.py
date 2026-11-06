@@ -223,6 +223,20 @@ async def test_configured_ids_are_honoured(zep_factory) -> None:
     assert memory.session_id == "fixed-session"
 
 
+@pytest.mark.parametrize("kwami_id", ["", "default"])
+async def test_no_per_kwami_id_means_no_memory(zep_factory, caplog, kwami_id) -> None:
+    """The fallback was the Zep user "kwami_default": one graph every id-less
+    session wrote into and recalled from."""
+    zep_factory()
+    memory = KwamiMemory(memory_config(configure_ontology=False), kwami_id)
+
+    with caplog.at_level(logging.WARNING):
+        assert await memory.initialize() is False
+
+    assert memory._client is None
+    assert "per-kwami user id" in caplog.text
+
+
 async def test_a_disabled_memory_refuses_to_initialize(caplog) -> None:
     memory = KwamiMemory(memory_config(api_key=""), "kwami-1")
 

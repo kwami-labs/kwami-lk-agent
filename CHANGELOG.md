@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No more shared memory for sessions without a kwami.** A config that named no kwami
+  fell back to the Zep user `kwami_default`, one graph every such session wrote into and
+  recalled from. Those sessions now run without memory. The live e2e suite deletes the
+  Zep users it creates.
 - **A browser vendor with no credit no longer ends the browsing.** A key says
   nothing about the balance behind it: a 402 from Browser Use left the panel dead
   with the raw httpx message, URL included, in front of the model. Launching now
