@@ -212,7 +212,8 @@ async def test_the_template_is_set_up_once_per_worker(monkeypatch) -> None:
     second = await start(configure_ontology=False)
 
     assert clients[0].context.calls == ["update"]
-    assert first._template_id == second._template_id == "kwami-context-kwami_kwami-1"
+    # One template per budget, shared by every user -- not one per user id.
+    assert first._template_id == second._template_id == "kwami-context-v2-e20-n10"
 
 
 async def test_a_template_that_could_not_be_set_up_is_tried_again(monkeypatch) -> None:
@@ -221,7 +222,7 @@ async def test_a_template_that_could_not_be_set_up_is_tried_again(monkeypatch) -
     async def unavailable(*args: Any, **kwargs: Any) -> None:
         return None
 
-    monkeypatch.setattr(manager, "setup_context_template", unavailable)
+    monkeypatch.setattr(manager, "setup_shared_template", unavailable)
     memory = await start(configure_ontology=False)
 
     assert memory._template_id is None

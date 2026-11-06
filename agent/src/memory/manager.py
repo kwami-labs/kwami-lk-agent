@@ -22,7 +22,15 @@ from typing import TYPE_CHECKING, Any
 
 from ..constants import Timeouts
 from ..domain import KwamiMemoryConfig
-from .context import TEMPLATE_PREFIX, MemoryContext, get_context, setup_context_template
+from .context import (
+    ContextBudget,
+    LastConversation,
+    MemoryContext,
+    budget_for,
+    get_context,
+    load_last_conversation,
+    setup_shared_template,
+)
 from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
@@ -48,6 +56,9 @@ CUSTOM_ONTOLOGY = "custom"
 # a reconnect -- does not pay for it again. Sets of Zep user ids and template ids.
 _ONTOLOGY_SETTLED: set[str] = set()
 _TEMPLATES_READY: set[str] = set()
+
+#: Exchanges between refreshes of the memory block while a session runs.
+REFRESH_EVERY_EXCHANGES = 3
 
 
 class KwamiMemory:
@@ -89,6 +100,14 @@ class KwamiMemory:
         # Writes that must not hold up a reply, kept so they are not collected.
         self._background: set[asyncio.Task] = set()
 
+        # The previous session's ending, read once per session.
+        self._last_conversation: LastConversation | None = None
+        self._last_conversation_loaded = False
+        # Exchanges written to this session's thread, and whether the memory
+        # block in the prompt is due to be read again.
+        self._exchanges = 0
+        self._refresh_due = False
+
     # ========================================================================
     # Properties
     # ========================================================================
@@ -112,6 +131,14 @@ class KwamiMemory:
     def session_id(self) -> str | None:
         """The Zep thread ID, or None before initialize() has assigned one."""
         return self._session_id or None
+
+    @property
+    def budget(self) -> ContextBudget:
+        """How much memory the retrieval preset puts in the prompt.
+
+        Read from the config each time: a live config update changes the knob.
+        """
+        return budget_for(self.config.max_context_messages)
 
     def set_usage_tracker(self, usage_tracker) -> None:
         """Attach the shared session usage tracker."""
@@ -252,11 +279,15 @@ class KwamiMemory:
         _ONTOLOGY_SETTLED.add(self._user_id)
 
     async def _ensure_template(self, client: AsyncZep) -> str | None:
-        """The context template, set up once per worker rather than per session."""
-        template_id = f"{TEMPLATE_PREFIX}-{self._user_id}"
+        """The context template of the current budget, set up once per worker.
+
+        One template per budget, shared by every user, rather than an identical
+        one per user id.
+        """
+        template_id = self.budget.template_id
         if template_id in _TEMPLATES_READY:
             return template_id
-        ready = await setup_context_template(client, self._user_id)
+        ready = await setup_shared_template(client, self.budget)
         if ready:
             _TEMPLATES_READY.add(ready)
         return ready
@@ -369,6 +400,11 @@ class KwamiMemory:
                 ignore_roles=["assistant"],
             )
             self._record_usage("zep/add_messages")
+            self._exchanges += 1
+            # The first exchange moves recall from the last session onto this
+            # one; after that, every few exchanges as the talk moves on.
+            if self._exchanges == 1 or self._exchanges % REFRESH_EVERY_EXCHANGES == 0:
+                self._refresh_due = True
             logger.debug(
                 "Added %s messages to memory (user: %s, assistant: %s)",
                 len(messages),
@@ -509,8 +545,31 @@ class KwamiMemory:
     # Context Retrieval
     # ========================================================================
 
+    def take_refresh_due(self) -> bool:
+        """Whether the prompt's memory block should be read again; clears it."""
+        due, self._refresh_due = self._refresh_due, False
+        return due
+
+    async def last_conversation(self) -> LastConversation | None:
+        """The end of the most recent earlier session, read once per session."""
+        if not self._last_conversation_loaded and self._client is not None:
+            self._last_conversation = await load_last_conversation(
+                self._client,
+                self._user_id,
+                self._session_id,
+                self.config.max_context_messages,
+            )
+            self._last_conversation_loaded = True
+        return self._last_conversation
+
     async def get_context(self) -> MemoryContext:
         """Get memory context for LLM injection.
+
+        Until this session has an exchange of its own, its thread is empty, and
+        Zep's context for an empty thread has nothing to be relevant to. So the
+        context is asked relative to the last session that had one, and that
+        session's ending comes along -- what the user and the kwami were in the
+        middle of when they last spoke.
 
         Returns:
             MemoryContext with summary, facts, entities, and recent messages.
@@ -519,16 +578,25 @@ class KwamiMemory:
             return MemoryContext()
 
         try:
+            budget = self.budget
+            template_id = await self._ensure_template(self._client)
+            last = await self.last_conversation()
+            on_last = last is not None and self._exchanges == 0
             context = await get_context(
                 client=self._client,
                 user_id=self._user_id,
-                session_id=self._session_id,
-                template_id=self._template_id,
+                session_id=last.thread_id if on_last and last else self._session_id,
+                template_id=template_id,
                 kwami_name=self.kwami_name,
                 max_messages=self.config.max_context_messages,
                 min_relevance=self.config.min_fact_relevance,
                 include_facts=self.config.include_facts,
+                budget=budget,
+                recent_messages=last.messages if on_last and last else None,
             )
+            if last is not None:
+                context.last_conversation = last.messages
+                context.last_conversation_at = last.ended_at
             # Same rule as graph search: get_context swallows its own errors
             # and returns an empty context, so bill only on a real result.
             if context.has_content():

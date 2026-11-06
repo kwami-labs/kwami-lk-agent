@@ -3,10 +3,20 @@
 Handles assembling context from Zep for LLM system prompt injection.
 Uses Zep context templates for consistent, structured retrieval and
 includes temporal validity information for facts.
+
+How much memory reaches the model follows the panel's retrieval preset (see
+`budget_for`): the preset used to change only how many messages of the
+*current* thread were read -- a thread that is empty when the session starts --
+so "rich" and "lean" put the same 2,200 characters in front of the model.
+
+Each session is a new Zep thread, so on its own a session starts with no idea
+what was said last time. `load_last_conversation` reads the end of the most
+recent earlier session, and until the new one has an exchange of its own, Zep's
+context is asked relative to that earlier session too.
 """
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .utils import logger
 
@@ -15,12 +25,82 @@ if TYPE_CHECKING:
 
 # Template ID prefix for Kwami context templates
 TEMPLATE_PREFIX = "kwami-context"
-MAX_CONTEXT_BLOCK_CHARS = 2200
+MAX_CONTEXT_BLOCK_CHARS = 3000
 MAX_SUMMARY_CHARS = 600
 MAX_FACTS = 8
 MAX_FACT_CHARS = 180
 MAX_ENTITIES = 6
 MAX_ENTITY_SUMMARY_CHARS = 120
+#: One line of a carried-over conversation.
+MAX_CARRIED_MESSAGE_CHARS = 240
+#: Earlier sessions looked at for one that has anything in it: reconnects and
+#: dropped calls leave empty threads behind.
+MAX_THREADS_TO_SCAN = 4
+
+
+@dataclass(frozen=True)
+class ContextBudget:
+    """How much memory one retrieval preset puts in front of the model."""
+
+    #: The whole memory section of the system prompt.
+    chars: int
+    #: Facts and entities asked of Zep's context template.
+    edges: int
+    entities: int
+    #: Facts and entities kept when the template path is unavailable.
+    facts: int
+    fallback_entities: int
+
+    @property
+    def template_id(self) -> str:
+        """One shared template per budget, not one per user.
+
+        Templates are project-wide in Zep; the old per-user id created one
+        identical template for every user that ever opened a session.
+        """
+        return f"{TEMPLATE_PREFIX}-v2-e{self.edges}-n{self.entities}"
+
+    @property
+    def template(self) -> str:
+        return (
+            "# USER PROFILE\n%{user_summary}\n\n"
+            f"# RELEVANT FACTS\n%{{edges limit={self.edges}}}\n\n"
+            f"# KEY ENTITIES\n%{{entities limit={self.entities}}}"
+        )
+
+
+LEAN_BUDGET = ContextBudget(chars=1500, edges=10, entities=5, facts=5, fallback_entities=4)
+BALANCED_BUDGET = ContextBudget(
+    chars=MAX_CONTEXT_BLOCK_CHARS,
+    edges=20,
+    entities=10,
+    facts=MAX_FACTS,
+    fallback_entities=MAX_ENTITIES,
+)
+RICH_BUDGET = ContextBudget(chars=6000, edges=40, entities=20, facts=16, fallback_entities=12)
+
+
+def budget_for(max_context_messages: int) -> ContextBudget:
+    """The budget of the preset that sends this many context messages.
+
+    The app's presets are lean (4), balanced (10) and rich (16); anything in
+    between rounds to the nearer side.
+    """
+    if max_context_messages <= 4:
+        return LEAN_BUDGET
+    if max_context_messages <= 10:
+        return BALANCED_BUDGET
+    return RICH_BUDGET
+
+
+@dataclass
+class LastConversation:
+    """The end of the most recent earlier session that has anything in it."""
+
+    thread_id: str
+    messages: list[dict]
+    ended_at: str | None = None
+
 
 # Default context template definition
 # Uses Zep template variables for structured retrieval
@@ -46,6 +126,12 @@ class MemoryContext:
     entities: list[dict] = field(default_factory=list)
     recent_messages: list[dict] = field(default_factory=list)
 
+    #: How much of all this reaches the prompt.
+    budget: ContextBudget = BALANCED_BUDGET
+    #: The end of the previous session, carried into this one.
+    last_conversation: list[dict] = field(default_factory=list)
+    last_conversation_at: str | None = None
+
     def __post_init__(self):
         self.facts = self.facts or []
         self.entities = self.entities or []
@@ -59,18 +145,54 @@ class MemoryContext:
         against a brand-new user unless it is checked explicitly. Billing keys
         off this so a failed round-trip is not charged.
         """
-        return bool(self.context_block or self.summary or self.facts or self.recent_messages)
+        return bool(
+            self.context_block
+            or self.summary
+            or self.facts
+            or self.recent_messages
+            or self.last_conversation
+        )
 
     def to_system_prompt_addition(self) -> str:
         """Convert memory context to text for system prompt injection.
 
         Prefers the pre-formatted context block from Zep templates
         when available. Falls back to manual formatting of individual
-        components.
+        components. The previous session's ending follows, within the same
+        budget: up to a third of it, most recent lines kept.
         """
+        conversation = self._last_conversation_text()
+        if conversation:
+            share = min(len(conversation), self.budget.chars // 3)
+            conversation = conversation[-share:]
+            graph = self._graph_text()[: self.budget.chars - share - 2]
+            return "\n\n".join(part for part in (graph, conversation) if part)
+        return self._graph_text()[: self.budget.chars]
+
+    def _last_conversation_text(self) -> str:
+        if not self.last_conversation:
+            return ""
+        lines = []
+        for message in self.last_conversation:
+            content = " ".join(str(message.get("content") or "").split())
+            if not content:
+                continue
+            speaker = message.get("name") or (
+                "User" if message.get("role") == "user" else "Assistant"
+            )
+            lines.append(f"{speaker}: {content[:MAX_CARRIED_MESSAGE_CHARS]}")
+        if not lines:
+            return ""
+        when = f" (ended {self.last_conversation_at})" if self.last_conversation_at else ""
+        return (
+            f"## How your last conversation ended{when}\n"
+            "Pick up from here if it is relevant; do not repeat it back.\n" + "\n".join(lines)
+        )
+
+    def _graph_text(self) -> str:
         # Prefer the template-generated context block
         if self.context_block:
-            return self.context_block[:MAX_CONTEXT_BLOCK_CHARS]
+            return self.context_block
 
         # Fallback: manually format from components
         parts = []
@@ -79,7 +201,9 @@ class MemoryContext:
             parts.append(f"## Conversation Summary\n{self.summary[:MAX_SUMMARY_CHARS]}")
 
         if self.facts:
-            facts_text = "\n".join(f"- {fact[:MAX_FACT_CHARS]}" for fact in self.facts[:MAX_FACTS])
+            facts_text = "\n".join(
+                f"- {fact[:MAX_FACT_CHARS]}" for fact in self.facts[: self.budget.facts]
+            )
             parts.append(
                 "## Known Facts About the Human User\n"
                 "These facts are about the HUMAN you are talking to "
@@ -93,7 +217,7 @@ class MemoryContext:
             entities_text = "\n".join(
                 f"- {str(e.get('name', 'Unknown'))[:60]}: "
                 f"{str(e.get('summary', e.get('type', 'entity')))[:MAX_ENTITY_SUMMARY_CHARS]}"
-                for e in self.entities[:MAX_ENTITIES]
+                for e in self.entities[: self.budget.fallback_entities]
             )
             parts.append(f"## Relevant Entities\n{entities_text}")
 
@@ -151,6 +275,80 @@ async def setup_context_template(
         return None
 
 
+async def setup_shared_template(client: "AsyncZep", budget: ContextBudget) -> str | None:
+    """Create or refresh the project-wide template for one budget."""
+    template_id = budget.template_id
+    try:
+        try:
+            await client.context.update_context_template(
+                template_id=template_id, template=budget.template
+            )
+            return template_id
+        except Exception as e:
+            logger.debug("Could not update context template %s, creating: %s", template_id, e)
+        await client.context.create_context_template(
+            template_id=template_id, template=budget.template
+        )
+        logger.info("Created context template: %s", template_id)
+        return template_id
+    except Exception as e:
+        logger.debug("Could not set up context template: %s", e)
+        return None
+
+
+def _message_dict(message: Any) -> dict:
+    role = getattr(message, "role", None) or getattr(message, "role_type", None)
+    return {
+        "role": str(getattr(role, "value", role)) if role else None,
+        "content": getattr(message, "content", None),
+        "name": getattr(message, "name", None),
+        "created_at": getattr(message, "created_at", None),
+    }
+
+
+async def load_last_conversation(
+    client: "AsyncZep", user_id: str, current_thread_id: str, max_messages: int
+) -> LastConversation | None:
+    """The last `max_messages` of the most recent earlier session with anything in it.
+
+    Threads come newest first by creation; the current session's own thread
+    is skipped, and so are empty ones (a reconnect, a dropped call), up to
+    `MAX_THREADS_TO_SCAN` of them.
+    """
+    if max_messages <= 0:
+        return None
+    try:
+        threads = await client.user.get_threads(user_id)
+    except Exception as e:
+        logger.debug("Could not list earlier sessions: %s", e)
+        return None
+    earlier = sorted(
+        (
+            t
+            for t in threads or []
+            if getattr(t, "thread_id", None) and t.thread_id != current_thread_id
+        ),
+        key=lambda t: str(getattr(t, "created_at", "") or ""),
+        reverse=True,
+    )
+    for thread in earlier[:MAX_THREADS_TO_SCAN]:
+        thread_id = str(thread.thread_id)
+        try:
+            response = await client.thread.get(thread_id=thread_id, lastn=max_messages)
+        except Exception as e:
+            logger.debug("Could not read session %s: %s", thread_id, e)
+            continue
+        messages = [_message_dict(m) for m in getattr(response, "messages", None) or []]
+        messages = [m for m in messages if (m["content"] or "").strip()]
+        if messages:
+            return LastConversation(
+                thread_id=thread_id,
+                messages=messages,
+                ended_at=str(messages[-1]["created_at"]) if messages[-1]["created_at"] else None,
+            )
+    return None
+
+
 async def get_context(
     client: "AsyncZep",
     user_id: str,
@@ -160,6 +358,8 @@ async def get_context(
     max_messages: int = 10,
     min_relevance: float = 0.5,
     include_facts: bool = True,
+    budget: ContextBudget = BALANCED_BUDGET,
+    recent_messages: list[dict] | None = None,
 ) -> MemoryContext:
     """Retrieve memory context from Zep for LLM injection.
 
@@ -175,11 +375,13 @@ async def get_context(
         max_messages: Maximum recent messages to include.
         min_relevance: Minimum relevance score for facts.
         include_facts: Whether to include facts in context.
+        budget: How much of it the prompt takes.
+        recent_messages: Already read for `session_id`; skips reading them again.
 
     Returns:
         MemoryContext with all available context.
     """
-    context = MemoryContext()
+    context = MemoryContext(budget=budget)
 
     # Strategy 1: Use context template (preferred)
     if template_id:
@@ -219,7 +421,7 @@ async def get_context(
                     query="user information preferences interests goals",
                     scope="edges",
                     reranker="cross_encoder",
-                    limit=20,
+                    limit=max(budget.edges, 20),
                 )
                 if facts_response and facts_response.edges:
                     assistant_lower = kwami_name.lower()
@@ -230,6 +432,11 @@ async def get_context(
                         # Skip facts about the assistant
                         if _is_assistant_fact(fact, assistant_lower):
                             continue
+                        # The preset's relevance floor. It was passed in and
+                        # never applied; the cross-encoder fills `relevance`.
+                        relevance = getattr(edge, "relevance", None)
+                        if isinstance(relevance, int | float) and relevance < min_relevance:
+                            continue
                         # Include temporal validity
                         invalid_at = getattr(edge, "invalid_at", None)
                         if invalid_at and str(invalid_at) != "present":
@@ -239,6 +446,9 @@ async def get_context(
                 logger.debug("Could not retrieve facts via graph: %s", e)
 
     # Always get recent messages (not part of context template)
+    if recent_messages is not None:
+        context.recent_messages = list(recent_messages)
+        return context
     try:
         # `thread.get_messages` does not exist; the accessor is `thread.get`,
         # with `lastn` selecting the most recent turns. Until this was fixed,
