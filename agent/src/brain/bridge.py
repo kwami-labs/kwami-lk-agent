@@ -393,6 +393,11 @@ class Bridge:
         self.session = session
         self.publisher = publisher
 
+    @property
+    def working(self) -> bool:
+        """Whether a delegated task is still running: the user may be waiting on it."""
+        return any(t.status == "running" for t in self.tasks.values())
+
     def delegates(self) -> bool:
         """True when searches go to the brain rather than to the voice's own tools."""
         return can_delegate(self.config, self._keys)
