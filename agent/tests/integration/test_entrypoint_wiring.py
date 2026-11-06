@@ -63,9 +63,13 @@ class FakeCtx:
         self.proc = FakeProc(vad)
         self.job = FakeJob(job_metadata)
         self.shutdown_callbacks: list = []
+        self.room_deleted = False
 
     def add_shutdown_callback(self, fn) -> None:
         self.shutdown_callbacks.append(fn)
+
+    async def delete_room(self) -> None:
+        self.room_deleted = True
 
 
 class RecordingSession:
@@ -75,6 +79,7 @@ class RecordingSession:
 
     def __init__(self, *, userdata: Any = None, **kwargs: Any) -> None:
         self.userdata = userdata
+        self.kwargs = kwargs
         self.started_with: dict[str, Any] | None = None
         self.start_order: list[str] = []
         self.handlers: dict[str, list] = {}
@@ -235,6 +240,22 @@ async def test_each_replys_latency_is_relayed_to_the_app(fake_session, vad) -> N
         getattr(h, "__qualname__", "") == "TurnMetricsRelay.on_conversation_item_added"
         for h in handlers
     )
+
+
+async def test_a_silent_phone_caller_is_watched(fake_session, vad) -> None:
+    ctx = FakeCtx(FakeRoom(), vad)
+
+    await entrypoint(ctx)
+
+    session = fake_session.instances[-1]
+    assert session.kwargs["user_away_timeout"] == main_module.USER_AWAY_SECONDS
+    # Nobody on a SIP line here: going away in the app changes nothing.
+    session.handlers["user_state_changed"][0](type("Event", (), {"new_state": "away"})())
+    for callback in ctx.shutdown_callbacks:
+        result = callback()
+        if asyncio.iscoroutine(result):
+            await result
+    assert ctx.room_deleted is False
 
 
 async def test_data_messages_are_routed(fake_session, vad) -> None:
