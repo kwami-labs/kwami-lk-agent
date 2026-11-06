@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A thinking sound, if you want one.** `enhancements.thinkingSound` plays a soft keyboard
+  while the agent thinks, so a pause before the answer does not sound like a dropped call.
+  Off by default; read live, so it applies from the next turn.
 - **The app can see which tools reach the model.** A `tool_inventory` message names the
   built-ins that are on and the client tools the 128-tool trim left out, after entering
   the room and after every tools update.

@@ -258,6 +258,21 @@ async def test_a_silent_phone_caller_is_watched(fake_session, vad) -> None:
     assert ctx.room_deleted is False
 
 
+async def test_the_thinking_sound_follows_the_live_setting(fake_session, vad) -> None:
+    ctx = FakeCtx(FakeRoom(), vad)
+
+    await entrypoint(ctx)
+
+    session = fake_session.instances[-1]
+    [handler] = session.handlers["agent_state_changed"]
+    # Off by default: thinking publishes nothing, and nothing is left to close.
+    handler(type("Event", (), {"new_state": "thinking", "old_state": "listening"})())
+    handler(type("Event", (), {"new_state": "speaking", "old_state": "thinking"})())
+    assert not any(
+        getattr(t, "get_name", lambda: "")() == "thinking_sound" for t in asyncio.all_tasks()
+    )
+
+
 async def test_data_messages_are_routed(fake_session, vad) -> None:
     ctx = FakeCtx(FakeRoom(), vad)
 

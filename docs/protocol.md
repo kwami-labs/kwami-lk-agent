@@ -114,6 +114,12 @@ greeting if one was already delivered.
 
 Partial update. `updateType` selects the branch.
 
+Among the listening settings, `enhancements.thinkingSound` (boolean, off by
+default) plays a soft keyboard clip while the agent is `thinking`, on a second
+audio track named `background_audio` that is only published the first time it
+plays. Clients must treat that track as background, not as the agent's voice
+(SDK: kwami-labs/kwami#152).
+
 | `updateType` | Effect |
 | --- | --- |
 | `voice` | Listening settings (`enhancements`, `vad`) are applied to the session first, on either pipeline and without a rebuild; a payload of only those stops there. Then dispatches on the live pipeline. A pipeline switch rebuilds; on `realtime`, voice and temperature go over the open socket and provider/model rebuild; otherwise TTS/STT options, with a rebuild on a provider change or a speed change the provider cannot apply live |
