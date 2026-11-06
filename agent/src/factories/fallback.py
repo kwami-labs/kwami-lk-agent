@@ -14,6 +14,11 @@ order of measured latency (voice_lab, 2026-10-20). A provider that fails is
 skipped until a background probe sees it recover, so a spent quota costs one
 failed attempt, not one per turn.
 
+Every chain ends on LiveKit Inference, which answers on the LiveKit project's
+credentials alone: a worker on LiveKit Cloud always has them, so a deployment
+whose provider keys are all spent -- or were never set -- still has an ear, a
+brain and a voice. It is last because it bills the LiveKit project.
+
 The backups are only ever stand-ins. The configured provider stays first, and
 the LLM chain is sticky so a recovered Gemini does not flip the voice's brain
 back and forth mid-conversation.
@@ -25,14 +30,23 @@ from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
 
+from livekit.agents import NOT_GIVEN, inference
 from livekit.agents import llm as lk_llm
 from livekit.agents import stt as lk_stt
 from livekit.agents import tts as lk_tts
 
+from ..constants import CartesiaVoices
 from ..domain import KwamiVoiceConfig
 from ..settings import get_settings
 from ..utils.logging import get_logger
-from .availability import LLM_REQUIREMENTS, STT_REQUIREMENTS, TTS_REQUIREMENTS, _met
+from .availability import (
+    LIVEKIT_INFERENCE,
+    LLM_REQUIREMENTS,
+    STT_REQUIREMENTS,
+    TTS_REQUIREMENTS,
+    _met,
+)
+from .tts import session_language
 
 logger = get_logger("fallback")
 
@@ -43,7 +57,21 @@ LLM_BACKUPS: tuple[tuple[str, str], ...] = (
     ("openai", "gpt-4.1-mini"),
     ("anthropic", "claude-haiku-5-5"),
     ("groq", "openai/gpt-oss-120b"),
+    # Last resort: LiveKit Inference needs only the LiveKit project's credentials,
+    # which a cloud worker always has, so a session with every provider key spent
+    # (or none configured) still has a brain. Billed to the LiveKit project.
+    ("inference", "openai/gpt-4.1-mini"),
 )
+
+#: The last resort for the ears and the voice, for the same reason: LiveKit
+#: Inference answers on the LiveKit credentials alone. Deepgram Nova-3 reads
+#: Spanish well and streams; Sonic-3 speaks every language the app offers.
+INFERENCE_STT_MODEL = "deepgram/nova-3"
+INFERENCE_TTS_MODEL = "cartesia/sonic-3"
+#: Cartesia stock voices any project can use: a calm male and a female one, so
+#: the last resort keeps the character's register like the other backups do.
+INFERENCE_TTS_MALE = CartesiaVoices.BRITISH_NARRATOR
+INFERENCE_TTS_FEMALE = CartesiaVoices.BRITISH_LADY
 
 #: STT: AssemblyAI 0.13 s after end of speech, Deepgram streams and reads Spanish well.
 STT_BACKUPS: tuple[tuple[str, str], ...] = (
@@ -147,6 +175,38 @@ def _chain(
     return members
 
 
+def _inference_available() -> bool:
+    return _met((LIVEKIT_INFERENCE,), get_settings().provider_keys)
+
+
+def _with_last_resort(stage: str, members: list[Any], build: Callable[[], Any]) -> list[Any]:
+    """Append the LiveKit Inference backup to a chain, when the worker can reach it."""
+    if not _inference_available():
+        return members
+    try:
+        members.append(build())
+    except Exception as e:
+        logger.warning("Could not build the %s last resort on LiveKit Inference: %s", stage, e)
+        return members
+    logger.info("%s last resort: LiveKit Inference", stage.upper())
+    return members
+
+
+def inference_stt_backup(config: KwamiVoiceConfig) -> Any:
+    """Deepgram Nova-3 through LiveKit Inference, in the session's language."""
+    return inference.STT(model=INFERENCE_STT_MODEL, language=session_language(config) or "multi")
+
+
+def inference_tts_backup(config: KwamiVoiceConfig) -> Any:
+    """Cartesia Sonic-3 through LiveKit Inference, in the character's register."""
+    voice = INFERENCE_TTS_FEMALE if is_female_voice(config.tts_voice) else INFERENCE_TTS_MALE
+    return inference.TTS(
+        model=INFERENCE_TTS_MODEL,
+        voice=voice,
+        language=session_language(config) or NOT_GIVEN,
+    )
+
+
 #: Gemini through LiveKit Inference: the same family, billed to the LiveKit
 #: project, so a spent free-tier Google quota does not silence it. First
 #: backup when the voice thinks with Gemini (0.69 s to the first token).
@@ -188,6 +248,8 @@ def with_tts_fallback(primary: Any, config: KwamiVoiceConfig, create_tts: Callab
         )
 
     members = _chain("tts", primary, provider, TTS_BACKUPS, TTS_REQUIREMENTS, build)
+    if not _is_inference_model(primary, INFERENCE_TTS_MODEL):
+        members = _with_last_resort("tts", members, lambda: inference_tts_backup(config))
     if len(members) == 1:
         return primary
     # One retry on the primary: a blip should not change the voice, a spent
@@ -204,6 +266,8 @@ def with_stt_fallback(
         return create_stt(replace(config, stt_provider=p, stt_model=m))
 
     members = _chain("stt", primary, provider, STT_BACKUPS, STT_REQUIREMENTS, build)
+    if not _is_inference_model(primary, INFERENCE_STT_MODEL):
+        members = _with_last_resort("stt", members, lambda: inference_stt_backup(config))
     if len(members) == 1:
         return primary
     try:
@@ -211,6 +275,14 @@ def with_stt_fallback(
     except Exception as e:
         logger.warning("STT fallback unavailable (%s); using %s alone", e, provider)
         return primary
+
+
+def _is_inference_model(component: Any, model: str) -> bool:
+    """Whether `component` already is that LiveKit Inference model: no point backing it up with itself."""
+    module = type(component).__module__
+    return (
+        module.startswith("livekit.agents.inference") and getattr(component, "model", None) == model
+    )
 
 
 def primary_of(component: Any) -> Any:

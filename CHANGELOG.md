@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Client tools over LiveKit RPC.** An app that sets `kwami.client_tools=rpc` gets
   each tool call as an RPC to it alone, with the app's own error and deadline; any
   other app keeps the data-channel `tool_call`/`tool_result` pair.
+- **The voice never runs out of backups.** Speech-to-text, the voice LLM and text-to-speech
+  each end their fallback chain on LiveKit Inference (Deepgram Nova-3, GPT-4.1 mini,
+  Cartesia Sonic-3), which needs only the LiveKit project's credentials: a spent or missing
+  provider key no longer leaves a stage with nothing to fall back to.
 - **No more half-open phone lines.** A caller who goes silent is asked once whether
   they are still there; with no answer, the agent says goodbye and hangs up. Never
   while the brain is still working on something for them, and never in the app.
