@@ -550,16 +550,30 @@ class AgentToolsMixin:
             return "Memory is not available in this session."
 
         try:
-            results = await self._memory.search(topic, limit=5)
+            results = await self._memory.search(topic, limit=8)
 
             if not results:
                 return f"I don't have any memories about '{topic}' yet."
 
-            memories = [f"- {r['content']}" for r in results if r.get("content")]
+            facts = [
+                f"- {r['content']}"
+                for r in results
+                if r.get("content") and r.get("kind") != "entity"
+            ]
+            entities = [
+                f"- {r['content']}"
+                for r in results
+                if r.get("content") and r.get("kind") == "entity"
+            ]
 
-            if memories:
-                return f"Here's what I remember about '{topic}':\n" + "\n".join(memories)
-            return f"I don't have specific memories about '{topic}'."
+            if not facts and not entities:
+                return f"I don't have specific memories about '{topic}'."
+            parts = [f"Here's what I remember about '{topic}':"]
+            if facts:
+                parts.append("Facts:\n" + "\n".join(facts))
+            if entities:
+                parts.append("People, places and things:\n" + "\n".join(entities))
+            return "\n".join(parts)
 
         except Exception:
             logger.exception("Failed to recall memories")

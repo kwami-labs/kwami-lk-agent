@@ -91,6 +91,18 @@ _EDIT_TOOLS = [*_READ_ONLY_TOOLS, "Write", "Edit", "MultiEdit", "NotebookEdit"]
 #: (`child_env`) Claude Code forces the default mode and asks for what is not listed.
 #: Seen on 2026-11-01, when nobody was there to answer and nothing got written.
 _FULL_TOOLS = [*_EDIT_TOOLS, "Bash", "Agent", "Task"]
+#: Why a run on a shared host has no shell. Its commands would run as the agent's own
+#: system user, which can read the agent's environment (`/proc/<pid>/environ`) with
+#: every deployment key in it, and the other users' folders. Blanking the child's
+#: environment (`child_env`) does not reach the parent's, and the command checks below
+#: are a tripwire: a script written into the folder and run from there passes them.
+NO_SHELL = (
+    "Commands do not run here: this server is shared with other users. Edit the files "
+    "and say what should be run; checks run on the user's PC."
+)
+NO_SHELL_GUIDANCE = f"""
+{NO_SHELL} There is no Bash, so do not try to run tests, builds or git yourself.
+"""
 #: A model that only thinks. What it reads on the web can say anything, and on the
 #: user's own login it must not be able to act on it: no files, no commands.
 _THINK_TOOLS = ["WebSearch", "WebFetch"]
@@ -615,9 +627,14 @@ async def run_executor(
     `root` is a folder the caller made and will clean up, used as it is and confined
     to by the same guard: the cloud's clone of one of Jarvis's repositories.
     `resume` carries on an earlier run of the same folder, with what it knew.
+
+    Both are runs on a host other users share -- the voice agent's container, the
+    cloud work thread -- and neither gets a shell (`NO_SHELL`).
     """
     if root is not None:
-        return await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
+        return await _run_in(
+            root, api_key, model, task, config, resume, effort, on_progress, shell=False
+        )
     if cloud is None:
         root = resolve_executor_folder(config.folder)
         root.mkdir(parents=True, exist_ok=True)
@@ -627,7 +644,9 @@ async def run_executor(
     folder = cloud.folder or _task_folder()
     try:
         known = await restore_files(root, cloud, folder) if cloud.folder else {}
-        result = await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
+        result = await _run_in(
+            root, api_key, model, task, config, resume, effort, on_progress, shell=False
+        )
         prefix, stored = await upload_results(root, cloud, folder, known)
     finally:
         shutil.rmtree(root, ignore_errors=True)
@@ -650,6 +669,8 @@ async def _run_in(
     resume: str = "",
     effort: EffortLevel | None = None,
     on_progress: Callable[[str], None] | None = None,
+    *,
+    shell: bool = True,
 ) -> ExecutorResult:
     try:
         from claude_agent_sdk import (
@@ -676,6 +697,7 @@ async def _run_in(
     env = child_env(api_key)
     if not on_the_pc:
         env.update(cloud_home())
+    guidance = _system_append() + ("" if shell else NO_SHELL_GUIDANCE)
 
     async def guard(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
@@ -683,7 +705,12 @@ async def _run_in(
         tool_input = input_data.get("tool_input")
         tool_name = str(input_data.get("tool_name", ""))
         call = tool_input if isinstance(tool_input, dict) else {}
-        reason = check_tool_call(root, tool_name, call) or lane.refuse(tool_name)
+        # Also for a team member, whose own tool list may name Bash.
+        reason = (
+            NO_SHELL
+            if not shell and tool_name == "Bash"
+            else check_tool_call(root, tool_name, call) or lane.refuse(tool_name)
+        )
         if on_the_pc:
             record(tool_name, call, reason)
         if reason is None:
@@ -702,7 +729,7 @@ async def _run_in(
     options = ClaudeAgentOptions(
         cwd=str(root),
         model=model,
-        system_prompt={"type": "preset", "preset": "claude_code", "append": _system_append()},
+        system_prompt={"type": "preset", "preset": "claude_code", "append": guidance},
         max_turns=config.max_turns,
         max_budget_usd=config.max_task_usd,
         env=env,
@@ -737,7 +764,7 @@ async def _run_in(
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": _system_append() + TEAM_GUIDANCE,
+            "append": guidance + TEAM_GUIDANCE,
         }
     # The tools that exist at all, not only those allowed: Claude Code also offers its
     # own (scheduling, remote triggers, messages), which no job here has a use for.
@@ -771,8 +798,13 @@ async def _run_in(
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": _system_append() + TEAM_GUIDANCE + BROWSER_GUIDANCE,
+            "append": guidance + TEAM_GUIDANCE + BROWSER_GUIDANCE,
         }
+    if not shell:
+        # A list since `options.tools = list(...)` above.
+        options.tools = [name for name in options.tools if name != "Bash"]
+        options.allowed_tools = [name for name in options.allowed_tools if name != "Bash"]
+        options.disallowed_tools = sorted({*options.disallowed_tools, "Bash"})
     if resume:
         options.resume = resume
     if effort:

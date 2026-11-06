@@ -4,6 +4,7 @@ Provides typed entity search, user identity extraction, and
 general graph querying capabilities.
 """
 
+import asyncio
 import re
 from collections import Counter
 from typing import TYPE_CHECKING
@@ -14,55 +15,82 @@ if TYPE_CHECKING:
     from zep_cloud.client import AsyncZep
 
 
-async def search_thread(
+#: How much of an entity's summary a recall result carries.
+MAX_RECALL_SUMMARY_CHARS = 280
+
+
+def _fact_line(edge) -> str | None:
+    fact = getattr(edge, "fact", None)
+    if not fact:
+        return None
+    invalid_at = getattr(edge, "invalid_at", None)
+    if invalid_at:
+        return f"{fact} (no longer true since {invalid_at})"
+    return fact
+
+
+async def recall(
     client: "AsyncZep",
-    session_id: str,
+    user_id: str,
     query: str,
-    limit: int = 5,
-    user_id: str = "",
+    limit: int = 8,
 ) -> list[dict]:
-    """Search a user's memories for relevant context.
+    """Facts and entities about `query`, best first.
 
-    Args:
-        client: The async Zep client.
-        session_id: The thread/session ID, reported back on each result.
-        query: Search query.
-        limit: Maximum number of results.
-        user_id: The Zep user whose graph is searched. Required.
-
-    Returns:
-        List of search results with content and score.
+    The search this replaced looked at facts only, five at a time, so asking about a
+    person or a project returned scattered edges and never the entity's own
+    summary -- usually the most useful thing Zep holds about it. Both are
+    searched here, side by side, reranked by Zep's cross-encoder. A fact that
+    has stopped being true says so instead of being presented as current.
     """
     if not user_id:
-        logger.warning("search_thread called without a user_id; cannot search the graph")
+        logger.warning("recall called without a user_id; cannot search the graph")
         return []
 
-    try:
-        # zep-cloud has no `thread.search`. Recall is served by the user's
-        # knowledge graph, which is where facts actually live -- the old call
-        # raised AttributeError every time, so `recall_memories` always
-        # answered "I don't have any memories about that yet".
-        results = await client.graph.search(
+    edges_result, nodes_result = await asyncio.gather(
+        client.graph.search(
             user_id=user_id,
             query=query,
             scope="edges",
+            reranker="cross_encoder",
             limit=limit,
-        )
+        ),
+        client.graph.search(
+            user_id=user_id,
+            query=query,
+            scope="nodes",
+            reranker="cross_encoder",
+            limit=max(2, limit // 2),
+        ),
+        return_exceptions=True,
+    )
 
-        edges = getattr(results, "edges", None) or []
-        return [
-            {
-                "content": fact,
-                "score": getattr(edge, "score", 0) or 0,
-                "thread_id": session_id,
-            }
-            for edge in edges
-            if (fact := getattr(edge, "fact", None))
-        ]
-
-    except Exception as e:
-        logger.error("Failed to search memories: %s", e)
-        return []
+    results: list[dict] = []
+    if isinstance(edges_result, BaseException):
+        logger.error("Failed to search facts: %s", edges_result)
+    else:
+        for edge in getattr(edges_result, "edges", None) or []:
+            line = _fact_line(edge)
+            if line:
+                results.append(
+                    {"content": line, "score": getattr(edge, "score", 0) or 0, "kind": "fact"}
+                )
+    if isinstance(nodes_result, BaseException):
+        logger.error("Failed to search entities: %s", nodes_result)
+    else:
+        for node in getattr(nodes_result, "nodes", None) or []:
+            name = getattr(node, "name", None)
+            summary = " ".join((getattr(node, "summary", None) or "").split())
+            if not name or not summary:
+                continue
+            results.append(
+                {
+                    "content": f"{name}: {summary[:MAX_RECALL_SUMMARY_CHARS]}",
+                    "score": getattr(node, "score", 0) or 0,
+                    "kind": "entity",
+                }
+            )
+    return results
 
 
 async def get_entities_by_type(

@@ -621,12 +621,41 @@ async def test_a_failed_add_message_is_logged_not_raised(monkeypatch, caplog) ->
     assert "Failed to add message to memory" in caplog.text
 
 
-async def test_a_fact_is_stored_as_a_system_message(messaging_memory) -> None:
-    await messaging_memory.add_fact("the user prefers tea")
+async def test_a_fact_goes_to_the_graph_not_the_transcript(messaging_memory) -> None:
+    """It was a system message in the thread, so it showed up in the history."""
+    added: list[dict] = []
 
-    stored = messaging_memory._client.thread.added[0]["messages"][0]
-    assert stored.role == "system"
-    assert "the user prefers tea" in stored.content
+    async def graph_add(**kwargs: Any) -> None:
+        added.append(kwargs)
+
+    messaging_memory._client.graph.add = graph_add
+    tracker = SimpleNamespace(
+        calls=[], record_external_usage=lambda *a, **k: tracker.calls.append(a)
+    )
+    messaging_memory.set_usage_tracker(tracker)
+
+    await messaging_memory.add_fact("  the user prefers tea ")
+
+    assert added == [
+        {
+            "user_id": "kwami_kwami-1",
+            "type": "text",
+            "data": "the user prefers tea",
+            "source_description": "Asked to remember by Kwami",
+        }
+    ]
+    assert messaging_memory._client.thread.added == []
+    assert tracker.calls == [("memory", "zep/add_fact")]
+
+
+async def test_a_blank_fact_or_no_client_writes_nothing(messaging_memory) -> None:
+    async def graph_add(**kwargs: Any) -> None:  # never awaited
+        raise AssertionError
+
+    messaging_memory._client.graph.add = graph_add
+    await messaging_memory.add_fact("   ")
+    messaging_memory._client = None
+    await messaging_memory.add_fact("the user prefers tea")
 
 
 # =============================================================================

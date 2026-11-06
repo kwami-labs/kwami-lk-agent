@@ -115,6 +115,30 @@ async def test_recalled_memories_are_listed() -> None:
     assert "likes tea" in result and "lives in Madrid" in result
 
 
+async def test_facts_and_entities_are_listed_apart() -> None:
+    """An entity's summary is what Zep knows of a person or place as a whole."""
+    memory = FakeMemory()
+    memory.results = [
+        {"content": "Ana moved to Lisbon", "kind": "fact"},
+        {"content": "Ana: the user's sister", "kind": "entity"},
+    ]
+
+    result = await Tools(memory).recall_memories(None, "Ana")
+
+    assert result.index("Facts:") < result.index("Ana moved to Lisbon")
+    assert result.index("People, places and things:") < result.index("Ana: the user's sister")
+
+
+async def test_only_entities_is_still_an_answer() -> None:
+    memory = FakeMemory()
+    memory.results = [{"content": "Ana: the user's sister", "kind": "entity"}]
+
+    result = await Tools(memory).recall_memories(None, "Ana")
+
+    assert "Facts:" not in result
+    assert "Ana: the user's sister" in result
+
+
 async def test_nothing_remembered_about_a_topic_says_so() -> None:
     memory = FakeMemory()
     memory.results = []
