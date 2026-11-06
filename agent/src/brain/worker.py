@@ -43,7 +43,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ..adapters.supabase import SupabaseClient, as_user_id, get_supabase
 from ..envfile import load_env_file
 from ..settings import get_settings
-from ..utils.logging import get_logger
+from ..utils.logging import get_logger, log_to_console
 from .account import account_login, sign_in
 from .browser_tool import SIGN_IN_TOOL
 from .config import (
@@ -678,6 +678,7 @@ def main(argv: list[str] | None = None) -> None:
     arguments = _arguments(argv)
     root_env = Path(__file__).resolve().parents[3] / ".env"
     load_env_file(Path(arguments.env_file) if arguments.env_file else root_env)
+    log_to_console()
     try:
         raise SystemExit(asyncio.run(_main(argv)))
     except KeyboardInterrupt:

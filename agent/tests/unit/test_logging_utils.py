@@ -58,3 +58,18 @@ def test_redacted_accepts_things_that_are_not_strings() -> None:
     """Callers pass whatever the SDK handed them; it must not raise here."""
     assert redacted(12345) == "<5 chars>"
     assert redacted(["a", "b"]) == f"<{len(str(['a', 'b']))} chars>"
+
+
+def test_a_work_thread_logs_its_info_lines_to_stderr(monkeypatch) -> None:
+    """Started by plain Python, a worker printed nothing below WARNING (2026-11-06)."""
+    import logging
+
+    from src.utils import logging as logging_module
+
+    calls: list[dict] = []
+    configured: list[bool] = []
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: calls.append(kw))
+    monkeypatch.setattr(logging_module, "configure_logging", lambda: configured.append(True))
+    logging_module.log_to_console()
+    assert calls == [{"level": logging.INFO, "format": logging_module.CONSOLE_FORMAT}]
+    assert configured == [True]
