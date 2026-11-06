@@ -465,3 +465,90 @@ async def test_a_person_node_with_no_usable_label_or_summary_is_skipped() -> Non
     )
 
     assert await get_user_name(client, "u") is None
+
+
+# =============================================================================
+# names in the languages the kwami speaks, and the user's own node
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("fact", "name"),
+    [
+        ("Me llamo Daniel", "Daniel"),
+        ("El usuario se llama José", "José"),
+        ("mi nombre es lucía", "Lucía"),
+        ("Je m'appelle Zoë", "Zoë"),
+        ("Je m\u2019appelle Luc", "Luc"),
+        ("Mi chiamo Marco", "Marco"),
+        ("Chamo-me Ana", "Ana"),
+        ("My name's Bob", "Bob"),
+    ],
+)
+def test_a_self_introduction_in_any_of_the_languages(fact: str, name: str) -> None:
+    """The user's own words reach the graph in their language; "me llamo" was
+    never read, so a Spanish speaker was never greeted by name."""
+    assert _extract_name_from_fact(fact) == name
+
+
+class FakeUserApi:
+    def __init__(self, summary: str | None = None, error: Exception | None = None) -> None:
+        self.summary = summary
+        self.error = error
+
+    async def get_node(self, user_id: str):
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(node=SimpleNamespace(summary=self.summary))
+
+
+async def test_strategy_zero_reads_the_users_own_node(caplog) -> None:
+    """Zep summarises the user in English, name first, whatever language they spoke."""
+    client = FakeZep(results=results(edges=[]))
+    client.user = FakeUserApi("Daniel lives in Valencia. He has a dentist appointment.")
+
+    with caplog.at_level(logging.INFO):
+        assert await get_user_name(client, "u") == "Daniel"
+
+    assert "from the user node" in caplog.text
+    assert client.graph.calls == [], "no graph search when the node already says it"
+
+
+async def test_a_nameless_user_node_falls_through_to_the_searches() -> None:
+    client = FakeZep(results=results(edges=[edge("me llamo Ada")]))
+    client.user = FakeUserApi("The user lives in Valencia.")
+
+    assert await get_user_name(client, "u") == "Ada"
+
+
+async def test_an_unreadable_user_node_falls_through(caplog) -> None:
+    client = FakeZep(results=results(edges=[edge("my name is Ada")]))
+    client.user = FakeUserApi(error=RuntimeError("zep down"))
+
+    with caplog.at_level(logging.DEBUG):
+        assert await get_user_name(client, "u") == "Ada"
+
+    assert "Could not read the user node" in caplog.text
+
+
+async def test_the_kwami_is_never_the_user_node_name() -> None:
+    client = FakeZep(results=results(edges=[]))
+    client.user = FakeUserApi("Jarvis is the assistant the user talks to.")
+
+    assert await get_user_name(client, "u", "Jarvis") is None
+
+
+async def test_recall_names_the_users_own_node_without_its_id() -> None:
+    client = recall_client(
+        nodes=[
+            node(name="kwami_abc_def", summary="Daniel lives in Valencia."),
+            node(name="u-1", summary="Likes tea."),
+        ]
+    )
+
+    found = await recall(client, "u-1", "who am i")
+
+    assert [r["content"] for r in found] == [
+        "The user: Daniel lives in Valencia.",
+        "The user: Likes tea.",
+    ]
