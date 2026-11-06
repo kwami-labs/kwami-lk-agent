@@ -299,6 +299,83 @@ def test_a_short_non_uuid_cartesia_voice_falls_back(caplog) -> None:
     assert "expected UUID format" in caplog.text
 
 
+# =============================================================================
+# Voices designed in LiveKit Cloud ("v_...")
+# =============================================================================
+
+JARVIS_LIVEKIT_VOICE = "v_ZMPWZvfoRpsC"
+
+
+@pytest.mark.parametrize(
+    ("voice", "expected"),
+    [
+        (JARVIS_LIVEKIT_VOICE, True),
+        (f" {JARVIS_LIVEKIT_VOICE} ", True),
+        ("v_", False),
+        ("v_ab", False),
+        ("V_ZMPWZvfoRpsC", False),
+        ("v_ZMPW-ZvfoRpsC", False),
+        (CartesiaVoices.DEFAULT, False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_a_livekit_voice_is_told_by_its_id(voice, expected: bool) -> None:
+    assert tts_module.is_livekit_voice(voice) is expected
+
+
+def test_a_livekit_voice_speaks_through_inference_on_its_model() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="cartesia", tts_model="sonic-3.5", tts_voice=JARVIS_LIVEKIT_VOICE)
+    )
+
+    assert type(instance).__module__.startswith("livekit.agents.inference")
+    assert instance.model == "cartesia/sonic-3.5"
+    assert instance._opts.voice == JARVIS_LIVEKIT_VOICE
+
+
+def test_a_livekit_voice_saved_without_a_model_speaks_on_sonic_3_5() -> None:
+    """LiveKit designs its voices on Sonic 3.5; the plugin default would be Sonic 3.
+
+    The config's own default model is OpenAI's "tts-1": it used to reach the
+    gateway as "cartesia/tts-1", a model that does not exist.
+    """
+    for model in ("", "tts-1", "cartesia/tts-1"):
+        instance = create_tts(
+            voice_config(tts_provider="cartesia", tts_model=model, tts_voice=JARVIS_LIVEKIT_VOICE)
+        )
+        assert instance.model == "cartesia/sonic-3.5", model
+
+
+def test_a_cartesia_voice_with_another_providers_model_speaks_on_sonic_3() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="cartesia", tts_model="tts-1", tts_voice=CartesiaVoices.DEFAULT)
+    )
+
+    assert instance._opts.model == "sonic-3"
+
+
+def test_a_livekit_voice_keeps_the_session_language() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="cartesia", tts_voice=JARVIS_LIVEKIT_VOICE, stt_language="es")
+    )
+
+    assert instance._opts.language == "es"
+
+
+def test_a_livekit_voice_asks_for_no_cartesia_key(env_setting, caplog) -> None:
+    """LiveKit Inference bills the project: no CARTESIA_API_KEY warning for it."""
+    env_setting("CARTESIA_API_KEY", None)
+    with caplog.at_level(logging.WARNING):
+        create_tts(voice_config(tts_provider="cartesia", tts_voice=JARVIS_LIVEKIT_VOICE))
+    assert "CARTESIA_API_KEY" not in caplog.text
+
+    # A Cartesia voice of its own still needs the key, and says so.
+    with caplog.at_level(logging.WARNING):
+        create_tts(voice_config(tts_provider="cartesia", tts_voice=CartesiaVoices.DEFAULT))
+    assert "CARTESIA_API_KEY" in caplog.text
+
+
 def test_deepgram_is_constructed_with_a_known_voice() -> None:
     instance = create_tts(voice_config(tts_provider="deepgram", tts_voice=DeepgramVoices.DEFAULT))
 

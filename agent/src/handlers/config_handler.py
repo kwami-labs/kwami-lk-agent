@@ -12,6 +12,7 @@ from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..domain.charter import parse_charter
 from ..domain.pipelines import REALTIME_MODEL_PIPELINES
 from ..factories.fallback import primary_of
+from ..factories.tts import is_livekit_voice
 from ..memory import create_memory
 from ..tools.limits import enforce_tool_limit
 from ..utils.logging import get_logger
@@ -483,7 +484,18 @@ async def update_voice(
         strip_model_prefix(str(new_model), new_provider) != agent.kwami_config.voice.tts_model
     )
 
-    if provider_changed or speed_changed or style_changed or model_changed:
+    # A Cartesia voice speaks on one of two engines: a UUID on Cartesia's own
+    # plugin, a voice designed in LiveKit ("v_") on LiveKit Inference. Neither
+    # takes the other's voice in `update_options` -- the plugin refuses anything
+    # but a UUID -- so moving between them builds the engine again.
+    route_changed = (
+        not provider_changed
+        and new_provider == "cartesia"
+        and bool(new_voice)
+        and is_livekit_voice(new_voice) != is_livekit_voice(agent.kwami_config.voice.tts_voice)
+    )
+
+    if provider_changed or speed_changed or style_changed or model_changed or route_changed:
         reason = (
             "provider change"
             if provider_changed
@@ -491,6 +503,8 @@ async def update_voice(
             if speed_changed
             else "model change"
             if model_changed
+            else "Cartesia to LiveKit voice"
+            if route_changed
             else "voice direction change"
         )
         logger.info("Switching TTS: %s -> %s (%s)", current_provider, new_provider, reason)
