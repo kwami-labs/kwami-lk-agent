@@ -45,9 +45,11 @@ ENV PYTHONUNBUFFERED=1 \
 # The browser of last resort: see agent/src/browser/headless_chrome.py.
 # chromium-sandbox is only a Recommends, and it does not start without a sandbox.
 # git: the brain's cloud work thread clones Jarvis's public repositories.
+# bubblewrap: Claude Code isolates the commands it runs, and strips their secrets, with it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-sandbox \
+    bubblewrap \
     git \
     fonts-liberation \
     fonts-noto-color-emoji \
