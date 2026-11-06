@@ -206,13 +206,38 @@ def _task_folder() -> str:
     return f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
 
+#: Empty files Claude Code's command sandbox leaves in its working folder so that no
+#: command can create them (seen on LiveKit Cloud, 2026-11-06). Never a result.
+SANDBOX_PLACEHOLDERS = frozenset(
+    {
+        ".gitmodules",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        "bunfig.toml",
+        "package-lock.json",
+        "package.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+    }
+)
+
+
+def sandbox_leftover(path: Path) -> bool:
+    """One of the sandbox's empty placeholders, not something the model made."""
+    try:
+        return path.name in SANDBOX_PLACEHOLDERS and path.stat().st_size == 0
+    except OSError:
+        return False
+
+
 def _files_to_upload(root: Path) -> list[Path]:
     out: list[Path] = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
         if any(part in _SKIP_DIRS for part in rel.parts[:-1]) or not path.is_file():
             continue
-        if _ENV_FILE.search(f"/{rel.as_posix()}"):
+        if _ENV_FILE.search(f"/{rel.as_posix()}") or sandbox_leftover(path):
             continue
         out.append(path)
     return out

@@ -927,3 +927,19 @@ async def test_on_the_pc_claude_code_keeps_the_users_home(sdk, jarvis: Path) -> 
     env = sdk.last.options.env
     assert "CLAUDE_CONFIG_DIR" not in env
     assert env.get("HOME", "") != str(Path(executor.tempfile.gettempdir()) / "jarvis-claude-home")
+
+
+async def test_the_sandboxs_empty_placeholders_are_never_results(tmp_path: Path) -> None:
+    store = _ThreadStore({})
+    (tmp_path / "package.json").write_bytes(b"")
+    (tmp_path / ".npmrc").write_bytes(b"")
+    (tmp_path / "yarn.lock").write_text("real lock", encoding="utf-8")
+    (tmp_path / "vacio.md").write_bytes(b"")
+    workspace = CloudWorkspace(store=store, user_id="u", kwami_id="k")  # type: ignore[arg-type]
+    _, stored = await upload_results(tmp_path, workspace, "t")
+    assert sorted(store.uploaded) == ["u/k/t/vacio.md", "u/k/t/yarn.lock"]
+    assert stored == 2
+
+
+def test_a_placeholder_that_cannot_be_read_is_not_one(tmp_path: Path) -> None:
+    assert executor.sandbox_leftover(tmp_path / "package.json") is False

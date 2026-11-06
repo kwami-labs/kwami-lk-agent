@@ -563,3 +563,33 @@ async def test_the_users_agents_join_the_cloud_team_too() -> None:
     config = run.calls[0]["config"]
     assert set(config.members) == {"facturas"} and config.permissions == "read_only"
     assert run.calls[0]["task"].startswith("You are facturas")
+
+
+async def test_the_sandboxs_placeholders_never_reach_the_patch(public_repo: str) -> None:
+    jobs, store = FakeJobs(), FakeStore()
+    jobs.add(OWNER, repo="agent")
+
+    def act(root: Path) -> None:
+        (root / "real.py").write_text("x = 1\n", encoding="utf-8")
+        (root / "package.json").write_bytes(b"")  # left untracked
+        (root / "sub").mkdir()
+        (root / "sub" / ".npmrc").write_bytes(b"")
+        _git("add", "sub/.npmrc", "real.py", cwd=root)  # one the model committed
+        _git("-c", "user.name=m", "-c", "user.email=m@m", "commit", "-q", "-m", "feat: x", cwd=root)
+        (root / "yarn.lock").write_bytes(b"")  # untracked, but stays out too
+
+    await _worker(jobs, Recorder(act=act), store=store, repo_base=public_repo).tick()
+
+    patch = next(iter(store.uploads.values())).decode()
+    assert "real.py" in patch
+    assert "package.json" not in patch and "yarn.lock" not in patch
+    assert jobs.syncs[0]["files"] == 1
+
+
+async def test_no_placeholders_means_nothing_extra_to_commit(public_repo: str) -> None:
+    jobs, store = FakeJobs(), FakeStore()
+    jobs.add(OWNER, repo="agent")
+    await _worker(
+        jobs, Recorder(act=_writes("a.py", commit=True)), store=store, repo_base=public_repo
+    ).tick()
+    assert "drop the sandbox" not in next(iter(store.uploads.values())).decode()

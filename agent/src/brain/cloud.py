@@ -44,7 +44,13 @@ from ..envfile import load_env_file
 from ..settings import Settings, get_settings, set_settings
 from ..utils.logging import get_logger
 from .config import ExecutorConfig
-from .executor import FILES_BUCKET, CloudWorkspace, ExecutorResult, run_executor
+from .executor import (
+    FILES_BUCKET,
+    CloudWorkspace,
+    ExecutorResult,
+    run_executor,
+    sandbox_leftover,
+)
 from .jobs import BEAT_SECONDS, CLOUD_RUNNER_PREFIX, BrainJob, JobStore
 from .selfwork import REPOS, SELF_TASK, SelfWorkError, _clean_env, _must, _run, refusal
 from .team import SONNET
@@ -289,6 +295,37 @@ class CloudWorker(Worker):
         finally:
             await asyncio.to_thread(_remove_tree, parent)
 
+    async def _drop_leftovers(self, root: Path, base: str, clean: dict[str, str]) -> None:
+        """Keep the sandbox's empty placeholders out of the patch, wherever they ended up.
+
+        Left untracked they are deleted; committed by the model, they are taken out again.
+        """
+        _, untracked = await _run(
+            "git", "-C", str(root), "ls-files", "--others", "--exclude-standard", env=clean
+        )
+        for name in await _leftovers_in(root, untracked.splitlines()):
+            await asyncio.to_thread((root / name).unlink, True)
+        _, added = await _run(
+            "git", "-C", str(root), "diff", "--diff-filter=A", "--name-only", base, env=clean
+        )
+        committed = await _leftovers_in(root, added.splitlines())
+        if committed:
+            await _run("git", "-C", str(root), "rm", "-q", "--", *committed, env=clean)
+            await _run(
+                "git",
+                "-C",
+                str(root),
+                "-c",
+                "user.name=Jarvis",
+                "-c",
+                "user.email=jarvis@kwami.io",
+                "commit",
+                "-q",
+                "-m",
+                "chore: drop the sandbox's empty placeholders",
+                env=clean,
+            )
+
     async def _work_on_clone(
         self,
         job: BrainJob,
@@ -340,6 +377,7 @@ class CloudWorker(Worker):
         if not result.ok:
             return result
         on_progress("Preparando el cambio para el ordenador")
+        await self._drop_leftovers(root, base, clean)
         # Work the model forgot to commit is still its work.
         await _run("git", "-C", str(root), "add", "-A", env=clean)
         await _run(
@@ -400,6 +438,13 @@ class CloudWorker(Worker):
                 f"lo comprobará y abrirá el PR.\n\n{result.text}"
             ),
         )
+
+
+async def _leftovers_in(root: Path, names: list[str]) -> list[str]:
+    def check() -> list[str]:
+        return [name for name in names if sandbox_leftover(root / name)]
+
+    return await asyncio.to_thread(check)
 
 
 def cloud_worker(settings: Settings | None = None) -> CloudWorker | None:
