@@ -95,6 +95,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Supabase service key and every other deployment secret -- and other users' folders.
   The voice agent's cloud runs and the cloud work thread now edit files without a
   shell; the user's own PC keeps it.
+- **The kwami learns the user's name in their language.** Name detection only knew English
+  ("my name is"), so a user who said "me llamo Daniel" was never greeted by name and every
+  message was stored as from "User". It now reads the user's own Zep node first (Zep
+  summarises it in English, name first) and knows self-introductions in Spanish, Portuguese,
+  Italian and French. Recall shows the user's node as "The user", not its Zep id.
 - **No more shared memory for sessions without a kwami.** A config that named no kwami
   fell back to the Zep user `kwami_default`, one graph every such session wrote into and
   recalled from. Those sessions now run without memory. The live e2e suite deletes the

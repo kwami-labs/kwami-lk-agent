@@ -62,6 +62,19 @@ def _check_api_key(provider: str) -> bool:
     return False
 
 
+#: A voice designed in LiveKit Cloud: "v_" and letters or digits. Not a Cartesia
+#: UUID, so it only speaks through LiveKit Inference.
+_LIVEKIT_VOICE = re.compile(r"^v_[A-Za-z0-9]{6,40}$")
+
+#: The model LiveKit Cloud designs voices on. A "v_" voice with no model speaks on it.
+LIVEKIT_VOICE_MODEL = "sonic-3.5"
+
+
+def is_livekit_voice(voice: str | None) -> bool:
+    """Whether a voice id is one designed in LiveKit Cloud ("v_...")."""
+    return bool(voice) and bool(_LIVEKIT_VOICE.match(str(voice).strip()))
+
+
 # =============================================================================
 # TTS Factory
 # =============================================================================
@@ -88,8 +101,10 @@ def create_tts(config: KwamiVoiceConfig):
         config.tts_voice,
     )
 
-    # Check API key (warning only, don't block)
-    _check_api_key(provider)
+    # Check API key (warning only, don't block). A LiveKit voice needs none of
+    # ours: LiveKit Inference bills the project.
+    if not (provider == TTSProviders.CARTESIA and is_livekit_voice(config.tts_voice)):
+        _check_api_key(provider)
 
     try:
         if provider == TTSProviders.OPENAI:
@@ -276,7 +291,14 @@ def _create_cartesia_tts(config: KwamiVoiceConfig):
     if voice.lower() in CartesiaVoices.NAME_MAP:
         voice = CartesiaVoices.NAME_MAP[voice.lower()]
 
-    model = strip_model_prefix(config.tts_model or "", "cartesia") or "sonic-3"
+    livekit_voice = is_livekit_voice(voice)
+    # A LiveKit voice is designed on Sonic 3.5; one saved without a model speaks there.
+    default_model = LIVEKIT_VOICE_MODEL if livekit_voice else "sonic-3"
+    model = strip_model_prefix(config.tts_model or "", "cartesia")
+    # Cartesia only has Sonic models. The config's own default is OpenAI's "tts-1",
+    # which reached Cartesia as "cartesia/tts-1" when a save carried no model.
+    if not model.startswith("sonic"):
+        model = default_model
 
     # Without it the plugin speaks English: a Spanish voice then reads Spanish
     # text with English phonetics. Cartesia takes the bare code ("es").
@@ -285,7 +307,8 @@ def _create_cartesia_tts(config: KwamiVoiceConfig):
     # Voices designed in LiveKit carry a "v_" id, not a Cartesia UUID. The direct
     # plugin rejects them ("voice ID must be a valid UUID"), so route them through
     # LiveKit Inference, the way Rime and the ElevenLabs fallback already do.
-    if voice.startswith("v_"):
+    if livekit_voice:
+        voice = voice.strip()
         logger.info("🔊 Using LiveKit Inference for Cartesia: cartesia/%s:%s", model, voice)
         return inference.TTS(
             model=f"cartesia/{model}",
