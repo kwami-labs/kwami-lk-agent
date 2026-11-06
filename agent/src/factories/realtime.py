@@ -10,14 +10,17 @@ to a working default instead of taking the session down.
 
 from typing import Any, cast
 
+from livekit.agents import inference
 from livekit.agents.types import NOT_GIVEN
 from livekit.plugins import openai
 
 from ..constants import resolve_realtime_voice
 from ..domain import KwamiVoiceConfig
 from ..domain.pipelines import HYBRID_PIPELINE
+from ..settings import get_settings
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
+from .availability import LIVEKIT_INFERENCE, _met
 from .optional import optional_plugin
 
 try:
@@ -40,6 +43,36 @@ DEFAULT_OPENAI_REALTIME_MODEL = "gpt-realtime"
 DEFAULT_OPENAI_REALTIME_VOICE = "marin"
 DEFAULT_GOOGLE_REALTIME_MODEL = "gemini-3.8-live"
 DEFAULT_GOOGLE_REALTIME_VOICE = "Charon"
+
+#: Gemini Live models LiveKit Inference serves (livekit-agents 1.8.8+). Through
+#: Inference a session needs only the LiveKit project's credentials and is billed
+#: to it, so a deployment without a Google key still gets the Gemini Live the user
+#: chose instead of being moved to another vendor's realtime model.
+INFERENCE_GEMINI_LIVE_MODELS = frozenset(
+    {"gemini-3.8-live", "gemini-3.8-live-extended-thinking", "gemini-live"}
+)
+
+
+def _google_key_available(config: KwamiVoiceConfig) -> bool:
+    """A Google key the plugin can use: the user's own, or this deployment's."""
+    return bool(config.key_for("GOOGLE_API_KEY")) or bool(
+        get_settings().provider_keys.get("GOOGLE_API_KEY")
+    )
+
+
+def _gemini_live_through_inference(config: KwamiVoiceConfig, model: str, text_only: bool):
+    """Gemini Live on LiveKit Inference, or None when it cannot serve this session."""
+    model = model or DEFAULT_GOOGLE_REALTIME_MODEL
+    if model not in INFERENCE_GEMINI_LIVE_MODELS:
+        return None
+    if not _met((LIVEKIT_INFERENCE,), get_settings().provider_keys):
+        return None
+    logger.info("Using Gemini Live through LiveKit Inference: google/%s (no Google key)", model)
+    return inference.RealtimeModel(
+        model=f"google/{model}",
+        voice=_realtime_voice("google", config.realtime_voice, DEFAULT_GOOGLE_REALTIME_VOICE),
+        modalities=cast(Any, ["text"] if text_only else ["text", "audio"]),
+    )
 
 
 def _server_vad(config: KwamiVoiceConfig):
@@ -163,6 +196,10 @@ def create_realtime_model(config: KwamiVoiceConfig):
             )
 
         if provider == "google":
+            if not _google_key_available(config):
+                served = _gemini_live_through_inference(config, model, text_only)
+                if served is not None:
+                    return served
             if google is None:
                 logger.error(
                     "Realtime provider 'google' requested but livekit-plugins-google "
