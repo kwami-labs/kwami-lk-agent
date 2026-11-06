@@ -17,6 +17,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A client tool cannot end the session.** One whose name a provider refuses, or whose
   parameters are not an object schema, is skipped with a warning instead of making every
   request fail; the SDK's shorthand schema is wrapped as the SDK wraps it.
+- **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
+  Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
+  being moved to OpenAI Realtime, and the app offers it on that basis.
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.
@@ -46,6 +49,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Memory starts faster and keeps a custom ontology.** Each session start re-applied the
+  default ontology, which replaced any the user set in the memory panel, and re-created the
+  context template, both before the greeting. The ontology is now applied once per version
+  (recorded on the user's Zep metadata) and the template once per worker. The user's name is
+  kept on their Zep record, so it is known at once next time and Zep ties it to their node.
 - **The whole turn is heard.** A turn whose words say it has not finished is held, and the
   pieces are answered and remembered as one. A quick answer is spoken as the worker wrote it.
 
