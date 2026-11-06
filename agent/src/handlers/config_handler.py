@@ -276,14 +276,21 @@ async def handle_full_config(
                 if not new_config.memory.user_id and new_config.kwami_id:
                     # Client sends full memory id (e.g. kwami_<auth>_<kwamiId>); use as-is so each kwami has its own memory
                     new_config.memory.user_id = new_config.kwami_id
-                memory = _reuse_existing_memory(state, new_config.memory)
-                if memory is None:
-                    memory = await create_memory(
-                        config=new_config.memory,
-                        kwami_id=new_config.kwami_id or "default",
-                        kwami_name=new_config.kwami_name,
-                        usage_tracker=state.usage_tracker,
-                    )
+                if not new_config.memory.user_id:
+                    # This used to fall back to kwami_id "default", i.e. the Zep
+                    # user "kwami_default" -- one graph shared by every session
+                    # that arrived without an id, each reading the others'
+                    # facts back into its prompt. No id, no memory.
+                    logger.warning("Config carries no kwami id; memory is off for this session")
+                else:
+                    memory = _reuse_existing_memory(state, new_config.memory)
+                    if memory is None:
+                        memory = await create_memory(
+                            config=new_config.memory,
+                            kwami_id=new_config.kwami_id or new_config.memory.user_id,
+                            kwami_name=new_config.kwami_name,
+                            usage_tracker=state.usage_tracker,
+                        )
 
         # 3. Create NEW Agent with this config
         # Only skip greeting if one was already delivered in this session.

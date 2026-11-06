@@ -123,6 +123,11 @@ class KwamiMemory:
             logger.warning("Memory is disabled or API key not configured")
             return False
 
+        if not self.config.user_id and self.kwami_id in ("", "default"):
+            # "kwami_default" is a graph every id-less session would share.
+            logger.warning("Memory needs a per-kwami user id; not initializing")
+            return False
+
         AsyncZep, _, _ = get_zep_imports()
         if AsyncZep is None:
             logger.error("zep_cloud not available, disabling memory")
