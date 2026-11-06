@@ -101,6 +101,7 @@ class LastConversation:
     messages: list[dict]
     ended_at: str | None = None
 
+
 # Default context template definition
 # Uses Zep template variables for structured retrieval
 DEFAULT_CONTEXT_TEMPLATE = """# USER PROFILE
