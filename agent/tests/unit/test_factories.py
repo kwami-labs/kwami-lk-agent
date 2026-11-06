@@ -64,6 +64,38 @@ class TestFactories(unittest.TestCase):
         self.assertEqual(call_args["model"], "nova-2-medical")
         self.assertEqual(call_args["language"], "fr")
 
+    @patch("src.factories.tts.inference.TTS")
+    def test_create_cartesia_tts_livekit_voice(self, mock_inference_tts):
+        """A voice designed in LiveKit ('v_' id) is served through Inference."""
+        config = KwamiVoiceConfig(
+            tts_provider=TTSProviders.CARTESIA,
+            tts_model="sonic-3.5",
+            tts_voice="v_ZMPWZvfoRpsC",
+        )
+
+        create_tts(config)
+
+        mock_inference_tts.assert_called_once()
+        kwargs = mock_inference_tts.call_args[1]
+        self.assertEqual(kwargs["model"], "cartesia/sonic-3.5")
+        self.assertEqual(kwargs["voice"], "v_ZMPWZvfoRpsC")
+
+    @patch("src.factories.tts.cartesia.TTS")
+    def test_create_cartesia_tts_uuid_voice(self, mock_cartesia_tts):
+        """A Cartesia library voice (UUID id) still uses the direct plugin."""
+        config = KwamiVoiceConfig(
+            tts_provider=TTSProviders.CARTESIA,
+            tts_model="sonic-3.5",
+            tts_voice="13ff5deb-2591-42ad-a356-63a04e524411",
+        )
+
+        create_tts(config)
+
+        mock_cartesia_tts.assert_called_once()
+        kwargs = mock_cartesia_tts.call_args[1]
+        self.assertEqual(kwargs["voice"], "13ff5deb-2591-42ad-a356-63a04e524411")
+        self.assertEqual(kwargs["model"], "sonic-3.5")
+
 
 if __name__ == "__main__":
     unittest.main()
