@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.
+- **Client tools over LiveKit RPC.** An app that sets `kwami.client_tools=rpc` gets
+  each tool call as an RPC to it alone, with the app's own error and deadline; any
+  other app keeps the data-channel `tool_call`/`tool_result` pair.
 - **No more half-open phone lines.** A caller who goes silent is asked once whether
   they are still there; with no answer, the agent says goodbye and hangs up. Never
   while the brain is still working on something for them, and never in the app.
