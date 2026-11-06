@@ -305,14 +305,18 @@ class KwamiMemory:
         client = self._client
         if client is None:
             return False
+        # Every exit returns inside the block: Python 3.11 attributes the
+        # with-statement's own exit to its first line, so a fall-through arc
+        # out of it is reported as never taken.
         async with self._thread_lock:
-            if not self._thread_ready:
-                try:
-                    await self._ensure_session_exists(client)
-                except Exception:
-                    return False
-                self._thread_ready = True
-        return True
+            if self._thread_ready:
+                return True
+            try:
+                await self._ensure_session_exists(client)
+            except Exception:
+                return False
+            self._thread_ready = True
+            return True
 
     async def _ensure_session_exists(self, client: AsyncZep) -> None:
         """Create thread (session) in Zep if it doesn't exist."""
