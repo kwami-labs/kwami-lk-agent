@@ -26,6 +26,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..adapters.supabase import as_user_id, direct_supabase, get_supabase
+from ..browser.access import SiteAccess
 from ..domain.pipelines import TEXT_REALTIME_PREFIXES
 from ..factories.availability import voice_provider_keys
 from ..settings import Settings, get_settings
@@ -238,6 +239,8 @@ class Bridge:
         jobs_store = get_supabase(settings)
         self.jobs: JobStore | None = JobStore(jobs_store) if jobs_store is not None else None
         self._keys_store = jobs_store
+        #: The user's list of sites Jarvis may visit, and what it may do on each.
+        self.site_access = SiteAccess(jobs_store)
         self._keys_secret = settings.provider_keys_secret
         #: The user's own keys for the voice pipeline, by environment name.
         self.voice_keys: dict[str, str] = {}

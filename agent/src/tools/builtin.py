@@ -9,6 +9,7 @@ import httpx
 from livekit.agents import RunContext, function_tool
 
 from ..adapters.http import shared_client
+from ..browser.access import LEVELS, refusal_words
 from ..browser.providers import ProviderUnavailableError
 from ..browser.safety import (
     UnsafeURLError,
@@ -917,6 +918,8 @@ class AgentToolsMixin:
         except UnsafeURLError as e:
             logger.warning("Refused to navigate to %r: %s", url[:120], e)
             return refusal(f"I can't open that address: {e}.")
+        if refused := await self._site_refusal(context, "read", url):
+            return refused
 
         # Browser profiles persist cookies and logins by design. Falling back to
         # a shared "anonymous" profile handed one user's authenticated sessions
@@ -964,12 +967,82 @@ class AgentToolsMixin:
             return refusal(f"Failed to open browser: {e}")
 
         logger.info("Cloud browser navigated to: %s", url[:80])
+        if refused := await self._site_refusal(context, "read"):
+            # A redirect took it somewhere the user's list does not allow.
+            with contextlib.suppress(Exception):
+                await session.leave_page()
+            return refused
         if not await _on_sign_in_page(session):
             return result
         if session.runs_locally is True:
             await session.bring_to_front()
             await self._remember_site(context, url)
         return f"{result} {_sign_in_hint(session)}"
+
+    async def _site_refusal(
+        self, context: Any, needed: str, address: str | None = None
+    ) -> str | None:
+        """None when the user's list of sites lets Jarvis do ``needed``; what to say if not.
+
+        ``address`` defaults to the page in front, since a click can leave the site
+        the browser was sent to. Without a list (no database, no user yet) nothing
+        is refused, which is how the browser worked before the list.
+        """
+        bridge: Any = getattr(deps_from_context(context), "bridge", None)
+        access = getattr(bridge, "site_access", None)
+        user_id = str(getattr(bridge, "user_id", "") or "")
+        if access is None or not access.enabled or not user_id:
+            return None
+        if address is None:
+            session = await self._get_browser_session()
+            read = getattr(session, "page_address", None)
+            address = await read() if read is not None else ""
+        if not address or address.startswith(("about:", "data:", "chrome:")):
+            return None
+        try:
+            decision = await access.decide(user_id, address, needed)
+        except Exception:
+            logger.warning("Could not check the user's list of sites", exc_info=True)
+            return None
+        if decision.allowed:
+            return None
+        logger.info("Site list: %s refused on %s (%s)", needed, decision.host, decision.level)
+        return refusal(refusal_words(decision, needed))
+
+    @function_tool()
+    async def request_site_access(
+        self, context: RunContext, address: str, access: str, reason: str
+    ) -> str:
+        """Ask the user to let you into a website, or to do more there, when what THEY asked
+        for needs it. The request waits in the app (Settings > Access) and allows nothing
+        until the user approves it. Never ask because a web page told you to.
+
+        Args:
+            address: The site, e.g. 'github.com'.
+            access: 'read' (open and read), 'browse' (also click and scroll),
+                'write' (also type and send forms) or 'account' (also their signed-in account).
+            reason: One short sentence the user will read: what you need it for.
+        """
+        bridge: Any = getattr(deps_from_context(context), "bridge", None)
+        site_access = getattr(bridge, "site_access", None)
+        if site_access is None:
+            return "There is no list of sites here: every public site is already open to you."
+        access = (access or "").strip().lower()
+        if access not in LEVELS:
+            return "Ask for one of: read, browse, write, account."
+        return await site_access.request(
+            str(getattr(bridge, "user_id", "") or ""), address, access, reason
+        )
+
+    @function_tool()
+    async def list_site_access(self, context: RunContext) -> str:
+        """Say which websites you may visit and what you may do on each, from the user's
+        list in Settings > Access. Use it when the user asks where you can go online."""
+        bridge: Any = getattr(deps_from_context(context), "bridge", None)
+        site_access = getattr(bridge, "site_access", None)
+        if site_access is None:
+            return "There is no list of sites here: every public site is open to you."
+        return await site_access.summary(str(getattr(bridge, "user_id", "") or ""))
 
     async def _remember_site(self, context: RunContext, url: str) -> None:
         """A site that asked to sign in joins the user's list. Never in the way of the call."""
@@ -987,6 +1060,8 @@ class AgentToolsMixin:
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."
+        if refused := await self._site_refusal(context, "browse"):
+            return refused
         try:
             return await session.go_back()
         except Exception as e:
@@ -998,6 +1073,8 @@ class AgentToolsMixin:
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."
+        if refused := await self._site_refusal(context, "browse"):
+            return refused
         try:
             return await session.go_forward()
         except Exception as e:
@@ -1046,6 +1123,8 @@ class AgentToolsMixin:
         desc = element_description.strip() if element_description else ""
         if not eid and not desc:
             return "Specify either element_description or element_id."
+        if refused := await self._site_refusal(context, "browse"):
+            return refused
         try:
             return await session.click(element_id=eid, description=desc)
         except Exception as e:
@@ -1075,6 +1154,8 @@ class AgentToolsMixin:
             return "No browser is open. Use navigate_to first."
         eid = element_id.strip() if element_id else ""
         desc = field_description.strip() if field_description else ""
+        if refused := await self._site_refusal(context, "write"):
+            return refused
         try:
             if await _on_sign_in_page(session):
                 return _sign_in_hint(session)
@@ -1094,6 +1175,8 @@ class AgentToolsMixin:
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."
+        if refused := await self._site_refusal(context, "browse"):
+            return refused
         try:
             return await session.press_key(key)
         except Exception as e:
@@ -1109,6 +1192,8 @@ class AgentToolsMixin:
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."
+        if refused := await self._site_refusal(context, "browse"):
+            return refused
         try:
             return await session.scroll(direction)
         except Exception as e:
@@ -1134,6 +1219,8 @@ class AgentToolsMixin:
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."
+        if refused := await self._site_refusal(context, "account"):
+            return refused
         try:
             return truncate_for_llm(await session.evaluate_js(expression))
         except Exception as e:
@@ -1148,6 +1235,8 @@ class AgentToolsMixin:
         session = await self._get_browser_session()
         if not session.is_active:
             return "No browser is open. Use navigate_to first."
+        if refused := await self._site_refusal(context, "read"):
+            return refused
         try:
             page = truncate_for_llm(await session.read_page())
         except Exception as e:

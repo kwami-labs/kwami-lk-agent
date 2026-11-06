@@ -555,6 +555,26 @@ class CloudBrowserSession:
         except Exception as e:
             return f"Failed to execute JavaScript: {e}"
 
+    async def page_address(self) -> str:
+        """The address of the page in front, as the page reports it.
+
+        A click can leave the site the browser was sent to, so the last address
+        navigated to is only the answer when the page will not say.
+        """
+        if not self.is_active:
+            return ""
+        try:
+            href = await self._connection.evaluate("location.href")
+        except Exception:
+            return self._current_url
+        if isinstance(href, str) and href.startswith(("http://", "https://")):
+            return href
+        return self._current_url
+
+    async def leave_page(self) -> None:
+        """Move to a blank page, keeping the browser and its profile."""
+        await self._leave_unsafe_page()
+
     async def on_sign_in_page(self) -> bool:
         """Whether the page in front is asking the user to sign in. False when unsure."""
         self._ensure_active()
