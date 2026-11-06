@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Recall finds people and things, not just loose facts.** `recall_memories` searches
+  entities alongside facts (reranked), lists an entity's summary, and marks facts that
+  have stopped being true. `remember_fact` writes to the graph instead of adding a system
+  line to the conversation transcript. The ontology gains Task and Asset, and work, home
+  and project links can start from a Person, not only the user (version `2026-11-2`,
+  applied to existing users on their next session unless they set their own).
 - **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
   Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
   being moved to OpenAI Realtime, and the app offers it on that basis.

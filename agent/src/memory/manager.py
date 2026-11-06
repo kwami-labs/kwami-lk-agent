@@ -35,7 +35,7 @@ from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
     get_user_name,
-    search_thread,
+    recall,
 )
 from .utils import get_zep_imports, logger, redacted
 
@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 #: its next session. The value "custom" means the user set their own ontology in
 #: the panel, which is never overwritten.
 ONTOLOGY_METADATA_KEY = "kwami_ontology"
-ONTOLOGY_VERSION = "2026-11"
+ONTOLOGY_VERSION = "2026-11-2"
 CUSTOM_ONTOLOGY = "custom"
 
 # What this worker process has already done, so a user's second session -- or
@@ -527,19 +527,29 @@ class KwamiMemory:
             logger.warning("Failed to flush pending message: %s", e)
 
     async def add_fact(self, fact: str) -> None:
-        """Add a fact about the user as a system message.
+        """Write a fact about the user straight into their graph.
 
-        In Zep v3, facts are automatically extracted from messages.
-        This frames the fact as a system message to trigger extraction.
+        This used to be a system message in the conversation thread ("Important
+        information learned: ..."), so every remembered fact also became a line
+        of the transcript -- in the middle of the conversation history the
+        panel shows. `graph.add` hands the text to the same extraction without
+        touching the thread.
 
         Args:
             fact: The fact to add (e.g., "User's name is Alex").
         """
-        await self.add_message(
-            role="system",
-            content=f"Important information learned: {fact}",
-            name="System",
+        if not self._initialized or not self._client:
+            return
+        if not fact or not fact.strip():
+            return
+        await self._client.graph.add(
+            user_id=self._user_id,
+            type="text",
+            data=fact.strip(),
+            source_description=f"Asked to remember by {self.kwami_name}",
         )
+        self._record_usage("zep/add_fact")
+        logger.debug("Added fact to the graph: %s", redacted(fact))
 
     # ========================================================================
     # Context Retrieval
@@ -622,9 +632,7 @@ class KwamiMemory:
         """
         if not self._initialized or not self._client:
             return []
-        results = await search_thread(
-            self._client, self._session_id, query, limit, user_id=self._user_id
-        )
+        results = await recall(self._client, self._user_id, query, limit)
         # Bill only when the call produced something. The search helper swallows
         # its own exceptions and returns [], so an unconditional record here
         # charged the user for calls that never reached Zep.
