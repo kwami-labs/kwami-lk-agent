@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
+  TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
+  the SDK already understood but never received.
+
 - **Any model can take any job.** A brain model holds several jobs and a brief of its own,
   one model directs the rest, and Grok, OpenRouter, Groq, DeepSeek and Mistral join.
 - **The work thread.** A process on the user's PC takes queued work, with Claude on that PC's

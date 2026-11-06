@@ -80,12 +80,13 @@ class RecordingSession:
         self.handlers: dict[str, list] = {}
         RecordingSession.instances.append(self)
 
-    def on(self, event: str):
+    def on(self, event: str, fn: Any = None):
+        # Both shapes the real EventEmitter accepts: decorator and direct call.
         def register(fn):
             self.handlers.setdefault(event, []).append(fn)
             return fn
 
-        return register
+        return register if fn is None else register(fn)
 
     async def start(self, *, agent: Any, room: Any, room_options: Any = None) -> None:
         self.started_with = {"agent": agent, "room": room, "room_options": room_options}
@@ -221,6 +222,19 @@ async def test_metrics_are_routed_to_the_usage_tracker(fake_session, vad) -> Non
     handlers = fake_session.instances[-1].handlers
     assert "session_usage_updated" in handlers
     assert "metrics_collected" not in handlers
+
+
+async def test_each_replys_latency_is_relayed_to_the_app(fake_session, vad) -> None:
+    ctx = FakeCtx(FakeRoom(), vad)
+
+    await entrypoint(ctx)
+
+    # Session-wide, so the panel keeps getting numbers across agent swaps.
+    handlers = fake_session.instances[-1].handlers["conversation_item_added"]
+    assert any(
+        getattr(h, "__qualname__", "") == "TurnMetricsRelay.on_conversation_item_added"
+        for h in handlers
+    )
 
 
 async def test_data_messages_are_routed(fake_session, vad) -> None:
