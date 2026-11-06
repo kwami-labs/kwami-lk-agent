@@ -60,7 +60,8 @@ LLM_REQUIREMENTS: dict[str, Requirement] = {
 
 REALTIME_REQUIREMENTS: dict[str, Requirement] = {
     "openai": ("OPENAI_API_KEY",),
-    "google": ("GOOGLE_API_KEY",),
+    # Gemini Live also runs on LiveKit Inference (factories/realtime.py).
+    "google": ("GOOGLE_API_KEY", LIVEKIT_INFERENCE),
     "aws": (),
 }
 
