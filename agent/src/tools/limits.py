@@ -136,3 +136,38 @@ def enforce_tool_limit(
         return list(builtin_tools[:limit])
 
     return [*builtin_tools, *kept]
+
+
+def tool_inventory(
+    offered: list[Any],
+    client_names: list[str],
+    *,
+    limit: int = MAX_TOOLS_PER_REQUEST,
+) -> dict[str, Any]:
+    """What the model is being offered, for the app's Tools panel.
+
+    The trim above is silent from the user's side: a tool they added, or one of
+    the app's, stops existing for the model with nothing on screen saying so --
+    only a log line on a server they cannot see. This is the same decision
+    told to the frontend: the agent's own tools that are on, how many of the
+    client's made it, and which did not.
+
+    Names, not schemas: the frontend has the client definitions already, and
+    the payload has to fit the data channel.
+
+    Args:
+        offered: The tools the model is offered right now (built-ins and client).
+        client_names: Every client tool the frontend registered, in its order.
+        limit: The ceiling the list was trimmed to.
+    """
+    offered_names = [_name_of(tool) for tool in offered]
+    offered_set = set(offered_names)
+    client_set = set(client_names)
+    return {
+        "type": "tool_inventory",
+        "limit": limit,
+        "total": len(offered_names),
+        "builtin": sorted(name for name in offered_names if name not in client_set),
+        "client": sum(1 for name in client_names if name in offered_set),
+        "dropped": [name for name in client_names if name not in offered_set],
+    }

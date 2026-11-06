@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import json
 
-from src.adapters.publisher import LiveKitRoomPublisher, NullRoomPublisher
+from src.adapters.publisher import (
+    MESSAGE_STREAM_ATTRIBUTE,
+    MESSAGE_STREAM_TOPIC,
+    MESSAGE_STREAM_VALUE,
+    LiveKitRoomPublisher,
+    NullRoomPublisher,
+    stream_readers,
+)
 from src.ports.publisher import MAX_DATA_PACKET_BYTES
 
 
@@ -117,3 +124,102 @@ async def test_the_null_publisher_records_instead_of_sending() -> None:
     publisher = NullRoomPublisher()
     assert await publisher.publish({"type": "search_results"}) is False
     assert publisher.published == [{"type": "search_results"}]
+
+
+# =============================================================================
+# Oversized payloads, whole, to an app that reads the `kwami.message` stream
+# =============================================================================
+
+
+class StreamingParticipant(RecordingParticipant):
+    def __init__(self, fail_stream: bool = False) -> None:
+        super().__init__()
+        self.streamed: list[dict] = []
+        self._fail_stream = fail_stream
+
+    async def send_text(self, text: str, *, topic: str, destination_identities: list[str]):
+        if self._fail_stream:
+            raise RuntimeError("stream refused")
+        self.streamed.append({"text": text, "topic": topic, "to": destination_identities})
+
+
+class StreamingRoom:
+    def __init__(self, *readers: str, fail_stream: bool = False, others: tuple = ()) -> None:
+        self.local_participant = StreamingParticipant(fail_stream=fail_stream)
+        people = [_person(identity, stream=True) for identity in readers]
+        people += [_person(identity, stream=False) for identity in others]
+        self.remote_participants = {p.identity: p for p in people}
+
+
+def _person(identity: str, *, stream: bool):
+    from types import SimpleNamespace
+
+    attributes = {MESSAGE_STREAM_ATTRIBUTE: MESSAGE_STREAM_VALUE} if stream else {}
+    return SimpleNamespace(identity=identity, attributes=attributes)
+
+
+def _big() -> dict:
+    return {"type": "search_results", "results": [_result() for _ in range(20)]}
+
+
+async def test_an_oversized_payload_goes_whole_to_an_app_that_streams() -> None:
+    room = StreamingRoom("user-1", others=("agent-2",))
+    payload = _big()
+
+    assert await LiveKitRoomPublisher(room).publish(payload) is True
+
+    [sent] = room.local_participant.streamed
+    assert sent["topic"] == MESSAGE_STREAM_TOPIC
+    assert sent["to"] == ["user-1"]
+    assert json.loads(sent["text"]) == payload  # nothing trimmed, images included
+    assert room.local_participant.sent == []
+
+
+async def test_a_small_payload_stays_on_the_data_channel_even_for_a_streaming_app() -> None:
+    room = StreamingRoom("user-1")
+
+    assert await LiveKitRoomPublisher(room).publish({"type": "ping"}) is True
+
+    assert room.local_participant.streamed == []
+    assert len(room.local_participant.sent) == 1
+
+
+async def test_without_a_streaming_app_an_oversized_payload_is_trimmed_as_before() -> None:
+    room = StreamingRoom(others=("user-1",))
+
+    assert await LiveKitRoomPublisher(room).publish(_big()) is True
+
+    assert room.local_participant.streamed == []
+    assert len(room.local_participant.sent[0]) <= MAX_DATA_PACKET_BYTES
+
+
+async def test_a_stream_that_fails_falls_back_to_trimming(caplog) -> None:
+    room = StreamingRoom("user-1", fail_stream=True)
+
+    assert await LiveKitRoomPublisher(room).publish(_big()) is True
+
+    assert len(room.local_participant.sent) == 1
+    assert "trimming it" in caplog.text
+
+
+async def test_a_room_whose_participant_cannot_stream_trims() -> None:
+    room = FakeRoom()
+    room.remote_participants = {"u": _person("user-1", stream=True)}  # type: ignore[attr-defined]
+
+    assert await LiveKitRoomPublisher(room).publish(_big()) is True
+
+    assert len(room.local_participant.sent) == 1
+
+
+def test_stream_readers_needs_an_identity_and_the_attribute() -> None:
+    from types import SimpleNamespace
+
+    room = SimpleNamespace(
+        remote_participants={
+            "a": _person("user-1", stream=True),
+            "b": _person("user-2", stream=False),
+            "c": SimpleNamespace(identity="", attributes={MESSAGE_STREAM_ATTRIBUTE: "stream"}),
+        }
+    )
+    assert stream_readers(room) == ["user-1"]
+    assert stream_readers(SimpleNamespace()) == []

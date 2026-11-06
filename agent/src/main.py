@@ -20,6 +20,7 @@ from livekit.agents import (
 
 from .adapters.publisher import LiveKitRoomPublisher
 from .brain import Bridge
+from .brain.cloud import cloud_worker
 from .factories.audio import prewarm_resampler
 from .factories.vad import prewarm_vad
 from .health import heartbeat_path, run_heartbeat, write_heartbeat
@@ -35,6 +36,7 @@ from .runtime.away import USER_AWAY_SECONDS, PhoneAwayWatcher
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
+from .runtime.thinking_sound import ThinkingSound
 from .runtime.turn_metrics import TurnMetricsRelay
 from .runtime.turn_taking import noise_cancellation_selector, session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
@@ -71,6 +73,8 @@ _bridges: dict[str, Bridge] = {}
 # Strong reference to the heartbeat task: the loop holds only a weak one, and a
 # collected heartbeat would read to the probe as a dead worker.
 _heartbeat_task: asyncio.Task | None = None
+#: The brain's cloud work thread, when this deployment runs one (KWAMI_CLOUD_WORKER).
+_cloud_task: asyncio.Task | None = None
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -97,8 +101,6 @@ def _on_worker_registered(*_args: object) -> None:
     global _heartbeat_task
 
     write_heartbeat("registered")
-    if _heartbeat_task is not None and not _heartbeat_task.done():
-        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -108,8 +110,29 @@ def _on_worker_registered(*_args: object) -> None:
         # an event handler where the traceback goes nowhere useful.
         logger.warning("worker_registered fired outside the event loop; no heartbeat started")
         return
+    _start_cloud_worker(loop)
+    if _heartbeat_task is not None and not _heartbeat_task.done():
+        return
     _heartbeat_task = loop.create_task(run_heartbeat(), name="health_heartbeat")
     logger.info("Health heartbeat started at %s", heartbeat_path())
+
+
+def _start_cloud_worker(loop: asyncio.AbstractEventLoop) -> None:
+    """Run the brain's cloud work thread beside the calls, once per process.
+
+    It lives in the worker's own process, not in a job: a job ends with its call,
+    and this has to keep going while the user's PC is off. A reconnect fires
+    `worker_registered` again, so the guard keeps it single.
+    """
+    global _cloud_task
+
+    if _cloud_task is not None and not _cloud_task.done():
+        return
+    worker = cloud_worker()
+    if worker is None:
+        return
+    _cloud_task = loop.create_task(worker.run_forever(asyncio.Event()), name="brain_cloud")
+    logger.info("Brain cloud work thread started as %s", worker.runner_id)
 
 
 #: How long to wait for the app's config before asking for it, and how often.
@@ -326,6 +349,22 @@ async def _run_session(ctx: JobContext) -> None:
     )
 
     deps.bridge.attach(session, LiveKitRoomPublisher(ctx.room))
+
+    # A soft keyboard while the agent thinks, if the user switched it on in the
+    # Enhancements panel; read live, so it applies from the next turn.
+    thinking_sound = ThinkingSound(
+        lambda: bool(
+            state.current_agent is not None
+            and state.current_agent.kwami_config.voice.thinking_sound
+        )
+    )
+    thinking_sound.attach(ctx.room, session)
+
+    @session.on("agent_state_changed")
+    def on_agent_state(event):
+        thinking_sound.on_agent_state_changed(event)
+
+    ctx.add_shutdown_callback(thinking_sound.aclose)
 
     # Now that the room is connected, the participant list is real.
     participant_identity = resolve_user_identity(ctx.room)

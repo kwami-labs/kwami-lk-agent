@@ -7,8 +7,9 @@ The agent ships as a Docker image. There are two supported places to run it:
 | **LiveKit Cloud** (default) | `agent/` + `lk agent deploy` | You want LiveKit to own scaling, placement and restarts. |
 | **Cloudflare Workers + Containers** | `infra/` + `make deploy-cf` | You want the agent next to the rest of your Cloudflare estate, or a Worker-fronted health surface. |
 
-Both run the same image and the same `src.main start` entrypoint. One worker,
-one agent name: `kwami-agent` (`livekit.toml` + `@server.rtc_session`).
+Both run the same image and the same `src.main start` entrypoint. Production
+answers to one agent name: `kwami-agent` (`livekit.toml` + `@server.rtc_session`,
+overridable with `KWAMI_AGENT_NAME`).
 
 ```mermaid
 flowchart LR
@@ -40,6 +41,35 @@ LiveKit Cloud builds from `agent/Dockerfile` (or uses the image it builds on
 their side from the same context). CI already `docker build`s that context on
 every PR so a broken image is caught before you deploy.
 
+## Testing without touching production
+
+LiveKit dispatches a job to **any** registered worker whose agent name matches
+the one in the token's `RoomAgentDispatch`. That has two consequences worth
+knowing before you test anything:
+
+- **A local worker with the production name takes production calls.** Running
+  `python -m src.main dev` with the default name registers a second
+  `kwami-agent` next to the cloud one, and real users' sessions land on your
+  laptop at random. Give local and test workers their own name:
+
+  ```bash
+  KWAMI_AGENT_NAME=kwami-agent-lab uv run python -m src.main dev
+  ```
+
+  and dispatch to it explicitly (`RoomAgentDispatch(agent_name="kwami-agent-lab")`
+  from a test client, or `LIVEKIT_AGENT_NAME=kwami-agent-lab` on a local API).
+- **Deployments of one agent share it.** `lk agent deploy -d <deployment>`
+  targets a deployment of the agent in `livekit.toml`; deploying a second
+  deployment of the same agent has restarted the production worker. For a
+  long-lived test environment, create a separate agent (`lk agent create` from a
+  copy of `livekit.toml` with another `name`, e.g. `kwami-agent-pruebas`), set
+  `KWAMI_AGENT_NAME` to that name in its secrets, and point the test API's
+  `LIVEKIT_AGENT_NAME` at it.
+
+Before deploying production, check what is live (`lk agent versions` shows each
+version's `git_commit`) so a deploy from another branch does not silently drop
+someone else's change; `lk agent rollback` returns to the previous version.
+
 ## Image
 
 `agent/Dockerfile`:
@@ -67,6 +97,31 @@ Configure the same variables as `.env.sample` in the Cloud agent secrets UI
 
 Leave `KWAMI_ALLOW_BROWSER_JS` unset unless you accept the
 [prompt-injection risk](./security.md).
+
+## The brain's cloud work thread
+
+With `KWAMI_CLOUD_WORKER=true` the worker process also runs the brain's cloud
+work thread (`agent/src/brain/cloud.py`), started once when LiveKit registers
+the worker. It takes, from `brain_jobs`, the work of every user who allowed the
+cloud from the app: what they asked the cloud for, and `auto` work their PC has
+not been there for (migration 029 of the API, `brain_claim_cloud_job`).
+
+Before turning it on:
+
+1. The database has migration 029. Without it the thread finds nothing to take.
+2. Decide who it may spend for. Each job runs on the user's own Anthropic key,
+   connected from the app (needs `KWAMI_PROVIDER_KEYS_SECRET`), or on this
+   deployment's `ANTHROPIC_API_KEY` for the user ids in `KWAMI_CLOUD_OWNERS`.
+   Everyone else is told to connect a key. The monthly cap and the 2 $ per task
+   apply as on the PC.
+3. The image has `git`: changes to Jarvis's own code start from an anonymous,
+   read-only clone of `KWAMI_CLOUD_REPO_OWNER`'s repositories (public ones only)
+   and are left as a patch for the user's PC, which runs the tests and opens the
+   pull request. The cloud never holds GitHub credentials.
+
+What a job makes is kept in `jarvis-files/<user>/<kwami>/threads/<thread>` and
+listed in `brain_sync`; the PC copies it home the next time it is on. The same
+thread can run on any host with `uv run python -m src.brain.cloud`.
 
 ## Telephony
 

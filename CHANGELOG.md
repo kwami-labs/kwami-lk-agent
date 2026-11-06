@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Search results arrive whole.** A message too large for one data packet goes to an app
+  that sets `kwami.messages=stream` as a LiveKit text stream on `kwami.message`, images
+  included; every other app still gets it trimmed to 14 KB.
+- **A thinking sound, if you want one.** `enhancements.thinkingSound` plays a soft keyboard
+  while the agent thinks, so a pause before the answer does not sound like a dropped call.
+  Off by default; read live, so it applies from the next turn.
+- **The app can see which tools reach the model.** A `tool_inventory` message names the
+  built-ins that are on and the client tools the 128-tool trim left out, after entering
+  the room and after every tools update.
+- **More room for client tools.** Built-ins withheld for a missing credential, a locked
+  voice or searches given to the brain no longer take a client tool's place in the trim.
+- **A client tool cannot end the session.** One whose name a provider refuses, or whose
+  parameters are not an object schema, is skipped with a warning instead of making every
+  request fail; the SDK's shorthand schema is wrapped as the SDK wraps it.
 - **Recall finds people and things, not just loose facts.** `recall_memories` searches
   entities alongside facts (reranked), lists an entity's summary, and marks facts that
   have stopped being true. `remember_fact` writes to the graph instead of adding a system
@@ -29,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Client tools over LiveKit RPC.** An app that sets `kwami.client_tools=rpc` gets
   each tool call as an RPC to it alone, with the app's own error and deadline; any
   other app keeps the data-channel `tool_call`/`tool_result` pair.
+- **The voice never runs out of backups.** Speech-to-text, the voice LLM and text-to-speech
+  each end their fallback chain on LiveKit Inference (Deepgram Nova-3, GPT-4.1 mini,
+  Cartesia Sonic-3), which needs only the LiveKit project's credentials: a spent or missing
+  provider key no longer leaves a stage with nothing to fall back to.
 - **No more half-open phone lines.** A caller who goes silent is asked once whether
   they are still there; with no answer, the agent says goodbye and hangs up. Never
   while the brain is still working on something for them, and never in the app.
