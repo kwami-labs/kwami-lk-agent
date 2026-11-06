@@ -9,14 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Jarvis keeps working with the PC off.** A cloud work thread (`KWAMI_CLOUD_WORKER`)
-  takes the work of users who allow it from the app, on their own Anthropic key, keeps
-  each thread's files in Storage, and leaves changes to Jarvis's own code as patches.
-  When the PC is on again it brings everything home without stopping either side:
-  files into `Jarvis\nube`, never over the user's own, and patches as pull requests.
-- **The user's own agents.** Specialists defined in the app join the executor's team on
-  the PC and in the cloud, a job can run as one of them with its model and tools, and
-  the voice can hand a task to one by name.
+- **The app can see which tools reach the model.** A `tool_inventory` message names the
+  built-ins that are on and the client tools the 128-tool trim left out, after entering
+  the room and after every tools update.
+- **More room for client tools.** Built-ins withheld for a missing credential, a locked
+  voice or searches given to the brain no longer take a client tool's place in the trim.
+- **A client tool cannot end the session.** One whose name a provider refuses, or whose
+  parameters are not an object schema, is skipped with a warning instead of making every
+  request fail; the SDK's shorthand schema is wrapped as the SDK wraps it.
 - **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
   Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
   being moved to OpenAI Realtime, and the app offers it on that basis.
@@ -26,6 +26,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Client tools over LiveKit RPC.** An app that sets `kwami.client_tools=rpc` gets
   each tool call as an RPC to it alone, with the app's own error and deadline; any
   other app keeps the data-channel `tool_call`/`tool_result` pair.
+- **The voice never runs out of backups.** Speech-to-text, the voice LLM and text-to-speech
+  each end their fallback chain on LiveKit Inference (Deepgram Nova-3, GPT-4.1 mini,
+  Cartesia Sonic-3), which needs only the LiveKit project's credentials: a spent or missing
+  provider key no longer leaves a stage with nothing to fall back to.
 - **No more half-open phone lines.** A caller who goes silent is asked once whether
   they are still there; with no answer, the agent says goodbye and hangs up. Never
   while the brain is still working on something for them, and never in the app.
@@ -46,6 +50,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it. It does not start without its sandbox, all its connections go through a proxy
   that refuses what is not public, and at most 4 run at once. What it still risks is
   in `docs/security.md`.
+
+- **Jarvis keeps working with the PC off.** A cloud work thread (`KWAMI_CLOUD_WORKER`)
+  takes the work of users who allow it from the app, on their own Anthropic key, keeps
+  each thread's files in Storage, and leaves changes to Jarvis's own code as patches.
+  When the PC is on again it brings everything home without stopping either side:
+  files into `Jarvis\nube`, never over the user's own, and patches as pull requests.
+- **The user's own agents.** Specialists defined in the app join the executor's team on
+  the PC and in the cloud, a job can run as one of them with its model and tools, and
+  the voice can hand a task to one by name.
 
 ### Changed
 

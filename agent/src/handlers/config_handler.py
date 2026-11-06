@@ -911,6 +911,8 @@ async def update_tools(
         # than one missing feature.
         combined = enforce_tool_limit(builtin_tools, client_tools)
         await agent.update_tools(combined)
+        # The trim is decided here; tell the app's Tools panel what came of it.
+        await agent.publish_tool_inventory()
 
         logger.info(
             "update_tools: registered %d client tools alongside %d built-in tools (%d total)",

@@ -19,7 +19,13 @@ from src.factories import create_llm, create_stt, create_tts
 from src.factories.fallback import (
     ELEVENLABS_FEMALE,
     ELEVENLABS_MALE,
+    INFERENCE_STT_MODEL,
+    INFERENCE_TTS_FEMALE,
+    INFERENCE_TTS_MALE,
+    INFERENCE_TTS_MODEL,
     _has_key,
+    inference_stt_backup,
+    inference_tts_backup,
     is_female_voice,
     primary_of,
     with_llm_fallback,
@@ -417,14 +423,81 @@ def test_gemini_backs_itself_up_through_livekit_inference(env_setting) -> None:
     assert backup.model == "google/gemini-2.5-flash"
 
 
-def test_inference_is_only_a_backup_for_gemini(env_setting) -> None:
+def test_inference_backs_up_other_providers_only_last(env_setting) -> None:
+    """Gemini gets Gemini-on-Inference first; anyone else gets Inference after every keyed backup."""
     for name in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
         env_setting(name, "test-key-not-real")
     voice = _voice(llm_provider="openai", llm_model="gpt-4.1-mini")
 
     chain = with_llm_fallback(create_llm(voice), voice, create_llm)
 
-    assert all("inference" not in type(m).__module__ for m in chain._llm_instances)
+    modules = [type(m).__module__ for m in chain._llm_instances]
+    assert ["inference" in m for m in modules] == [False, False, True]
+    assert chain._llm_instances[-1].model == "openai/gpt-4.1-mini"
+
+
+def test_with_only_livekit_credentials_every_stage_still_has_a_backup(env_setting) -> None:
+    """Every provider key spent or missing: LiveKit Inference keeps the voice talking."""
+    for name in ("DEEPGRAM_API_KEY", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        env_setting(name, "test-key-not-real")
+    voice = _voice(
+        stt_provider="deepgram",
+        stt_model="nova-3",
+        stt_language="es-ES",
+        tts_provider="deepgram",
+        tts_model="aura-2",
+        tts_voice="Aoede",
+    )
+
+    stt = with_stt_fallback(create_stt(voice), voice, create_stt, vad=None)
+    tts = with_tts_fallback(create_tts(voice), voice, create_tts)
+
+    stt_backup = stt._stt_instances[-1]
+    assert type(stt_backup).__module__ == "livekit.agents.inference.stt"
+    assert stt_backup.model == INFERENCE_STT_MODEL
+    tts_backup = tts._tts_instances[-1]
+    assert type(tts_backup).__module__ == "livekit.agents.inference.tts"
+    assert tts_backup.model == INFERENCE_TTS_MODEL
+    # A female character keeps a female voice on the last resort too.
+    assert tts_backup._opts.voice == INFERENCE_TTS_FEMALE
+
+
+def test_the_last_resort_follows_the_session_language(env_setting) -> None:
+    for name in ("LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        env_setting(name, "test-key-not-real")
+
+    multi = _voice(stt_language="multi", tts_voice="Charon")
+    spanish = _voice(stt_language="es-ES", tts_voice="Charon")
+
+    assert inference_stt_backup(multi)._opts.language == "multi"
+    assert inference_stt_backup(spanish)._opts.language == "es"
+    assert inference_tts_backup(spanish)._opts.voice == INFERENCE_TTS_MALE
+
+
+def test_an_inference_primary_is_not_backed_up_by_itself(env_setting) -> None:
+    for name in ("LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        env_setting(name, "test-key-not-real")
+    voice = _voice(stt_language="es")
+    primary = inference_stt_backup(voice)
+
+    assert with_stt_fallback(primary, voice, create_stt, vad=None) is primary
+    tts_primary = inference_tts_backup(voice)
+    assert with_tts_fallback(tts_primary, voice, create_tts) is tts_primary
+
+
+def test_a_last_resort_that_cannot_be_built_is_skipped(env_setting, monkeypatch, caplog) -> None:
+    for name in ("DEEPGRAM_API_KEY", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+        env_setting(name, "test-key-not-real")
+    voice = _voice(tts_provider="deepgram", tts_model="aura-2")
+    primary = create_tts(voice)
+
+    def broken(config: Any) -> Any:
+        raise RuntimeError("inference gateway unreachable")
+
+    monkeypatch.setattr("src.factories.fallback.inference_tts_backup", broken)
+    with caplog.at_level("WARNING"):
+        assert with_tts_fallback(primary, voice, create_tts) is primary
+    assert "Could not build the tts last resort" in caplog.text
 
 
 def test_an_inference_model_needs_its_provider_prefix(env_setting) -> None:

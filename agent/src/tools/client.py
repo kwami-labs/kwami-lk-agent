@@ -10,7 +10,7 @@ from livekit.agents import RunContext, function_tool
 
 from ..runtime.container import room_from_context
 from ..utils.logging import get_logger
-from ..utils.validation import validate_tool_definition
+from ..utils.validation import normalize_parameters, validate_tool_definition
 
 if TYPE_CHECKING:
     from ..agent import KwamiAgent
@@ -129,13 +129,7 @@ class ClientToolManager:
             "type": "function",
             "name": tool_name,
             "description": description,
-            "parameters": parameters
-            if parameters
-            else {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
+            "parameters": normalize_parameters(parameters),
         }
 
         # Create the handler function that will be called when the tool is invoked
