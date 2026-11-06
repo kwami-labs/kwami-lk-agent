@@ -4,6 +4,11 @@ There were three separate trimming policies for this in `tools/builtin.py`, each
 slightly different, and one of them re-serialised the whole message up to three
 times just to measure its size. The channel has a hard size limit, so trimming
 belongs in the adapter that knows about the limit -- not in each caller.
+
+An app that reads the `kwami.message` text-stream topic says so with the
+participant attribute `kwami.messages=stream`. A payload too large for one
+packet then goes to that app whole, as a text stream, which has no size limit;
+trimming stays for every other app.
 """
 
 from __future__ import annotations
@@ -23,6 +28,25 @@ _TRIM_STAGES: tuple[tuple[str, int], ...] = (
     ("content", 120),
     ("content", 60),
 )
+
+
+#: The text-stream topic for messages too large for one data packet (SDK:
+#: `AGENT_MESSAGE_TOPIC`), and the attribute an app sets when it reads it.
+MESSAGE_STREAM_TOPIC = "kwami.message"
+MESSAGE_STREAM_ATTRIBUTE = "kwami.messages"
+MESSAGE_STREAM_VALUE = "stream"
+
+
+def stream_readers(room: Any) -> list[str]:
+    """Identities of the participants that read oversized messages from a text stream."""
+    participants = getattr(room, "remote_participants", None) or {}
+    readers = []
+    for participant in participants.values():
+        attributes = getattr(participant, "attributes", None) or {}
+        identity = getattr(participant, "identity", None)
+        if identity and attributes.get(MESSAGE_STREAM_ATTRIBUTE) == MESSAGE_STREAM_VALUE:
+            readers.append(identity)
+    return readers
 
 
 class NullRoomPublisher:
@@ -57,7 +81,14 @@ class LiveKitRoomPublisher:
             logger.debug("No room to publish to; dropping %s payload", payload.get("type"))
             return False
 
-        encoded = self._encode_within_limit(payload)
+        whole = json.dumps(payload)
+        raw = whole.encode("utf-8")
+        encoded: bytes | None = raw
+        if len(raw) > self._max_bytes:
+            readers = stream_readers(self._room)
+            if readers and await self._stream(whole, readers, payload.get("type")):
+                return True
+            encoded = self._encode_within_limit(payload)
         if encoded is None:
             logger.warning(
                 "Could not trim %s payload under %d bytes; not published",
@@ -73,12 +104,21 @@ class LiveKitRoomPublisher:
             logger.warning("Failed to publish %s payload: %s", payload.get("type"), e)
             return False
 
-    def _encode_within_limit(self, payload: dict[str, Any]) -> bytes | None:
-        """Serialise once, then trim progressively only while still too large."""
-        encoded = json.dumps(payload).encode("utf-8")
-        if len(encoded) <= self._max_bytes:
-            return encoded
+    async def _stream(self, text: str, readers: list[str], kind: Any) -> bool:
+        """Send `text` whole as a text stream; False means "trim it instead"."""
+        send_text = getattr(getattr(self._room, "local_participant", None), "send_text", None)
+        if send_text is None:
+            return False
+        try:
+            await send_text(text, topic=MESSAGE_STREAM_TOPIC, destination_identities=readers)
+        except Exception as e:
+            logger.warning("Could not stream %s payload whole (%s); trimming it", kind, e)
+            return False
+        logger.debug("Streamed %s payload whole (%d bytes)", kind, len(text))
+        return True
 
+    def _encode_within_limit(self, payload: dict[str, Any]) -> bytes | None:
+        """Trim progressively while still too large; only called for an oversized payload."""
         trimmed = json.loads(json.dumps(payload))  # don't mutate the caller's dict
         results = trimmed.get("results")
         if not isinstance(results, list):

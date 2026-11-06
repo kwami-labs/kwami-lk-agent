@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Search results arrive whole.** A message too large for one data packet goes to an app
+  that sets `kwami.messages=stream` as a LiveKit text stream on `kwami.message`, images
+  included; every other app still gets it trimmed to 14 KB.
 - **A thinking sound, if you want one.** `enhancements.thinkingSound` plays a soft keyboard
   while the agent thinks, so a pause before the answer does not sound like a dropped call.
   Off by default; read live, so it applies from the next turn.
