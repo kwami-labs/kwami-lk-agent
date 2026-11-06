@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, cast
 from ..adapters.supabase import SupabaseClient, get_supabase
 from ..envfile import load_env_file
 from ..settings import Settings, get_settings, set_settings
-from ..utils.logging import get_logger
+from ..utils.logging import get_logger, log_to_console
 from .config import ExecutorConfig
 from .executor import (
     FILES_BUCKET,
@@ -484,6 +484,7 @@ def main(argv: list[str] | None = None) -> None:
     root_env = Path(__file__).resolve().parents[3] / ".env"
     load_env_file(Path(known.env_file) if known.env_file else root_env)
     set_settings(Settings.from_env())
+    log_to_console()
     try:
         raise SystemExit(asyncio.run(_main(argv)))
     except KeyboardInterrupt:

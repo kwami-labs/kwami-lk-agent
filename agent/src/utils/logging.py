@@ -249,6 +249,22 @@ class JsonFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
+#: For the processes LiveKit's CLI does not start, which otherwise print nothing below WARNING.
+CONSOLE_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+
+def log_to_console(level: int = logging.INFO) -> None:
+    """Send this process's records to stderr, from `level` up, then configure as usual.
+
+    The work threads (`brain/worker.py`, `brain/cloud.py`) are started by plain Python,
+    and their launchers write stderr to a log. Without a handler only warnings got
+    there: a worker that stopped left nothing to say what it had been doing (seen on
+    2026-11-06). Does nothing to a process that already has a handler.
+    """
+    logging.basicConfig(level=level, format=CONSOLE_FORMAT)
+    configure_logging()
+
+
 def configure_logging(*, force_json: bool | None = None) -> None:
     """Install the correlation filter, and JSON output when asked for.
 
