@@ -23,7 +23,7 @@ from .domain.greeting import (
     time_of_day,
     topics_from_facts,
 )
-from .domain.pipelines import STANDARD_PIPELINE
+from .domain.pipelines import REALTIME_MODEL_PIPELINES, STANDARD_PIPELINE
 from .domain.tool_gating import (
     BRAIN_SEARCH_TOOLS,
     VOICE_SWITCH_TOOLS,
@@ -742,6 +742,36 @@ class KwamiAgent(
             )
         except Exception as e:
             logger.warning("Failed to add exchange to memory: %s", e)
+            return
+        take_refresh = getattr(self._memory, "take_refresh_due", None)
+        if callable(take_refresh) and take_refresh():
+            await self._refresh_memory_context()
+
+    async def _refresh_memory_context(self) -> None:
+        """Read memory again for what the conversation is about now.
+
+        The memory block was read once, before the greeting, for whatever the
+        last session was about; a conversation that moved on kept recalling
+        that. `KwamiMemory` flags a refresh after the first exchange and every
+        few after it, and the block is replaced only when it changed.
+
+        A realtime model is left alone: rewriting its instructions mid-session
+        resends the whole prompt as a turn (Gemini API), so it recalls through
+        `recall_memories` instead.
+        """
+        if self.kwami_config.voice.pipeline_type in REALTIME_MODEL_PIPELINES:
+            return
+        try:
+            context = await self._memory.get_context()
+            memory_text = context.to_system_prompt_addition()
+            if not memory_text or memory_text == self._memory_text:
+                return
+            self._memory_text = memory_text
+            self._last_memory_context = context
+            await self.update_instructions(self._build_system_prompt(memory_text))
+            logger.info("Refreshed memory context mid-session")
+        except Exception:
+            logger.exception("Failed to refresh memory context")
 
     def _extract_message_content(self, message: Any) -> str:
         """Extract text content from various message formats.
