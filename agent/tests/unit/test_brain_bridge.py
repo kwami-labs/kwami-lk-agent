@@ -839,6 +839,8 @@ class FakeJobs:
     def __init__(self, *, online: bool = True, enqueues: bool = True) -> None:
         self.online = online
         self.enqueues = enqueues
+        self.cloud = False
+        self.allowed = True
         self.queued: list[BrainJob] = []
         self.script: list[BrainJob | None] = []
         self.cancelled: list[str] = []
@@ -849,6 +851,12 @@ class FakeJobs:
 
     async def runner_online(self, user_id: str) -> bool:
         return self.online
+
+    async def cloud_online(self) -> bool:
+        return self.cloud
+
+    async def cloud_allowed(self, user_id: str) -> bool:
+        return self.allowed
 
     async def enqueue(self, job: BrainJob) -> bool:
         job.id, job.thread_id = "j1", job.thread_id or "t-new"
@@ -1113,6 +1121,55 @@ async def test_own_code_never_falls_back_to_the_cloud(pc_bridge) -> None:
     task = _run(bridge, repo="agent")
     await _finish(bridge)
     assert task.status == "failed" and "ordenador encendido" in task.result
+
+
+async def test_with_the_pc_off_work_goes_to_the_cloud_the_user_allowed(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online, jobs.cloud = False, True
+    jobs.script = [_job("done", result="Hecho en la nube", target="cloud")]
+    task = _run(bridge, kind="research", long_running=True)
+    await _finish(bridge)
+    assert [j.target for j in jobs.queued] == ["cloud"]
+    assert task.result == "Hecho en la nube" and "nube" in task.models
+
+
+async def test_own_code_goes_to_the_cloud_as_a_patch_for_the_pc(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online, jobs.cloud = False, True
+    jobs.script = [_job("done", result="Hecho en la nube, el PR lo abrirá el PC")]
+    task = _run(bridge, repo="agent")
+    await _finish(bridge)
+    assert jobs.queued[0].repo == "agent" and jobs.queued[0].target == "cloud"
+    assert task.status == "done"
+
+
+@pytest.mark.parametrize(("cloud", "allowed"), [(True, False), (False, True)])
+async def test_the_cloud_only_with_a_worker_and_the_users_consent(
+    pc_bridge, cloud: bool, allowed: bool
+) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online, jobs.cloud, jobs.allowed = False, cloud, allowed
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert jobs.queued == [] and task.result == "respuesta de claude-code"
+
+
+async def test_a_cloud_job_with_the_cloud_gone_is_withdrawn_and_run_here(
+    pc_bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge_module, "JOB_QUEUE_PATIENCE_SECONDS", 0.0)
+    bridge, jobs = pc_bridge
+    jobs.online, jobs.cloud = False, True
+    jobs.script = [_job("queued", target="cloud"), _job("cancelled", target="cloud")]
+
+    async def gone_after_enqueue() -> bool:
+        return not jobs.queued
+
+    jobs.cloud_online = gone_after_enqueue  # type: ignore[method-assign]
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert jobs.cancelled == ["j1"]
+    assert task.job_id == "" and task.result == "respuesta de claude-code"
 
 
 def test_own_code_needs_a_known_repo(pc_bridge) -> None:

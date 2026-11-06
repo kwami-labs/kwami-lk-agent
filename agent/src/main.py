@@ -20,6 +20,7 @@ from livekit.agents import (
 
 from .adapters.publisher import LiveKitRoomPublisher
 from .brain import Bridge
+from .brain.cloud import cloud_worker
 from .factories.audio import prewarm_resampler
 from .factories.vad import prewarm_vad
 from .health import heartbeat_path, run_heartbeat, write_heartbeat
@@ -72,6 +73,8 @@ _bridges: dict[str, Bridge] = {}
 # Strong reference to the heartbeat task: the loop holds only a weak one, and a
 # collected heartbeat would read to the probe as a dead worker.
 _heartbeat_task: asyncio.Task | None = None
+#: The brain's cloud work thread, when this deployment runs one (KWAMI_CLOUD_WORKER).
+_cloud_task: asyncio.Task | None = None
 
 
 def prewarm(proc: JobProcess) -> None:
@@ -98,8 +101,6 @@ def _on_worker_registered(*_args: object) -> None:
     global _heartbeat_task
 
     write_heartbeat("registered")
-    if _heartbeat_task is not None and not _heartbeat_task.done():
-        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -109,8 +110,29 @@ def _on_worker_registered(*_args: object) -> None:
         # an event handler where the traceback goes nowhere useful.
         logger.warning("worker_registered fired outside the event loop; no heartbeat started")
         return
+    _start_cloud_worker(loop)
+    if _heartbeat_task is not None and not _heartbeat_task.done():
+        return
     _heartbeat_task = loop.create_task(run_heartbeat(), name="health_heartbeat")
     logger.info("Health heartbeat started at %s", heartbeat_path())
+
+
+def _start_cloud_worker(loop: asyncio.AbstractEventLoop) -> None:
+    """Run the brain's cloud work thread beside the calls, once per process.
+
+    It lives in the worker's own process, not in a job: a job ends with its call,
+    and this has to keep going while the user's PC is off. A reconnect fires
+    `worker_registered` again, so the guard keeps it single.
+    """
+    global _cloud_task
+
+    if _cloud_task is not None and not _cloud_task.done():
+        return
+    worker = cloud_worker()
+    if worker is None:
+        return
+    _cloud_task = loop.create_task(worker.run_forever(asyncio.Event()), name="brain_cloud")
+    logger.info("Brain cloud work thread started as %s", worker.runner_id)
 
 
 #: How long to wait for the app's config before asking for it, and how often.

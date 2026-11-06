@@ -98,6 +98,31 @@ Configure the same variables as `.env.sample` in the Cloud agent secrets UI
 Leave `KWAMI_ALLOW_BROWSER_JS` unset unless you accept the
 [prompt-injection risk](./security.md).
 
+## The brain's cloud work thread
+
+With `KWAMI_CLOUD_WORKER=true` the worker process also runs the brain's cloud
+work thread (`agent/src/brain/cloud.py`), started once when LiveKit registers
+the worker. It takes, from `brain_jobs`, the work of every user who allowed the
+cloud from the app: what they asked the cloud for, and `auto` work their PC has
+not been there for (migration 029 of the API, `brain_claim_cloud_job`).
+
+Before turning it on:
+
+1. The database has migration 029. Without it the thread finds nothing to take.
+2. Decide who it may spend for. Each job runs on the user's own Anthropic key,
+   connected from the app (needs `KWAMI_PROVIDER_KEYS_SECRET`), or on this
+   deployment's `ANTHROPIC_API_KEY` for the user ids in `KWAMI_CLOUD_OWNERS`.
+   Everyone else is told to connect a key. The monthly cap and the 2 $ per task
+   apply as on the PC.
+3. The image has `git`: changes to Jarvis's own code start from an anonymous,
+   read-only clone of `KWAMI_CLOUD_REPO_OWNER`'s repositories (public ones only)
+   and are left as a patch for the user's PC, which runs the tests and opens the
+   pull request. The cloud never holds GitHub credentials.
+
+What a job makes is kept in `jarvis-files/<user>/<kwami>/threads/<thread>` and
+listed in `brain_sync`; the PC copies it home the next time it is on. The same
+thread can run on any host with `uv run python -m src.brain.cloud`.
+
 ## Telephony
 
 SIP participants do not send a frontend `config`. The worker:
