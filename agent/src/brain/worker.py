@@ -15,6 +15,9 @@ no such fallback. Beside the work runs a second, smaller line of jobs that only
 answer (`mode` think or research): no files, no commands, a few at once, so the
 brain's thinking does not wait behind a long job.
 
+What the cloud made while the PC was off comes home beside all this (`sync.py`):
+files into the Jarvis folder, patches to Jarvis's own code as pull requests.
+
 A job outlives the call that asked for it. If a call is still watching when it
 ends, the call says the result; otherwise it goes to the next greeting, and the
 API's clock tells the user about scheduled ones on the phone.
@@ -67,6 +70,7 @@ from .selfwork import (
     spoken_title,
 )
 from .sites import check_site
+from .sync import Syncer
 from .team import SONNET
 
 if TYPE_CHECKING:
@@ -147,6 +151,16 @@ class Worker:
         self._login_checked_at: float | None = None
         self._thinking: set[asyncio.Task[None]] = set()
         self._working: set[asyncio.Task[None]] = set()
+        #: Brings home what the cloud made while this PC was off (`sync.py`).
+        self.syncer = Syncer(
+            jobs,
+            store,
+            user_id,
+            self.runner_id,
+            self._folder,
+            self._mirrors,
+            new_ledger=self._new_ledger,
+        )
 
     # -- the loop --------------------------------------------------------------
 
@@ -154,6 +168,7 @@ class Worker:
         beat = asyncio.create_task(self._beat_forever(stop), name="brain_worker_beat")
         think = asyncio.create_task(self._think_forever(stop), name="brain_worker_think")
         sites = asyncio.create_task(self._check_sites_forever(stop), name="brain_worker_sites")
+        sync = asyncio.create_task(self.syncer.run_forever(stop), name="brain_worker_sync")
         logger.info("Work thread ready on %s, in %s", self.runner_id, self._folder)
         try:
             while not stop.is_set():
@@ -171,7 +186,8 @@ class Worker:
             beat.cancel()
             think.cancel()
             sites.cancel()
-            await asyncio.gather(beat, think, sites, *self._thinking, return_exceptions=True)
+            sync.cancel()
+            await asyncio.gather(beat, think, sites, sync, *self._thinking, return_exceptions=True)
 
     async def _beat_forever(self, stop: asyncio.Event) -> None:
         while not stop.is_set():

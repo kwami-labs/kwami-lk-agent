@@ -88,6 +88,11 @@ class FakeJobs:
     async def beat(self, *args: Any) -> bool:
         return True
 
+    sync_ready = False
+
+    async def claim_sync(self, user_id: str, runner_id: str) -> None:
+        return None
+
 
 class FakeLedger:
     instances: list[FakeLedger] = []
