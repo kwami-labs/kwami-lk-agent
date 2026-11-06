@@ -750,8 +750,7 @@ async def _run_in(
             "append": guidance + TEAM_GUIDANCE + BROWSER_GUIDANCE,
         }
     if not shell:
-        if isinstance(options.tools, list):
-            options.tools = [name for name in options.tools if name != "Bash"]
+        options.tools = [name for name in options.tools if name != "Bash"]
         options.allowed_tools = [name for name in options.allowed_tools if name != "Bash"]
         options.disallowed_tools = sorted({*options.disallowed_tools, "Bash"})
     if resume:
