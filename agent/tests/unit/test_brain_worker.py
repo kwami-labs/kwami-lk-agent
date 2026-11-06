@@ -93,6 +93,11 @@ class FakeJobs:
     async def agents(self, user_id: str) -> list[dict[str, Any]]:
         return self.agent_rows
 
+    sync_ready = False
+
+    async def claim_sync(self, user_id: str, runner_id: str) -> None:
+        return None
+
 
 class FakeLedger:
     instances: list[FakeLedger] = []
