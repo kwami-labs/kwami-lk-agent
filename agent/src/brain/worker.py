@@ -35,7 +35,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..adapters.supabase import SupabaseClient, as_user_id, get_supabase
 from ..envfile import load_env_file
@@ -67,10 +67,12 @@ from .selfwork import (
     spoken_title,
 )
 from .sites import check_site
-from .team import SONNET
+from .team import SONNET, member_from, permissions_for, platform_members
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import EffortLevel
+
+    from .config import Permissions
 
 logger = get_logger("brain.worker")
 
@@ -111,6 +113,16 @@ _LOGIN_TROUBLE = re.compile(
 )
 
 Runner = Callable[..., Coroutine[Any, Any, ExecutorResult]]
+
+#: A job that runs as one of the user's agents (`brain_agents`) is briefed as that agent.
+AGENT_TASK = """You are {name}, one of the user's own agents: {description}
+
+How you work, in the user's words:
+{prompt}
+
+The task:
+{task}"""
+AGENT_GONE = "No la he hecho: ese agente ya no existe o está apagado."
 
 
 def spoken_summary(result: str) -> str:
@@ -360,6 +372,11 @@ class Worker:
             )
             return
 
+        refused = await self._dress(job)
+        if refused:
+            await self._close(job, "failed", refused, 0.0, "")
+            return
+
         logger.info("Job %s started: %s", job.id, job.title)
         progress: list[str] = []
         resume = await self._jobs.session_of_thread(job.thread_id) if job.thread_id else ""
@@ -383,6 +400,28 @@ class Worker:
         notice = budget_notice(spent, spent + cost)
         text = f"{notice}\n\n{result.text}" if notice else result.text
         await self._close(job, "done" if result.ok else "failed", text, cost, result.session_id)
+
+    async def _dress(self, job: BrainJob) -> str:
+        """Ready a job for its run. Words for the user when it cannot run.
+
+        The user's agents from the app join the team of every job. A job that runs as
+        one of them takes that agent's brief, model and tools; one whose agent is gone
+        or switched off does not run as anything else.
+        """
+        rows = await self._jobs.agents(job.user_id)
+        job.members = platform_members(rows)
+        if not job.agent_id:
+            return ""
+        row = next((r for r in rows if str(r.get("id")) == job.agent_id), None)
+        member = member_from(row, str(row.get("name"))) if row is not None else None
+        if row is None or member is None:
+            return AGENT_GONE
+        job.task = AGENT_TASK.format(
+            name=row["name"], description=member.description, prompt=member.prompt, task=job.task
+        )
+        job.model = member.model
+        job.permissions = permissions_for(member.tools)
+        return ""
 
     async def _on_login_first(
         self,
@@ -408,8 +447,10 @@ class Worker:
             task,
             ExecutorConfig(
                 folder=str(folder),
+                permissions=cast("Permissions", job.permissions),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=LOGIN_NOTIONAL_USD,
+                members=job.members,
                 google_user_id=job.user_id if google else "",
                 # The voice's profile, so what the user signs in to is there for both.
                 browser_user_id=(job.kwami_id or job.user_id) if google else "",
@@ -427,8 +468,10 @@ class Worker:
             task,
             ExecutorConfig(
                 folder=str(folder),
+                permissions=cast("Permissions", job.permissions),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
+                members=job.members,
                 google_user_id=job.user_id if google else "",
                 # The voice's profile, so what the user signs in to is there for both.
                 browser_user_id=(job.kwami_id or job.user_id) if google else "",

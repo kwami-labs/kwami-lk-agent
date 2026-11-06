@@ -77,6 +77,7 @@ from .router import (
     usable,
 )
 from .selfwork import REPOS
+from .team import AGENT_NAME
 from .user_keys import VOICE_PROVIDER_KEYS, load_user_keys
 
 logger = get_logger("brain.bridge")
@@ -186,6 +187,8 @@ class BrainTask:
     asked_to_sign_in: bool = False
     #: Changing Jarvis's own code, in this repository (`selfwork.REPOS`).
     repo: str = ""
+    #: One of the user's agents does it, by name (`brain_agents`).
+    agent: str = ""
     #: Set once the work is on the PC.
     job_id: str = ""
     thread_id: str = ""
@@ -491,8 +494,16 @@ class Bridge:
         long_running: bool = False,
         follow_up: str = "",
         repo: str = "",
+        agent: str = "",
     ) -> BrainTask | str:
         """Queue a task. Returns it, or a sentence saying why it cannot run."""
+        if agent:
+            if not AGENT_NAME.fullmatch(agent):
+                return "An agent's name is lowercase letters, digits and dashes."
+            # The room's identity, as for own code: on a phone line anyone can talk.
+            if not self.user_id:
+                return "The user's agents can only be asked from the app, not by phone."
+            important, council = False, False
         if repo:
             if repo not in REPOS:
                 return f"The repository must be one of: {', '.join(REPOS)}."
@@ -540,6 +551,7 @@ class Bridge:
             long_running=long_running,
             follow_up=follow_up,
             repo=repo,
+            agent=agent,
         )
         self.tasks[brain_task.id] = brain_task
         while len(self.tasks) > MAX_TASKS_KEPT:
@@ -966,6 +978,21 @@ class Bridge:
             if not await self._cloud_takes_work():
                 return None
             target = "cloud"
+        agent_id = ""
+        if brain_task.agent:
+            agents = await self.jobs.agents(self.user_id)
+            row = next((a for a in agents if a.get("name") == brain_task.agent), None)
+            if row is None:
+                return BrainAnswer(
+                    f"No tienes ningún agente activo llamado {brain_task.agent}.", "", "", ok=False
+                )
+            agent_id = str(row.get("id") or "")
+            if row.get("target") == "pc" and target == "cloud":
+                return None
+            if row.get("target") == "cloud" and target != "cloud":
+                if not await self._cloud_takes_work():
+                    return None
+                target = "cloud"
         model = pick(self.config, self._keys, "code", brain_task.difficulty, prefer)
         if model is None:
             return None
@@ -984,6 +1011,7 @@ class Bridge:
             model=model.model,
             repo=brain_task.repo,
             target=target,
+            agent_id=agent_id,
         )
         if not await self.jobs.enqueue(job):
             return None
@@ -1195,9 +1223,18 @@ class Bridge:
             if (
                 not brain_task.council
                 and brain_task.kind != "x_search"
-                and (brain_task.kind == "code" or brain_task.long_running)
+                and (brain_task.kind == "code" or brain_task.long_running or brain_task.agent)
             ):
                 answer = await self._on_the_pc(brain_task, prefer)
+            if answer is None and brain_task.agent:
+                # An agent is the user's own specialist: nothing else stands in for it.
+                answer = BrainAnswer(
+                    f"Tus agentes trabajan en el ordenador o en la nube, y ahora no está "
+                    f"ninguno para {brain_task.agent}.",
+                    "",
+                    "",
+                    ok=False,
+                )
             if answer is None and brain_task.repo:
                 # Only the PC can publish: the cloud must not hold GitHub credentials. With
                 # the cloud allowed it leaves a patch the PC publishes later.

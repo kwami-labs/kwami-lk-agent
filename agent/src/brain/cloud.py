@@ -37,7 +37,7 @@ import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from ..adapters.supabase import SupabaseClient, get_supabase
 from ..envfile import load_env_file
@@ -53,6 +53,8 @@ from .worker import THREAD_MAX_TASK_USD, THREAD_MAX_TURNS, Runner, Worker
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import EffortLevel
+
+    from .config import Permissions
 
 logger = get_logger("brain.cloud")
 
@@ -242,8 +244,10 @@ class CloudWorker(Worker):
             await self._brief(job, task),
             ExecutorConfig(
                 folder=str(folder),
+                permissions=cast("Permissions", job.permissions),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
+                members=job.members,
                 google_user_id=job.user_id if google else "",
             ),
             cloud=CloudWorkspace(
@@ -324,6 +328,7 @@ class CloudWorker(Worker):
                 folder=str(root),
                 max_turns=THREAD_MAX_TURNS,
                 max_task_usd=min(THREAD_MAX_TASK_USD, left),
+                members=job.members,
             ),
             root=root,
             effort=effort,

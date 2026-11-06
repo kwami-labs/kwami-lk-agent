@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Jarvis keeps working with the PC off.** A cloud work thread (`KWAMI_CLOUD_WORKER`)
+  takes the work of users who allow it from the app, on their own Anthropic key, keeps
+  each thread's files in Storage, and leaves changes to Jarvis's own code as patches.
+  When the PC is on again it brings everything home without stopping either side:
+  files into `Jarvis\nube`, never over the user's own, and patches as pull requests.
+- **The user's own agents.** Specialists defined in the app join the executor's team on
+  the PC and in the cloud, a job can run as one of them with its model and tools, and
+  the voice can hand a task to one by name.
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.

@@ -682,7 +682,9 @@ async def _run_in(
         options.allowed_tools = list(_FULL_TOOLS)
         options.permission_mode = "bypassPermissions"
         # Only here: a member with its own tool list must not widen a narrower mode.
-        options.agents = agent_definitions(AgentDefinition, root if on_the_pc else None)
+        options.agents = agent_definitions(
+            AgentDefinition, root if on_the_pc else None, config.members
+        )
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",

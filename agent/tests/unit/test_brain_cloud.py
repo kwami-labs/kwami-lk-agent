@@ -88,6 +88,18 @@ class FakeJobs:
     async def mark_delivered(self, job_id: str) -> bool:
         return True
 
+    async def agents(self, user_id: str) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": "a1",
+                "name": "facturas",
+                "description": "Facturas",
+                "prompt": "Revisa",
+                "tools": ["Read"],
+                "model": "claude-haiku-5-5",
+            }
+        ]
+
     async def add_sync(self, job: BrainJob, kind: str, prefix: str, **extra: Any) -> bool:
         self.syncs.append({"job": job.id, "kind": kind, "prefix": prefix, **extra})
         return self.sync_ok
@@ -542,3 +554,12 @@ def test_control_c_stops_it_quietly(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cloud_module, "set_settings", lambda settings: None)
     monkeypatch.setattr(cloud_module.asyncio, "run", interrupted)
     cloud_module.main([])
+
+
+async def test_the_users_agents_join_the_cloud_team_too() -> None:
+    jobs, run = FakeJobs(), Recorder()
+    jobs.add(OWNER, agent_id="a1")
+    await _worker(jobs, run).tick()
+    config = run.calls[0]["config"]
+    assert set(config.members) == {"facturas"} and config.permissions == "read_only"
+    assert run.calls[0]["task"].startswith("You are facturas")

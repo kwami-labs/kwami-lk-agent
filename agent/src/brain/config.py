@@ -116,6 +116,9 @@ class BrainModel:
         return role in self.roles
 
 
+Permissions = Literal["full_no_push", "edit_only", "read_only", "think", "think_web"]
+
+
 @dataclass
 class ExecutorConfig:
     folder: str = str(EXECUTOR_ROOT)
@@ -125,14 +128,14 @@ class ExecutorConfig:
     #: `.env` and never leaves the folder. edit_only: edits but runs nothing.
     #: read_only: reads and proposes.
     #: think, think_web: answers only, with no tools or only the web's (`worker.py`).
-    permissions: Literal["full_no_push", "edit_only", "read_only", "think", "think_web"] = (
-        "full_no_push"
-    )
+    permissions: Permissions = "full_no_push"
     max_turns: int = 40
     #: Hard ceiling per task, enforced by the executor itself.
     max_task_usd: float = 2.0
     #: Whose Google accounts the run may use (`google_tool`). Empty: none.
     google_user_id: str = ""
+    #: The user's agents from the app, joining the team (`team.platform_members`).
+    members: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

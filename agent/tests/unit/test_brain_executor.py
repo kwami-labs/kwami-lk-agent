@@ -868,3 +868,16 @@ async def test_a_given_folder_is_used_as_it_is(
     monkeypatch.setattr(executor, "_run_in", run_in)
     result = await executor.run_executor("k", "m", "t", ExecutorConfig(), root=tmp_path)
     assert roots == [tmp_path] and result.uploaded == 0
+
+
+async def test_the_users_agents_join_the_team(sdk: Any, jarvis: Path) -> None:
+    from src.brain.team import TeamMember
+
+    sdk.messages = [_result("Hecho")]
+    member = TeamMember(description="Facturas", prompt="Revisa", model="claude-haiku-5-5")
+    await run_executor(
+        "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis), members={"facturas": member})
+    )
+    agents = sdk.last.options.agents
+    assert set(agents) == {"clerk", "researcher", "reasoner", "reviewer", "facturas"}
+    assert agents["facturas"].model == "claude-haiku-5-5"
