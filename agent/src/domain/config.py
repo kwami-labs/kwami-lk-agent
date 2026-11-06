@@ -324,6 +324,9 @@ class KwamiVoiceConfig:
     # The LLM starts on the interim transcript while the turn is still open.
     preemptive_generation: bool = True
 
+    # A soft keyboard under the silence while the agent thinks (runtime/thinking_sound.py).
+    thinking_sound: bool = False
+
     # Turn detection on a realtime model's own server. "semantic" waits for the
     # user to finish a thought (OpenAI's semantic VAD; Gemini Live with low
     # start-of-speech sensitivity); "server_vad" ends on silence alone and is

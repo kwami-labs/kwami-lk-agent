@@ -94,6 +94,8 @@ BROWSER_TOOLS: frozenset[str] = frozenset(
         "scroll_navigation",
         "run_js_in_navigation",
         "read_navigation_page",
+        "request_site_access",
+        "list_site_access",
         "play_media",
         "control_playback",
         "set_playback_volume",

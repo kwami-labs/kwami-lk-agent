@@ -28,12 +28,14 @@ the folder is deleted.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import mimetypes
 import os
 import re
 import shutil
 import tempfile
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -89,6 +91,18 @@ _EDIT_TOOLS = [*_READ_ONLY_TOOLS, "Write", "Edit", "MultiEdit", "NotebookEdit"]
 #: (`child_env`) Claude Code forces the default mode and asks for what is not listed.
 #: Seen on 2026-11-01, when nobody was there to answer and nothing got written.
 _FULL_TOOLS = [*_EDIT_TOOLS, "Bash", "Agent", "Task"]
+#: Why a run on a shared host has no shell. Its commands would run as the agent's own
+#: system user, which can read the agent's environment (`/proc/<pid>/environ`) with
+#: every deployment key in it, and the other users' folders. Blanking the child's
+#: environment (`child_env`) does not reach the parent's, and the command checks below
+#: are a tripwire: a script written into the folder and run from there passes them.
+NO_SHELL = (
+    "Commands do not run here: this server is shared with other users. Edit the files "
+    "and say what should be run; checks run on the user's PC."
+)
+NO_SHELL_GUIDANCE = f"""
+{NO_SHELL} There is no Bash, so do not try to run tests, builds or git yourself.
+"""
 #: A model that only thinks. What it reads on the web can say anything, and on the
 #: user's own login it must not be able to act on it: no files, no commands.
 _THINK_TOOLS = ["WebSearch", "WebFetch"]
@@ -151,6 +165,24 @@ def _system_append() -> str:
     )
 
 
+#: What Claude Code last wrote to stderr, kept for when it fails: the SDK's own error
+#: only says "Check stderr output for details".
+STDERR_TAIL_LINES = 20
+STDERR_TAIL_CHARS = 600
+
+
+def cloud_home() -> dict[str, str]:
+    """A home Claude Code can write in a container, for its config and sessions.
+
+    Seen on LiveKit Cloud (2026-11-06): Claude Code exited with code 1 before its first
+    message. The container's own home is not one it can write, so in the cloud it gets
+    a folder under the temporary directory, the one place a container always allows.
+    """
+    home = Path(tempfile.gettempdir()) / "jarvis-claude-home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    return {"HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / ".claude")}
+
+
 @dataclass
 class ExecutorResult:
     text: str
@@ -174,6 +206,9 @@ class CloudWorkspace:
     store: SupabaseClient | None
     user_id: str = ""
     kwami_id: str = ""
+    #: A folder that outlives the run (`threads/<thread>`): what the earlier runs of the
+    #: thread left is brought back first, and only what changed goes up again.
+    folder: str = ""
 
     def prefix(self, folder: str) -> str:
         return "/".join((self.user_id, self.kwami_id or "default", folder))
@@ -183,20 +218,91 @@ def _task_folder() -> str:
     return f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}"
 
 
+#: Empty files Claude Code's command sandbox leaves in its working folder so that no
+#: command can create them (seen on LiveKit Cloud, 2026-11-06). Never a result.
+SANDBOX_PLACEHOLDERS = frozenset(
+    {
+        ".gitmodules",
+        ".npmrc",
+        ".yarnrc",
+        ".yarnrc.yml",
+        "bunfig.toml",
+        "package-lock.json",
+        "package.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
+    }
+)
+
+
+def sandbox_leftover(path: Path) -> bool:
+    """One of the sandbox's empty placeholders, not something the model made."""
+    try:
+        return path.name in SANDBOX_PLACEHOLDERS and path.stat().st_size == 0
+    except OSError:
+        return False
+
+
 def _files_to_upload(root: Path) -> list[Path]:
     out: list[Path] = []
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
         if any(part in _SKIP_DIRS for part in rel.parts[:-1]) or not path.is_file():
             continue
-        if _ENV_FILE.search(f"/{rel.as_posix()}"):
+        if _ENV_FILE.search(f"/{rel.as_posix()}") or sandbox_leftover(path):
             continue
         out.append(path)
     return out
 
 
-async def upload_results(root: Path, workspace: CloudWorkspace, folder: str) -> tuple[str, int]:
-    """Copy what the executor left in `root` to Storage. (prefix, files stored)."""
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+async def restore_files(root: Path, workspace: CloudWorkspace, folder: str) -> dict[str, str]:
+    """Bring back what earlier runs of this folder stored. {relative path: sha256}.
+
+    Never raises: a file that cannot be read back is simply not there this time, and
+    an upload of the same name later replaces it.
+    """
+    if workspace.store is None or not workspace.user_id:
+        return {}
+    prefix = workspace.prefix(folder)
+    paths = await workspace.store.list_objects(FILES_BUCKET, prefix, limit=MAX_UPLOAD_FILES)
+    known: dict[str, str] = {}
+    for path in paths or []:
+        rel = path[len(prefix) :].lstrip("/")
+        target = _restore_target(root, rel)
+        if target is None:
+            continue
+        data = await workspace.store.download(FILES_BUCKET, path)
+        if data is None:
+            continue
+        _write_file(target, data)
+        known[rel] = _digest(data)
+    return known
+
+
+def _restore_target(root: Path, rel: str) -> Path | None:
+    """Where a stored file goes back to, or None for a name that would leave the folder."""
+    if not rel or _ENV_FILE.search(f"/{rel}"):
+        return None
+    target = (root / rel).resolve()
+    return target if target.is_relative_to(root.resolve()) else None
+
+
+def _write_file(target: Path, data: bytes) -> None:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(data)
+
+
+async def upload_results(
+    root: Path, workspace: CloudWorkspace, folder: str, known: dict[str, str] | None = None
+) -> tuple[str, int]:
+    """Copy what the executor left in `root` to Storage. (prefix, files stored).
+
+    `known` is what was there before the run: those files go up again only if they changed.
+    """
     if workspace.store is None or not workspace.user_id:
         return "", 0
     prefix = workspace.prefix(folder)
@@ -214,6 +320,8 @@ async def upload_results(root: Path, workspace: CloudWorkspace, folder: str) -> 
             data = path.read_bytes()
         except OSError:
             skipped += 1
+            continue
+        if known and known.get(path.relative_to(root).as_posix()) == _digest(data):
             continue
         content_type = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
         rel = path.relative_to(root).as_posix()
@@ -508,6 +616,7 @@ async def run_executor(
     config: ExecutorConfig,
     *,
     cloud: CloudWorkspace | None = None,
+    root: Path | None = None,
     resume: str = "",
     effort: EffortLevel | None = None,
     on_progress: Callable[[str], None] | None = None,
@@ -515,17 +624,30 @@ async def run_executor(
     """Run the task. Locally in the Jarvis folder; with `cloud`, in a temporary
     folder whose files are uploaded to Storage and then deleted.
 
+    `root` is a folder the caller made and will clean up, used as it is and confined
+    to by the same guard: the cloud's clone of one of Jarvis's repositories.
     `resume` carries on an earlier run of the same folder, with what it knew.
+
+    Both are runs on a host other users share -- the voice agent's container, the
+    cloud work thread -- and neither gets a shell (`NO_SHELL`).
     """
+    if root is not None:
+        return await _run_in(
+            root, api_key, model, task, config, resume, effort, on_progress, shell=False
+        )
     if cloud is None:
         root = resolve_executor_folder(config.folder)
         root.mkdir(parents=True, exist_ok=True)
         return await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
 
     root = Path(tempfile.mkdtemp(prefix="jarvis-"))
+    folder = cloud.folder or _task_folder()
     try:
-        result = await _run_in(root, api_key, model, task, config, resume, effort, on_progress)
-        prefix, stored = await upload_results(root, cloud, _task_folder())
+        known = await restore_files(root, cloud, folder) if cloud.folder else {}
+        result = await _run_in(
+            root, api_key, model, task, config, resume, effort, on_progress, shell=False
+        )
+        prefix, stored = await upload_results(root, cloud, folder, known)
     finally:
         shutil.rmtree(root, ignore_errors=True)
     if stored:
@@ -547,6 +669,8 @@ async def _run_in(
     resume: str = "",
     effort: EffortLevel | None = None,
     on_progress: Callable[[str], None] | None = None,
+    *,
+    shell: bool = True,
 ) -> ExecutorResult:
     try:
         from claude_agent_sdk import (
@@ -569,6 +693,11 @@ async def _run_in(
 
     lane = _Lanes(resuming=bool(resume))
     on_the_pc = not executor_in_cloud()
+    stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+    env = child_env(api_key)
+    if not on_the_pc:
+        env.update(cloud_home())
+    guidance = _system_append() + ("" if shell else NO_SHELL_GUIDANCE)
 
     async def guard(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
@@ -576,7 +705,12 @@ async def _run_in(
         tool_input = input_data.get("tool_input")
         tool_name = str(input_data.get("tool_name", ""))
         call = tool_input if isinstance(tool_input, dict) else {}
-        reason = check_tool_call(root, tool_name, call) or lane.refuse(tool_name)
+        # Also for a team member, whose own tool list may name Bash.
+        reason = (
+            NO_SHELL
+            if not shell and tool_name == "Bash"
+            else check_tool_call(root, tool_name, call) or lane.refuse(tool_name)
+        )
         if on_the_pc:
             record(tool_name, call, reason)
         if reason is None:
@@ -595,10 +729,11 @@ async def _run_in(
     options = ClaudeAgentOptions(
         cwd=str(root),
         model=model,
-        system_prompt={"type": "preset", "preset": "claude_code", "append": _system_append()},
+        system_prompt={"type": "preset", "preset": "claude_code", "append": guidance},
         max_turns=config.max_turns,
         max_budget_usd=config.max_task_usd,
-        env=child_env(api_key),
+        env=env,
+        stderr=stderr_tail.append,
         setting_sources=[],
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[guard])]},
         # No MCP server at all, whatever the PC has configured.
@@ -623,11 +758,13 @@ async def _run_in(
         options.allowed_tools = list(_FULL_TOOLS)
         options.permission_mode = "bypassPermissions"
         # Only here: a member with its own tool list must not widen a narrower mode.
-        options.agents = agent_definitions(AgentDefinition, root if on_the_pc else None)
+        options.agents = agent_definitions(
+            AgentDefinition, root if on_the_pc else None, config.members
+        )
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": _system_append() + TEAM_GUIDANCE,
+            "append": guidance + TEAM_GUIDANCE,
         }
     # The tools that exist at all, not only those allowed: Claude Code also offers its
     # own (scheduling, remote triggers, messages), which no job here has a use for.
@@ -661,8 +798,13 @@ async def _run_in(
         options.system_prompt = {
             "type": "preset",
             "preset": "claude_code",
-            "append": _system_append() + TEAM_GUIDANCE + BROWSER_GUIDANCE,
+            "append": guidance + TEAM_GUIDANCE + BROWSER_GUIDANCE,
         }
+    if not shell:
+        # A list since `options.tools = list(...)` above.
+        options.tools = [name for name in options.tools if name != "Bash"]
+        options.allowed_tools = [name for name in options.allowed_tools if name != "Bash"]
+        options.disallowed_tools = sorted({*options.disallowed_tools, "Bash"})
     if resume:
         options.resume = resume
     if effort:
@@ -689,9 +831,11 @@ async def _run_in(
                     if message.result:
                         texts.append(message.result)
     except Exception as e:
-        logger.exception("Local executor failed")
+        said = " | ".join(line.strip() for line in stderr_tail if line.strip())
+        said = said[-STDERR_TAIL_CHARS:]
+        logger.exception("Local executor failed%s", f"; Claude Code said: {said}" if said else "")
         return ExecutorResult(
-            f"El ejecutor local falló: {e}",
+            f"El ejecutor local falló: {e}" + (f" Claude Code: {said}" if said else ""),
             cost,
             False,
             session_id="" if lane.closed_session else session_id,

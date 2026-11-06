@@ -14,6 +14,11 @@ Three clocks keep it honest, all in the table:
 * `watcher_seen_at` -- a live call is waiting for this result and will say it.
   When it lapses, the result goes to the next greeting instead.
 
+With migration 029 a second kind of worker joins, in the cloud and shared by every
+user who allows it (`brain/cloud.py`). It beats in `brain_cloud_runners`, takes
+work with `brain_claim_cloud_job` -- which leaves a user's work to their PC while
+the PC is there -- and leaves what the PC should bring home in `brain_sync`.
+
 Like every Supabase call in the agent, nothing here raises: None and False mean
 it could not be done, and the caller decides what that means.
 """
@@ -21,7 +26,7 @@ it could not be done, and the caller decides what that means.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
@@ -35,6 +40,14 @@ RUNNER_FRESH_SECONDS = 90.0
 JOB_STALE_SECONDS = 180.0
 #: How long a call's interest in a job lasts unless it renews it.
 WATCH_FRESH_SECONDS = 30.0
+#: A cloud worker beats as often as a PC's, and is gone as soon.
+CLOUD_FRESH_SECONDS = RUNNER_FRESH_SECONDS
+#: How long `auto` work waits for a PC that may be switching on before the cloud takes it.
+CLOUD_PATIENCE_SECONDS = 60
+#: Jobs of one user the cloud runs at once.
+CLOUD_PER_USER = 2
+#: Every cloud worker's runner id starts so: the claim function counts them by it.
+CLOUD_RUNNER_PREFIX = "cloud-"
 
 TERMINAL = frozenset({"done", "failed", "cancelled"})
 
@@ -71,6 +84,15 @@ class BrainJob:
     #: work: acts, on the PC. think, research: only answers, with no tools or only
     #: the web's, and does not wait behind the work.
     mode: str = "work"
+    #: auto: the PC if it is there, else the cloud if allowed. pc, cloud: only there.
+    target: str = "auto"
+    #: The user's agent this job runs as (`brain_agents`), if any.
+    agent_id: str = ""
+    runner_id: str = ""
+    #: Set by the worker before the run, never stored: the executor's mode for the
+    #: agent the job runs as, and the user's agents that join the team.
+    permissions: str = "full_no_push"
+    members: dict[str, Any] = field(default_factory=dict)
     status: str = "queued"
     cancel_requested: bool = False
     progress: str = ""
@@ -95,6 +117,9 @@ class BrainJob:
             model=_text(row.get("model")),
             repo=_text(row.get("repo")),
             mode=_text(row.get("mode")) or "work",
+            target=_text(row.get("target")) or "auto",
+            agent_id=_text(row.get("agent_id")),
+            runner_id=_text(row.get("runner_id")),
             status=_text(row.get("status")) or "queued",
             cancel_requested=row.get("cancel_requested") is True,
             progress=_text(row.get("progress")),
@@ -110,6 +135,10 @@ class BrainJob:
     def finished(self) -> bool:
         return self.status in TERMINAL
 
+    @property
+    def in_cloud(self) -> bool:
+        return self.runner_id.startswith(CLOUD_RUNNER_PREFIX)
+
     def watched(self, now: datetime | None = None) -> bool:
         """Whether a live call renewed its interest recently."""
         if not self.watcher_seen_at:
@@ -124,6 +153,9 @@ class JobStore:
         #: Whether the database has migration 024. Learnt from the heartbeat, so a
         #: thinking line with nothing to claim does not fail every few seconds.
         self.thinking_ready = False
+        #: Whether it has migration 029, learnt from the last look for what the cloud
+        #: left: the PC then looks far less often until it does.
+        self.sync_ready = True
 
     # -- the side that asks --------------------------------------------------
 
@@ -139,6 +171,28 @@ class JobStore:
             what="whether the PC's worker is there",
         )
         return bool(rows)
+
+    async def cloud_online(self) -> bool:
+        """Whether a cloud worker is there to take work (migration 029)."""
+        rows = await self._store.select(
+            "brain_cloud_runners",
+            {
+                "select": "runner_id",
+                "last_seen_at": f"gte.{_ago(CLOUD_FRESH_SECONDS)}",
+                "limit": "1",
+            },
+            what="whether a cloud worker is there",
+        )
+        return bool(rows)
+
+    async def cloud_allowed(self, user_id: str) -> bool:
+        """Whether this user lets the cloud work for them. No, if it cannot be read."""
+        rows = await self._store.select(
+            "brain_cloud_settings",
+            {"select": "enabled", "user_id": f"eq.{user_id}", "limit": "1"},
+            what="whether the user allows the cloud",
+        )
+        return bool(rows and rows[0].get("enabled") is True)
 
     async def account_ready(self, user_id: str) -> bool:
         """Whether a fresh worker of this user reports a Claude login on its PC."""
@@ -159,13 +213,17 @@ class JobStore:
         """Queue `job`, minting its ids here: the insert returns nothing to read them from."""
         job.id = job.id or str(uuid.uuid4())
         job.thread_id = job.thread_id or str(uuid.uuid4())
-        # Named only when it is not the default: work keeps queueing on a database
-        # that has not had migration 024 yet.
-        mode = {"mode": job.mode} if job.mode != "work" else {}
+        # Named only when they are not the default: work keeps queueing on a database
+        # that has not had migration 024 or 029 yet.
+        extra: dict[str, Any] = {"mode": job.mode} if job.mode != "work" else {}
+        if job.target != "auto":
+            extra["target"] = job.target
+        if job.agent_id:
+            extra["agent_id"] = job.agent_id
         return await self._store.insert(
             "brain_jobs",
             {
-                **mode,
+                **extra,
                 "id": job.id,
                 "user_id": job.user_id,
                 "kwami_id": job.kwami_id,
@@ -240,6 +298,30 @@ class JobStore:
             what="the latest job",
         )
         return _text(rows[0].get("thread_id")) if rows else ""
+
+    async def agent(self, user_id: str, agent_id: str) -> dict[str, Any] | None:
+        """One of this user's agents, or None (gone, switched off, or not theirs)."""
+        rows = await self._store.select(
+            "brain_agents",
+            {
+                "select": "*",
+                "id": f"eq.{agent_id}",
+                "user_id": f"eq.{user_id}",
+                "enabled": "is.true",
+                "limit": "1",
+            },
+            what="the user's agent",
+        )
+        return rows[0] if rows else None
+
+    async def agents(self, user_id: str) -> list[dict[str, Any]]:
+        """This user's agents that are switched on. Empty when there are none or no table."""
+        rows = await self._store.select(
+            "brain_agents",
+            {"select": "*", "user_id": f"eq.{user_id}", "enabled": "is.true", "order": "name.asc"},
+            what="the user's agents",
+        )
+        return list(rows or [])
 
     # -- the worker's side -----------------------------------------------------
 
@@ -351,6 +433,109 @@ class JobStore:
             what="where a thread left off",
         )
         return _text(rows[0].get("sdk_session_id")) if rows else ""
+
+    # -- the cloud's side ---------------------------------------------------------
+
+    async def cloud_beat(self, runner_id: str, hostname: str) -> bool:
+        return await self._store.insert(
+            "brain_cloud_runners",
+            {"runner_id": runner_id, "hostname": hostname[:120], "last_seen_at": _now()},
+            on_conflict="runner_id",
+            what="the cloud worker's heartbeat",
+        )
+
+    async def claim_cloud(self, runner_id: str) -> BrainJob | None:
+        """The next job of any user the cloud may take, or None."""
+        rows = await self._store.rpc(
+            "brain_claim_cloud_job",
+            {
+                "p_runner_id": runner_id,
+                "p_patience_seconds": CLOUD_PATIENCE_SECONDS,
+                "p_per_user": CLOUD_PER_USER,
+            },
+            what="the next job for the cloud",
+        )
+        return BrainJob.from_row(rows[0]) if isinstance(rows, list) and rows else None
+
+    async def stale_cloud_jobs(self) -> list[BrainJob]:
+        """Jobs some cloud worker took and stopped beating for: it went away."""
+        rows = await self._store.select(
+            "brain_jobs",
+            {
+                "select": "*",
+                "status": "eq.running",
+                "runner_id": f"like.{CLOUD_RUNNER_PREFIX}*",
+                "heartbeat_at": f"lt.{_ago(JOB_STALE_SECONDS)}",
+            },
+            what="jobs a cloud worker left behind",
+        )
+        return [BrainJob.from_row(row) for row in rows or []]
+
+    async def thread_results(self, thread_id: str, limit: int = 3) -> list[str]:
+        """What the latest finished jobs of a thread said, oldest first.
+
+        The cloud cannot resume a Claude session it ran on another machine, so a
+        follow-up there starts afresh with this, and the thread's files.
+        """
+        rows = await self._store.select(
+            "brain_jobs",
+            {
+                "select": "result",
+                "thread_id": f"eq.{thread_id}",
+                "status": "eq.done",
+                "order": "created_at.desc",
+                "limit": str(limit),
+            },
+            what="what a thread found so far",
+        )
+        return [_text(row.get("result")) for row in reversed(rows or []) if row.get("result")]
+
+    async def add_sync(
+        self,
+        job: BrainJob,
+        kind: str,
+        storage_prefix: str,
+        *,
+        files: int = 0,
+        repo: str = "",
+        base_ref: str = "",
+    ) -> bool:
+        """Leave what the cloud made for the user's PC to bring home."""
+        return await self._store.insert(
+            "brain_sync",
+            {
+                "id": str(uuid.uuid4()),
+                "user_id": job.user_id,
+                "kwami_id": job.kwami_id,
+                "job_id": job.id,
+                "kind": kind,
+                "repo": repo,
+                "base_ref": base_ref,
+                "storage_prefix": storage_prefix,
+                "files": files,
+                "title": job.title[:200],
+            },
+            what="what the PC should bring home",
+        )
+
+    # -- the PC bringing the cloud's work home ------------------------------------
+
+    async def claim_sync(self, user_id: str, runner_id: str) -> dict[str, Any] | None:
+        rows = await self._store.rpc(
+            "brain_claim_sync",
+            {"p_user_id": user_id, "p_runner_id": runner_id},
+            what="what the cloud left for this PC",
+        )
+        self.sync_ready = rows is not None
+        return rows[0] if isinstance(rows, list) and rows else None
+
+    async def end_sync(self, sync_id: str, status: str, result: str) -> bool:
+        return await self._store.update(
+            "brain_sync",
+            {"status": status, "result": result[:2000], "applied_at": _now()},
+            {"id": f"eq.{sync_id}"},
+            what="how bringing the cloud's work home ended",
+        )
 
     async def stale_jobs(self, user_id: str) -> list[BrainJob]:
         rows = await self._store.select(

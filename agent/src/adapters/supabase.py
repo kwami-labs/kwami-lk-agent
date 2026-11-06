@@ -208,6 +208,53 @@ class SupabaseClient:
         )
         return response is not None
 
+    async def list_objects(
+        self, bucket: str, prefix: str, *, limit: int = 1000
+    ) -> list[str] | None:
+        """Every object path under `prefix`, folders walked. None when it could not be read.
+
+        Storage lists one level at a time: a folder comes back with no id. At most
+        `limit` paths in all, so a runaway folder cannot keep this going.
+        """
+        found: list[str] = []
+        pending = [prefix.strip("/")]
+        while pending and len(found) < limit:
+            folder = pending.pop()
+            response = await self._request(
+                "POST",
+                f"/storage/v1/object/list/{quote(bucket, safe='')}",
+                what=f"listing {bucket}/{folder}",
+                json={"prefix": f"{folder}/", "limit": limit, "offset": 0},
+                headers=self._headers(),
+            )
+            if response is None:
+                return None
+            try:
+                entries = response.json()
+            except ValueError:
+                return None
+            for entry in entries if isinstance(entries, list) else []:
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if not name:
+                    continue
+                if entry.get("id") is None:
+                    pending.append(f"{folder}/{name}")
+                else:
+                    found.append(f"{folder}/{name}")
+        return found[:limit]
+
+    async def download(self, bucket: str, path: str) -> bytes | None:
+        """The bytes stored at `bucket/path`, or None."""
+        object_path = "/".join(quote(part, safe="") for part in path.split("/") if part)
+        response = await self._request(
+            "GET",
+            f"/storage/v1/object/{quote(bucket, safe='')}/{object_path}",
+            what=f"downloading {bucket}/{path}",
+            timeout=UPLOAD_TIMEOUT_SECONDS,
+            headers=self._headers(),
+        )
+        return None if response is None else response.content
+
 
 _clients: dict[tuple[str, str], SupabaseClient] = {}
 

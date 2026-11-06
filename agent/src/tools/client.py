@@ -5,11 +5,12 @@ import json
 import uuid
 from typing import TYPE_CHECKING, Any
 
+from livekit import rtc
 from livekit.agents import RunContext, function_tool
 
 from ..runtime.container import room_from_context
 from ..utils.logging import get_logger
-from ..utils.validation import validate_tool_definition
+from ..utils.validation import normalize_parameters, validate_tool_definition
 
 if TYPE_CHECKING:
     from ..agent import KwamiAgent
@@ -19,6 +20,37 @@ logger = get_logger("client_tools")
 
 # A client tool result goes verbatim into the LLM context.
 MAX_CLIENT_TOOL_RESULT_CHARS = 4000
+
+#: How long the app has to run a client tool and answer.
+CLIENT_TOOL_TIMEOUT_SECONDS = 30.0
+
+#: The RPC method an app registers to run client tools.
+CLIENT_TOOL_RPC_METHOD = "kwami.client_tool"
+#: The participant attribute an app sets, to this value, once that method is
+#: registered. Without it, tool calls go over the data channel as before, so an
+#: older app never waits on an RPC it does not know.
+CLIENT_TOOL_RPC_ATTRIBUTE = "kwami.client_tools"
+CLIENT_TOOL_RPC_VALUE = "rpc"
+
+#: RPC failures that mean "this call cannot go by RPC", not "the tool failed".
+RPC_FALLBACK_CODES = frozenset(
+    {
+        rtc.RpcError.ErrorCode.UNSUPPORTED_METHOD,
+        rtc.RpcError.ErrorCode.UNSUPPORTED_SERVER,
+        rtc.RpcError.ErrorCode.UNSUPPORTED_VERSION,
+        rtc.RpcError.ErrorCode.REQUEST_PAYLOAD_TOO_LARGE,
+    }
+)
+
+
+def rpc_destination(room: Any) -> str | None:
+    """The identity of the app that takes client tools by RPC, if one is in the room."""
+    participants = getattr(room, "remote_participants", None) or {}
+    for participant in participants.values():
+        attributes = getattr(participant, "attributes", None) or {}
+        if attributes.get(CLIENT_TOOL_RPC_ATTRIBUTE) == CLIENT_TOOL_RPC_VALUE:
+            return getattr(participant, "identity", None) or None
+    return None
 
 
 def _cap(text: str) -> str:
@@ -97,13 +129,7 @@ class ClientToolManager:
             "type": "function",
             "name": tool_name,
             "description": description,
-            "parameters": parameters
-            if parameters
-            else {
-                "type": "object",
-                "properties": {},
-                "required": [],
-            },
+            "parameters": normalize_parameters(parameters),
         }
 
         # Create the handler function that will be called when the tool is invoked
@@ -130,37 +156,98 @@ class ClientToolManager:
                 )
                 return "Error: Agent not connected to room"
 
-            result_future: asyncio.Future = asyncio.Future()
-            self.pending_calls[tool_call_id] = result_future
-
-            payload = {
-                "type": "tool_call",
-                "toolCallId": tool_call_id,
-                "function": {
-                    "name": tool_name,
-                    "arguments": json.dumps(raw_arguments),
-                },
-            }
-
-            try:
-                data = json.dumps(payload).encode("utf-8")
-                await room.local_participant.publish_data(data, reliable=True)
-
-                try:
-                    result = await asyncio.wait_for(result_future, timeout=30.0)
-                    return result
-                except TimeoutError:
-                    logger.warning("Tool call timed out: %s (%s)", tool_name, tool_call_id)
-                    return "Error: Tool execution timed out"
-
-            except Exception as e:
-                logger.exception("Error executing client tool")
-                return f"Error executing tool: {e!s}"
-            finally:
-                self.pending_calls.pop(tool_call_id, None)
+            caller = rpc_destination(room)
+            if caller is not None:
+                answer = await self._call_over_rpc(
+                    room, caller, tool_name, tool_call_id, raw_arguments
+                )
+                if answer is not None:
+                    return answer
+            return await self._call_over_data_channel(room, tool_name, tool_call_id, raw_arguments)
 
         # Create the function tool using the raw_schema approach
         return function_tool(tool_handler, raw_schema=raw_schema)
+
+    async def _call_over_rpc(
+        self,
+        room: Any,
+        caller: str,
+        tool_name: str,
+        tool_call_id: str,
+        raw_arguments: dict,
+    ) -> str | None:
+        """Ask the app to run the tool as an RPC; None means "use the data channel".
+
+        An RPC is a request with its own answer, error and deadline, delivered to
+        one participant: what the `tool_call`/`tool_result` pair rebuilt by hand
+        with a dict of futures, broadcast to the whole room.
+        """
+        payload = json.dumps(
+            {"toolCallId": tool_call_id, "name": tool_name, "arguments": raw_arguments}
+        )
+        try:
+            response = await room.local_participant.perform_rpc(
+                destination_identity=caller,
+                method=CLIENT_TOOL_RPC_METHOD,
+                payload=payload,
+                response_timeout=CLIENT_TOOL_TIMEOUT_SECONDS,
+            )
+        except rtc.RpcError as e:
+            if e.code in RPC_FALLBACK_CODES:
+                # An app that advertised RPC but cannot take this call (an older
+                # build mid-reload, a payload over the RPC limit): the data
+                # channel still reaches it.
+                logger.info(
+                    "Client tool '%s' over RPC refused (%s); using the data channel",
+                    tool_name,
+                    e.code,
+                )
+                return None
+            if e.code == rtc.RpcError.ErrorCode.RESPONSE_TIMEOUT:
+                logger.warning("Tool call timed out: %s (%s)", tool_name, tool_call_id)
+                return "Error: Tool execution timed out"
+            return _cap(f"Error from client: {e.message}")
+        except Exception as e:
+            logger.exception("Error executing client tool over RPC")
+            return f"Error executing tool: {e!s}"
+        return _cap(response or "")
+
+    async def _call_over_data_channel(
+        self,
+        room: Any,
+        tool_name: str,
+        tool_call_id: str,
+        raw_arguments: dict,
+    ) -> str:
+        """The original protocol: `tool_call` out, `tool_result` back by id."""
+        result_future: asyncio.Future = asyncio.Future()
+        self.pending_calls[tool_call_id] = result_future
+
+        payload = {
+            "type": "tool_call",
+            "toolCallId": tool_call_id,
+            "function": {
+                "name": tool_name,
+                "arguments": json.dumps(raw_arguments),
+            },
+        }
+
+        try:
+            data = json.dumps(payload).encode("utf-8")
+            await room.local_participant.publish_data(data, reliable=True)
+
+            try:
+                result = await asyncio.wait_for(result_future, timeout=CLIENT_TOOL_TIMEOUT_SECONDS)
+                return result
+            except TimeoutError:
+                logger.warning("Tool call timed out: %s (%s)", tool_name, tool_call_id)
+                return "Error: Tool execution timed out"
+
+        except Exception as e:
+            logger.exception("Error executing client tool")
+            return f"Error executing tool: {e!s}"
+        finally:
+            self.pending_calls.pop(tool_call_id, None)
 
     def handle_tool_result(
         self,

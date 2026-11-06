@@ -46,6 +46,7 @@ class BrainToolsMixin:
         long_running: bool = False,
         follow_up: str = "",
         own_code_repo: str = "",
+        agent: str = "",
     ) -> dict[str, Any]:
         """Hand work to the brain: other models search, analyse, write or program.
 
@@ -80,6 +81,9 @@ class BrainToolsMixin:
                 api, app or sdk, one per task. It ends in a pull request the user
                 tries by hand; `merge_own_pull_request` merges it after that, and
                 deploying is theirs.
+            agent: Only when the user names one of their own agents (they define them
+                in the app), by its name. That agent does the task, on the PC or in the
+                cloud, and the result comes back like any other.
         """
         bridge = _bridge(context)
         if bridge is None:
@@ -98,6 +102,7 @@ class BrainToolsMixin:
             long_running=bool(long_running),
             follow_up=follow_up.strip(),
             repo=own_code_repo.strip().lower(),
+            agent=agent.strip().lower(),
         )
         if isinstance(started, str):
             return {"error": started}

@@ -1,8 +1,8 @@
 """Graph search and the three-strategy user-name extraction.
 
-`search_thread` is what `recall_memories` actually calls, and it answered
-"I don't have any memories about that yet" for months because the old code
-called a `thread.search` that does not exist. The client is a hand-written
+`recall` is what `recall_memories` calls. Its predecessor answered "I don't
+have any memories about that yet" for months because the old code called a
+`thread.search` that does not exist, and then searched facts alone. The client is a hand-written
 double here; that `graph.search` and `graph.node.get_by_user_id` are real is
 pinned in tests/contract/test_zep_contract.py.
 """
@@ -21,7 +21,7 @@ from src.memory.search import (
     _is_valid_name,
     get_entities_by_type,
     get_user_name,
-    search_thread,
+    recall,
 )
 
 
@@ -84,69 +84,106 @@ def results(edges=None, nodes=None):
 
 
 # =============================================================================
-# search_thread
+# recall
 # =============================================================================
 
 
-async def test_a_search_without_a_user_id_is_refused(caplog) -> None:
+class TwoScopes:
+    """`graph.search` answering per scope, the way recall calls it."""
+
+    def __init__(self, edges=None, nodes=None, edge_error=None, node_error=None) -> None:
+        self.answers = {"edges": (edges, edge_error), "nodes": (nodes, node_error)}
+        self.calls: list[dict[str, Any]] = []
+
+    async def search(self, **kwargs: Any):
+        self.calls.append(kwargs)
+        found, error = self.answers[kwargs["scope"]]
+        if error is not None:
+            raise error
+        return results(edges=found) if kwargs["scope"] == "edges" else results(nodes=found)
+
+
+def recall_client(**kwargs: Any) -> Any:
+    return SimpleNamespace(graph=TwoScopes(**kwargs))
+
+
+async def test_recall_without_a_user_id_is_refused(caplog) -> None:
     """The graph is per-user; searching without one would be a cross-user read."""
-    client = FakeZep()
+    client = recall_client()
 
     with caplog.at_level(logging.WARNING):
-        assert await search_thread(client, "session-1", "query") == []
+        assert await recall(client, "", "coffee") == []
 
     assert client.graph.calls == []
-    assert "without a user_id" in caplog.text
 
 
-async def test_facts_come_back_with_their_score_and_session() -> None:
-    client = FakeZep(results=results(edges=[edge("likes coffee", 0.9)]))
+async def test_recall_searches_facts_and_entities_with_the_reranker() -> None:
+    client = recall_client(
+        edges=[edge("the user drinks espresso", score=0.9)],
+        nodes=[node(name="Ana", summary="The user's sister, lives in  Lisbon.", score=0.8)],
+    )
 
-    found = await search_thread(client, "session-1", "coffee", user_id="user-1")
+    found = await recall(client, "user-1", "coffee", limit=6)
 
-    assert found == [{"content": "likes coffee", "score": 0.9, "thread_id": "session-1"}]
-
-
-async def test_the_graph_is_searched_not_the_thread() -> None:
-    """The bug this replaced: zep-cloud has no thread.search, so the old call
-    raised AttributeError on every recall."""
-    client = FakeZep(results=results(edges=[]))
-
-    await search_thread(client, "session-1", "coffee", limit=3, user_id="user-1")
-
-    assert client.graph.calls == [
-        {"user_id": "user-1", "query": "coffee", "scope": "edges", "limit": 3}
+    assert found == [
+        {"content": "the user drinks espresso", "score": 0.9, "kind": "fact"},
+        {"content": "Ana: The user's sister, lives in Lisbon.", "score": 0.8, "kind": "entity"},
     ]
+    scopes = {call["scope"]: call for call in client.graph.calls}
+    assert scopes["edges"]["limit"] == 6
+    assert scopes["nodes"]["limit"] == 3
+    assert all(call["reranker"] == "cross_encoder" for call in client.graph.calls)
+    assert all(call["user_id"] == "user-1" for call in client.graph.calls)
 
 
-async def test_edges_without_a_fact_are_dropped() -> None:
-    client = FakeZep(results=results(edges=[edge(None), edge(""), edge("real fact")]))
+async def test_a_fact_that_stopped_being_true_says_so() -> None:
+    client = recall_client(edges=[edge("works at Acme", invalid_at="2026-01-01")])
 
-    found = await search_thread(client, "s", "q", user_id="user-1")
+    found = await recall(client, "user-1", "job")
 
-    assert [f["content"] for f in found] == ["real fact"]
-
-
-async def test_a_missing_score_becomes_zero() -> None:
-    client = FakeZep(results=results(edges=[edge("fact", None)]))
-
-    assert (await search_thread(client, "s", "q", user_id="u"))[0]["score"] == 0
+    assert found[0]["content"] == "works at Acme (no longer true since 2026-01-01)"
 
 
-async def test_a_response_without_edges_yields_nothing() -> None:
-    client = FakeZep(results=results(edges=None))
+async def test_entities_without_a_name_or_summary_and_facts_without_text_are_skipped() -> None:
+    client = recall_client(
+        edges=[edge(None), edge("kept")],
+        nodes=[node(name="", summary="x"), node(name="Bob", summary="  ")],
+    )
 
-    assert await search_thread(client, "s", "q", user_id="u") == []
+    assert [r["content"] for r in await recall(client, "u", "q")] == ["kept"]
 
 
-async def test_a_search_failure_is_swallowed(caplog) -> None:
-    """Recall failing must not end the turn."""
-    client = FakeZep(error=RuntimeError("zep is down"))
+async def test_a_missing_score_reads_as_zero() -> None:
+    client = recall_client(edges=[edge("f")], nodes=[node(name="N", summary="s")])
 
+    assert [r["score"] for r in await recall(client, "u", "q")] == [0, 0]
+
+
+async def test_one_scope_failing_leaves_the_other(caplog) -> None:
+    client = recall_client(
+        edges=[edge("kept")],
+        node_error=RuntimeError("nodes down"),
+    )
     with caplog.at_level(logging.ERROR):
-        assert await search_thread(client, "s", "q", user_id="u") == []
+        assert [r["content"] for r in await recall(client, "u", "q")] == ["kept"]
+    assert "Failed to search entities" in caplog.text
 
-    assert "Failed to search memories" in caplog.text
+    client = recall_client(
+        edge_error=RuntimeError("edges down"), nodes=[node(name="N", summary="s")]
+    )
+    with caplog.at_level(logging.ERROR):
+        assert [r["kind"] for r in await recall(client, "u", "q")] == ["entity"]
+    assert "Failed to search facts" in caplog.text
+
+
+async def test_a_long_summary_is_cut() -> None:
+    from src.memory.search import MAX_RECALL_SUMMARY_CHARS
+
+    client = recall_client(nodes=[node(name="N", summary="y" * 1000)])
+
+    content = (await recall(client, "u", "q"))[0]["content"]
+
+    assert content == "N: " + "y" * MAX_RECALL_SUMMARY_CHARS
 
 
 # =============================================================================
@@ -428,3 +465,90 @@ async def test_a_person_node_with_no_usable_label_or_summary_is_skipped() -> Non
     )
 
     assert await get_user_name(client, "u") is None
+
+
+# =============================================================================
+# names in the languages the kwami speaks, and the user's own node
+# =============================================================================
+
+
+@pytest.mark.parametrize(
+    ("fact", "name"),
+    [
+        ("Me llamo Daniel", "Daniel"),
+        ("El usuario se llama José", "José"),
+        ("mi nombre es lucía", "Lucía"),
+        ("Je m'appelle Zoë", "Zoë"),
+        ("Je m\u2019appelle Luc", "Luc"),
+        ("Mi chiamo Marco", "Marco"),
+        ("Chamo-me Ana", "Ana"),
+        ("My name's Bob", "Bob"),
+    ],
+)
+def test_a_self_introduction_in_any_of_the_languages(fact: str, name: str) -> None:
+    """The user's own words reach the graph in their language; "me llamo" was
+    never read, so a Spanish speaker was never greeted by name."""
+    assert _extract_name_from_fact(fact) == name
+
+
+class FakeUserApi:
+    def __init__(self, summary: str | None = None, error: Exception | None = None) -> None:
+        self.summary = summary
+        self.error = error
+
+    async def get_node(self, user_id: str):
+        if self.error is not None:
+            raise self.error
+        return SimpleNamespace(node=SimpleNamespace(summary=self.summary))
+
+
+async def test_strategy_zero_reads_the_users_own_node(caplog) -> None:
+    """Zep summarises the user in English, name first, whatever language they spoke."""
+    client = FakeZep(results=results(edges=[]))
+    client.user = FakeUserApi("Daniel lives in Valencia. He has a dentist appointment.")
+
+    with caplog.at_level(logging.INFO):
+        assert await get_user_name(client, "u") == "Daniel"
+
+    assert "from the user node" in caplog.text
+    assert client.graph.calls == [], "no graph search when the node already says it"
+
+
+async def test_a_nameless_user_node_falls_through_to_the_searches() -> None:
+    client = FakeZep(results=results(edges=[edge("me llamo Ada")]))
+    client.user = FakeUserApi("The user lives in Valencia.")
+
+    assert await get_user_name(client, "u") == "Ada"
+
+
+async def test_an_unreadable_user_node_falls_through(caplog) -> None:
+    client = FakeZep(results=results(edges=[edge("my name is Ada")]))
+    client.user = FakeUserApi(error=RuntimeError("zep down"))
+
+    with caplog.at_level(logging.DEBUG):
+        assert await get_user_name(client, "u") == "Ada"
+
+    assert "Could not read the user node" in caplog.text
+
+
+async def test_the_kwami_is_never_the_user_node_name() -> None:
+    client = FakeZep(results=results(edges=[]))
+    client.user = FakeUserApi("Jarvis is the assistant the user talks to.")
+
+    assert await get_user_name(client, "u", "Jarvis") is None
+
+
+async def test_recall_names_the_users_own_node_without_its_id() -> None:
+    client = recall_client(
+        nodes=[
+            node(name="kwami_abc_def", summary="Daniel lives in Valencia."),
+            node(name="u-1", summary="Likes tea."),
+        ]
+    )
+
+    found = await recall(client, "u-1", "who am i")
+
+    assert [r["content"] for r in found] == [
+        "The user: Daniel lives in Valencia.",
+        "The user: Likes tea.",
+    ]

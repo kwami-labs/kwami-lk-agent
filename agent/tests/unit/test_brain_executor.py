@@ -27,6 +27,7 @@ from src.brain.executor import (
     FILES_BUCKET,
     THINK_SYSTEM,
     CloudWorkspace,
+    ExecutorResult,
     check_tool_call,
     child_env,
     run_executor,
@@ -764,3 +765,234 @@ async def test_a_task_on_the_pc_gets_the_database_when_switched_on(
     options = sdk.last.options
     assert "kwami_db" in options.mcp_servers
     assert executor.SUPABASE_TOOL in options.allowed_tools
+
+
+# -- a cloud thread's folder, kept between runs -------------------------------------------
+
+
+class _ThreadStore:
+    """Storage with a thread's files in it, and a record of what went up."""
+
+    def __init__(self, files: dict[str, bytes], listing_ok: bool = True) -> None:
+        self.files = files
+        self.listing_ok = listing_ok
+        self.uploaded: list[str] = []
+
+    async def list_objects(
+        self, bucket: str, prefix: str, *, limit: int = 1000
+    ) -> list[str] | None:
+        return list(self.files) if self.listing_ok else None
+
+    async def download(self, bucket: str, path: str) -> bytes | None:
+        return self.files.get(path)
+
+    async def upload(self, bucket: str, path: str, data: bytes, *, content_type: str) -> bool:
+        self.uploaded.append(path)
+        return True
+
+
+async def test_a_thread_folder_comes_back_and_only_what_changed_goes_up(tmp_path: Path) -> None:
+    from src.brain.executor import restore_files, upload_results
+
+    prefix = "u/k/threads/t1"
+    store = _ThreadStore(
+        {
+            f"{prefix}/same.md": b"igual",
+            f"{prefix}/edit.md": b"antes",
+            f"{prefix}/gone.md": None,  # type: ignore[dict-item]
+            f"{prefix}/.env": b"SECRET=1",
+            f"{prefix}/../escape.md": b"fuera",
+            prefix: b"the folder itself",
+        }
+    )
+    workspace = CloudWorkspace(store=store, user_id="u", kwami_id="k", folder="threads/t1")  # type: ignore[arg-type]
+
+    known = await restore_files(tmp_path, workspace, "threads/t1")
+
+    assert sorted(known) == ["edit.md", "same.md"]
+    assert (tmp_path / "same.md").read_bytes() == b"igual"
+    assert not (tmp_path / ".env").exists()
+    assert not (tmp_path.parent / "escape.md").exists()
+
+    (tmp_path / "edit.md").write_bytes(b"despues")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "new.md").write_bytes(b"nuevo")
+    _, stored = await upload_results(tmp_path, workspace, "threads/t1", known)
+
+    assert stored == 2
+    assert sorted(store.uploaded) == [f"{prefix}/edit.md", f"{prefix}/sub/new.md"]
+
+
+async def test_nothing_comes_back_without_an_owner_or_a_listing(tmp_path: Path) -> None:
+    from src.brain.executor import restore_files
+
+    assert await restore_files(tmp_path, CloudWorkspace(store=None), "t") == {}
+    store = _ThreadStore({}, listing_ok=False)
+    workspace = CloudWorkspace(store=store, user_id="u")  # type: ignore[arg-type]
+    assert await restore_files(tmp_path, workspace, "t") == {}
+
+
+async def test_a_cloud_run_in_a_thread_folder_restores_it_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _ThreadStore({"u/k/threads/t1/a.md": b"previo"})
+    seen: list[bool] = []
+
+    async def run_in(root: Path, *args: Any, **kwargs: Any) -> ExecutorResult:
+        seen.append((root / "a.md").read_bytes() == b"previo")
+        (root / "b.md").write_bytes(b"nuevo")
+        return ExecutorResult("Hecho.", 0.1, True)
+
+    monkeypatch.setattr(executor, "_run_in", run_in)
+    result = await executor.run_executor(
+        "k",
+        "m",
+        "t",
+        ExecutorConfig(),
+        cloud=CloudWorkspace(store=store, user_id="u", kwami_id="k", folder="threads/t1"),  # type: ignore[arg-type]
+    )
+    assert seen == [True]
+    assert result.uploaded == 1 and result.uploaded_to == "jarvis-files/u/k/threads/t1"
+    assert store.uploaded == ["u/k/threads/t1/b.md"]
+
+
+async def test_a_given_folder_is_used_as_it_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    roots: list[Path] = []
+
+    async def run_in(root: Path, *args: Any, **kwargs: Any) -> ExecutorResult:
+        roots.append(root)
+        return ExecutorResult("Hecho.", 0.1, True)
+
+    monkeypatch.setattr(executor, "_run_in", run_in)
+    result = await executor.run_executor("k", "m", "t", ExecutorConfig(), root=tmp_path)
+    assert roots == [tmp_path] and result.uploaded == 0
+
+
+async def test_the_users_agents_join_the_team(sdk: Any, jarvis: Path) -> None:
+    from src.brain.team import TeamMember
+
+    sdk.messages = [_result("Hecho")]
+    member = TeamMember(description="Facturas", prompt="Revisa", model="claude-haiku-5-5")
+    await run_executor(
+        "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis), members={"facturas": member})
+    )
+    agents = sdk.last.options.agents
+    assert set(agents) == {"clerk", "researcher", "reasoner", "reviewer", "facturas"}
+    assert agents["facturas"].model == "claude-haiku-5-5"
+
+
+async def test_a_crash_says_what_claude_code_wrote_to_stderr(sdk, jarvis: Path) -> None:
+    class Failing(FakeSDKClient):
+        async def __aenter__(self) -> FakeSDKClient:
+            for line in [
+                "",
+                "  Error: EACCES: permission denied, mkdir '/app/.claude'  ",
+                "x" * 900,
+            ]:
+                self.options.stderr(line)
+            raise RuntimeError("Command failed with exit code 1")
+
+    sdk_module = claude_agent_sdk
+    original = sdk_module.ClaudeSDKClient
+    sdk_module.ClaudeSDKClient = Failing  # type: ignore[misc]
+    try:
+        result = await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    finally:
+        sdk_module.ClaudeSDKClient = original  # type: ignore[misc]
+    assert not result.ok
+    assert result.text.startswith("El ejecutor local falló: Command failed with exit code 1")
+    assert "Claude Code:" in result.text
+    assert len(result.text.split("Claude Code: ", 1)[1]) == executor.STDERR_TAIL_CHARS
+
+
+async def test_in_the_cloud_claude_code_gets_a_home_it_can_write(
+    sdk, jarvis: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(executor, "executor_in_cloud", lambda: True)
+    monkeypatch.setattr(executor.tempfile, "gettempdir", lambda: str(tmp_path))
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)))
+    env = sdk.last.options.env
+    home = tmp_path / "jarvis-claude-home"
+    assert env["HOME"] == str(home)
+    assert env["CLAUDE_CONFIG_DIR"] == str(home / ".claude")
+    assert (home / ".claude").is_dir()
+
+
+async def test_on_the_pc_claude_code_keeps_the_users_home(sdk, jarvis: Path) -> None:
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)))
+    env = sdk.last.options.env
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert env.get("HOME", "") != str(Path(executor.tempfile.gettempdir()) / "jarvis-claude-home")
+
+
+async def test_the_sandboxs_empty_placeholders_are_never_results(tmp_path: Path) -> None:
+    store = _ThreadStore({})
+    (tmp_path / "package.json").write_bytes(b"")
+    (tmp_path / ".npmrc").write_bytes(b"")
+    (tmp_path / "yarn.lock").write_text("real lock", encoding="utf-8")
+    (tmp_path / "vacio.md").write_bytes(b"")
+    workspace = CloudWorkspace(store=store, user_id="u", kwami_id="k")  # type: ignore[arg-type]
+    _, stored = await upload_results(tmp_path, workspace, "t")
+    assert sorted(store.uploaded) == ["u/k/t/vacio.md", "u/k/t/yarn.lock"]
+    assert stored == 2
+
+
+def test_a_placeholder_that_cannot_be_read_is_not_one(tmp_path: Path) -> None:
+    assert executor.sandbox_leftover(tmp_path / "package.json") is False
+
+
+# -- a host other users share has no shell --------------------------------------
+
+
+def _shared_runs(tmp_path: Path) -> dict[str, dict[str, Any]]:
+    """The two ways a run lands on a shared host: the voice agent's cloud folder,
+    and a clone the cloud work thread made."""
+    return {
+        "cloud": {"cloud": CloudWorkspace(store=None)},
+        "root": {"root": tmp_path / "clone"},
+    }
+
+
+@pytest.mark.parametrize("where", ["cloud", "root"])
+async def test_a_shared_host_offers_no_shell(sdk, tmp_path: Path, where: str) -> None:
+    kwargs = _shared_runs(tmp_path)[where]
+    if where == "root":
+        kwargs["root"].mkdir()
+    await run_executor("ak", "m", "t", ExecutorConfig(), **kwargs)
+    options = sdk.last.options
+    assert "Bash" not in options.tools and "Bash" not in options.allowed_tools
+    assert "Bash" in options.disallowed_tools
+    assert executor.NO_SHELL in options.system_prompt["append"]
+    # The rest of a full run is still there: it edits, and it has its team.
+    assert {"Write", "Edit", "Agent"} <= set(options.allowed_tools)
+
+
+@pytest.mark.parametrize("where", ["cloud", "root"])
+async def test_a_shared_host_refuses_any_command(sdk, tmp_path: Path, where: str) -> None:
+    """Even one that names nothing outside: a script written into the folder reads
+    the agent's environment from /proc without naming it on the command line."""
+    kwargs = _shared_runs(tmp_path)[where]
+    if where == "root":
+        kwargs["root"].mkdir()
+    sdk.tool_calls = [
+        {"tool_name": "Bash", "tool_input": {"command": "python3 leer.py"}},
+        {"tool_name": "Write", "tool_input": {"file_path": "leer.py"}},
+    ]
+    await run_executor("ak", "m", "t", ExecutorConfig(), **kwargs)
+    refused, allowed = sdk.last.decisions
+    assert refused["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert refused["hookSpecificOutput"]["permissionDecisionReason"] == executor.NO_SHELL
+    assert allowed == {}
+
+
+async def test_the_users_own_pc_keeps_its_shell(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [{"tool_name": "Bash", "tool_input": {"command": "python3 leer.py"}}]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    options = sdk.last.options
+    assert "Bash" in options.allowed_tools and "Bash" not in options.disallowed_tools
+    assert executor.NO_SHELL not in options.system_prompt["append"]
+    assert sdk.last.decisions == [{}]

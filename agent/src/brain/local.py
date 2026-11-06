@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import uuid
 from pathlib import Path
+from typing import Any
 
 from .jobs import BrainJob
 from .ledger import DATA_DIR, Ledger
@@ -88,3 +89,7 @@ class LocalJobs:
 
     async def month_spend(self, user_id: str) -> float:
         return float(self._ledger.month_spend()["usd"])
+
+    async def agents(self, user_id: str) -> list[dict[str, Any]]:
+        """No database here: the agents of the app are not reachable, the folder's still are."""
+        return []

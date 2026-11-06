@@ -23,7 +23,7 @@ from .domain.greeting import (
     time_of_day,
     topics_from_facts,
 )
-from .domain.pipelines import STANDARD_PIPELINE
+from .domain.pipelines import REALTIME_MODEL_PIPELINES, STANDARD_PIPELINE
 from .domain.tool_gating import (
     BRAIN_SEARCH_TOOLS,
     VOICE_SWITCH_TOOLS,
@@ -43,7 +43,7 @@ from .tools import (
     PipelineControlMixin,
     TradingToolsMixin,
 )
-from .tools.limits import enforce_tool_limit, trim_client_tools
+from .tools.limits import enforce_tool_limit, tool_inventory, trim_client_tools
 from .utils.logging import get_logger, redacted
 from .utils.room import should_disconnect_as_duplicate
 
@@ -148,7 +148,16 @@ class KwamiAgent(
         # built-ins here would double them. They are counted, not passed,
         # because the provider's 128-tool ceiling applies to the sum -- and one
         # tool over it is a 400 on every turn, not a degraded feature.
-        builtin_count = len(find_function_tools(type(self)))
+        #
+        # Only the built-ins this session will offer: the ones withheld below
+        # (no credential, a locked voice, searches given to the brain) used to
+        # be counted too, and each one cost a client tool its place for nothing.
+        # Anything that later brings one back goes through enforce_tool_limit.
+        missing, locked = self._withheld_builtins()
+        withheld = missing | locked
+        builtin_count = sum(
+            1 for tool in find_function_tools(type(self)) if _tool_name(tool) not in withheld
+        )
         self._tools = trim_client_tools(builtin_count, self.client_tools.create_client_tools())
 
         super().__init__(
@@ -225,6 +234,7 @@ class KwamiAgent(
                 self.available_builtin_tools(), self.client_tools.create_client_tools()
             )
             await self.update_tools(combined)
+            await self.publish_tool_inventory()
         await self.update_instructions(
             self._build_system_prompt(getattr(self, "_memory_text", None) or None)
         )
@@ -307,6 +317,33 @@ class KwamiAgent(
             voice_locked=self.kwami_config.voice.voice_locked,
             relay_all=getattr(self, "_relaying_all", False),
         )
+
+    def _client_tool_names_in_order(self) -> list[str]:
+        """Every client tool the frontend registered, in the order it sent them."""
+        manager = getattr(self, "client_tools", None)
+        names: list[str] = []
+        for entry in getattr(manager, "registered_tools", None) or []:
+            name = entry.get("name") if isinstance(entry, dict) else getattr(entry, "name", None)
+            if isinstance(name, str) and name:
+                names.append(name)
+        return names
+
+    async def publish_tool_inventory(self) -> bool:
+        """Tell the app which tools the model is offered, and which were dropped.
+
+        Never raises: this is a report, and whatever triggered it -- entering
+        the room, a tools update -- must not fail because the app is absent.
+        """
+        # Imported here, as tools/builtin.py does, to keep the adapters out of
+        # this module's import graph.
+        from .adapters.publisher import LiveKitRoomPublisher
+
+        try:
+            payload = tool_inventory(list(self.tools), self._client_tool_names_in_order())
+            return await LiveKitRoomPublisher(room_from_context(None, self.room)).publish(payload)
+        except Exception:
+            logger.warning("Could not publish the tool inventory", exc_info=True)
+            return False
 
     def _registered_client_tool_names(self) -> set[str]:
         """Names of the client-side tools currently registered on this agent."""
@@ -394,6 +431,7 @@ class KwamiAgent(
             await self.refresh_brain_gating()
         except Exception:
             logger.warning("Could not re-gate the search tools on entry", exc_info=True)
+        await self.publish_tool_inventory()
 
         logger.info(
             "Kwami agent '%s' (%s) entered room successfully",
@@ -742,6 +780,36 @@ class KwamiAgent(
             )
         except Exception as e:
             logger.warning("Failed to add exchange to memory: %s", e)
+            return
+        take_refresh = getattr(self._memory, "take_refresh_due", None)
+        if callable(take_refresh) and take_refresh():
+            await self._refresh_memory_context()
+
+    async def _refresh_memory_context(self) -> None:
+        """Read memory again for what the conversation is about now.
+
+        The memory block was read once, before the greeting, for whatever the
+        last session was about; a conversation that moved on kept recalling
+        that. `KwamiMemory` flags a refresh after the first exchange and every
+        few after it, and the block is replaced only when it changed.
+
+        A realtime model is left alone: rewriting its instructions mid-session
+        resends the whole prompt as a turn (Gemini API), so it recalls through
+        `recall_memories` instead.
+        """
+        if self.kwami_config.voice.pipeline_type in REALTIME_MODEL_PIPELINES:
+            return
+        try:
+            context = await self._memory.get_context()
+            memory_text = context.to_system_prompt_addition()
+            if not memory_text or memory_text == self._memory_text:
+                return
+            self._memory_text = memory_text
+            self._last_memory_context = context
+            await self.update_instructions(self._build_system_prompt(memory_text))
+            logger.info("Refreshed memory context mid-session")
+        except Exception:
+            logger.exception("Failed to refresh memory context")
 
     def _extract_message_content(self, message: Any) -> str:
         """Extract text content from various message formats.

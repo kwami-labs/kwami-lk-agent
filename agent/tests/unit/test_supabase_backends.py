@@ -777,3 +777,46 @@ def test_without_an_engine_or_direction_nothing_is_invented():
     assert "type" not in voice
     assert "realtime" not in voice
     assert "style" not in voice["tts"]
+
+
+@respx.mock
+async def test_listing_walks_folders_and_stops_at_the_limit(store: SupabaseClient) -> None:
+    pages = {
+        "u/k/t/": [{"name": "a.md", "id": "1"}, {"name": "src", "id": None}, {"name": ""}],
+        "u/k/t/src/": [{"name": "b.py", "id": "2"}, "junk"],
+    }
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=pages[json.loads(request.content)["prefix"]])
+
+    route = respx.post(f"{URL}/storage/v1/object/list/jarvis-files").mock(side_effect=answer)
+    assert sorted(await store.list_objects("jarvis-files", "/u/k/t/") or []) == [
+        "u/k/t/a.md",
+        "u/k/t/src/b.py",
+    ]
+    assert route.calls[0].request.headers["apikey"] == KEY
+    assert await store.list_objects("jarvis-files", "u/k/t", limit=1) == ["u/k/t/a.md"]
+
+
+@respx.mock
+async def test_listing_says_none_when_it_cannot_read(store: SupabaseClient) -> None:
+    respx.post(f"{URL}/storage/v1/object/list/jarvis-files").mock(
+        side_effect=[
+            httpx.Response(500),
+            httpx.Response(200, content=b"not json"),
+            httpx.Response(200, json={"not": "a list"}),
+        ]
+    )
+    assert await store.list_objects("jarvis-files", "u") is None
+    assert await store.list_objects("jarvis-files", "u") is None
+    assert await store.list_objects("jarvis-files", "u") == []
+
+
+@respx.mock
+async def test_download_reads_the_bytes_or_says_none(store: SupabaseClient) -> None:
+    route = respx.get(url__startswith=f"{URL}/storage/v1/object/jarvis-files/").mock(
+        side_effect=[httpx.Response(200, content=b"hola"), httpx.Response(404)]
+    )
+    assert await store.download("jarvis-files", "u/k/informe final.md") == b"hola"
+    assert route.calls[0].request.url.raw_path.decode().endswith("/u/k/informe%20final.md")
+    assert await store.download("jarvis-files", "u/k/x") is None

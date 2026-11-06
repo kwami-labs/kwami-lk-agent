@@ -26,6 +26,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..adapters.supabase import as_user_id, direct_supabase, get_supabase
+from ..browser.access import SiteAccess
 from ..domain.pipelines import TEXT_REALTIME_PREFIXES
 from ..factories.availability import voice_provider_keys
 from ..settings import Settings, get_settings
@@ -77,6 +78,7 @@ from .router import (
     usable,
 )
 from .selfwork import REPOS
+from .team import AGENT_NAME
 from .user_keys import VOICE_PROVIDER_KEYS, load_user_keys
 
 logger = get_logger("brain.bridge")
@@ -186,6 +188,8 @@ class BrainTask:
     asked_to_sign_in: bool = False
     #: Changing Jarvis's own code, in this repository (`selfwork.REPOS`).
     repo: str = ""
+    #: One of the user's agents does it, by name (`brain_agents`).
+    agent: str = ""
     #: Set once the work is on the PC.
     job_id: str = ""
     thread_id: str = ""
@@ -238,6 +242,8 @@ class Bridge:
         jobs_store = get_supabase(settings)
         self.jobs: JobStore | None = JobStore(jobs_store) if jobs_store is not None else None
         self._keys_store = jobs_store
+        #: The user's list of sites Jarvis may visit, and what it may do on each.
+        self.site_access = SiteAccess(jobs_store)
         self._keys_secret = settings.provider_keys_secret
         #: The user's own keys for the voice pipeline, by environment name.
         self.voice_keys: dict[str, str] = {}
@@ -393,6 +399,11 @@ class Bridge:
         self.session = session
         self.publisher = publisher
 
+    @property
+    def working(self) -> bool:
+        """Whether a delegated task is still running: the user may be waiting on it."""
+        return any(t.status == "running" for t in self.tasks.values())
+
     def delegates(self) -> bool:
         """True when searches go to the brain rather than to the voice's own tools."""
         return can_delegate(self.config, self._keys)
@@ -486,8 +497,16 @@ class Bridge:
         long_running: bool = False,
         follow_up: str = "",
         repo: str = "",
+        agent: str = "",
     ) -> BrainTask | str:
         """Queue a task. Returns it, or a sentence saying why it cannot run."""
+        if agent:
+            if not AGENT_NAME.fullmatch(agent):
+                return "An agent's name is lowercase letters, digits and dashes."
+            # The room's identity, as for own code: on a phone line anyone can talk.
+            if not self.user_id:
+                return "The user's agents can only be asked from the app, not by phone."
+            important, council = False, False
         if repo:
             if repo not in REPOS:
                 return f"The repository must be one of: {', '.join(REPOS)}."
@@ -535,6 +554,7 @@ class Bridge:
             long_running=long_running,
             follow_up=follow_up,
             repo=repo,
+            agent=agent,
         )
         self.tasks[brain_task.id] = brain_task
         while len(self.tasks) > MAX_TASKS_KEPT:
@@ -936,16 +956,46 @@ class Bridge:
     async def runner_online(self) -> bool:
         return bool(self.jobs and self.user_id and await self.jobs.runner_online(self.user_id))
 
+    async def _cloud_takes_work(self) -> bool:
+        """Whether the cloud's work thread is there and this user lets it work for them."""
+        return bool(
+            self.jobs
+            and await self.jobs.cloud_online()
+            and await self.jobs.cloud_allowed(self.user_id)
+        )
+
     async def _on_the_pc(self, brain_task: BrainTask, prefer: str) -> BrainAnswer | None:
-        """Send the work to the PC. None when it is not there: the caller runs it here.
+        """Send the work to the PC, or with the PC off to the cloud's work thread.
+
+        None when neither will take it: the caller runs it here. The cloud only when
+        the user allowed it (migration 029); there the job outlives the call, keeps its
+        files in Storage, and the PC brings them home later (`cloud.py`, `sync.py`).
 
         Only the room's own user, never the kwami's owner: on a phone line anyone can
         talk, and the PC runs commands on its owner's login.
         """
         if self.jobs is None or not self.user_id or as_user_id(self.kwami_id) is None:
             return None
+        target = "auto"
         if not await self.jobs.runner_online(self.user_id):
-            return None
+            if not await self._cloud_takes_work():
+                return None
+            target = "cloud"
+        agent_id = ""
+        if brain_task.agent:
+            agents = await self.jobs.agents(self.user_id)
+            row = next((a for a in agents if a.get("name") == brain_task.agent), None)
+            if row is None:
+                return BrainAnswer(
+                    f"No tienes ningún agente activo llamado {brain_task.agent}.", "", "", ok=False
+                )
+            agent_id = str(row.get("id") or "")
+            if row.get("target") == "pc" and target == "cloud":
+                return None
+            if row.get("target") == "cloud" and target != "cloud":
+                if not await self._cloud_takes_work():
+                    return None
+                target = "cloud"
         model = pick(self.config, self._keys, "code", brain_task.difficulty, prefer)
         if model is None:
             return None
@@ -963,11 +1013,15 @@ class Bridge:
             difficulty=brain_task.difficulty,
             model=model.model,
             repo=brain_task.repo,
+            target=target,
+            agent_id=agent_id,
         )
         if not await self.jobs.enqueue(job):
             return None
         brain_task.job_id, brain_task.thread_id = job.id, job.thread_id
         self._note_model(brain_task, model.label or model.model)
+        if target == "cloud":
+            self._note_model(brain_task, "nube")
         self._schedule(self.publish_status())
         return await self._watch_job(self.jobs, brain_task, job.id, model)
 
@@ -1005,12 +1059,16 @@ class Bridge:
             if (
                 job.status == "queued"
                 and loop.time() - queued_since >= JOB_QUEUE_PATIENCE_SECONDS
-                and not await jobs.runner_online(job.user_id)
+                and not await (
+                    jobs.cloud_online()
+                    if job.target == "cloud"
+                    else jobs.runner_online(job.user_id)
+                )
             ):
                 await jobs.request_cancel(job_id)
                 job = await jobs.get(job_id)
                 if job is not None and job.status == "cancelled":
-                    logger.info("The PC went away; running %s here", brain_task.id)
+                    logger.info("Its worker went away; running %s here", brain_task.id)
                     brain_task.job_id = ""
                     return None
                 queued_since = loop.time()
@@ -1168,14 +1226,25 @@ class Bridge:
             if (
                 not brain_task.council
                 and brain_task.kind != "x_search"
-                and (brain_task.kind == "code" or brain_task.long_running)
+                and (brain_task.kind == "code" or brain_task.long_running or brain_task.agent)
             ):
                 answer = await self._on_the_pc(brain_task, prefer)
+            if answer is None and brain_task.agent:
+                # An agent is the user's own specialist: nothing else stands in for it.
+                answer = BrainAnswer(
+                    f"Tus agentes trabajan en el ordenador o en la nube, y ahora no está "
+                    f"ninguno para {brain_task.agent}.",
+                    "",
+                    "",
+                    ok=False,
+                )
             if answer is None and brain_task.repo:
-                # Only the PC can publish: the cloud must not hold GitHub credentials.
+                # Only the PC can publish: the cloud must not hold GitHub credentials. With
+                # the cloud allowed it leaves a patch the PC publishes later.
                 answer = BrainAnswer(
                     "Cambiar mi propio código necesita el ordenador encendido con el proceso "
-                    "del hilo de trabajo, y ahora no está.",
+                    "del hilo de trabajo, o la nube activada en Ajustes, y ahora no está "
+                    "ninguno.",
                     "",
                     "",
                     ok=False,

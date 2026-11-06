@@ -309,6 +309,9 @@ class Jobs:
     async def session_of_thread(self, thread_id: str) -> str:
         return ""
 
+    async def agents(self, user_id: str) -> list[dict[str, Any]]:
+        return []
+
     async def thread_cost(self, thread_id: str) -> float:
         raise AssertionError("a self-improvement job reports its own cost")
 

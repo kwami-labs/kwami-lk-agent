@@ -12,6 +12,7 @@ from ..domain import KwamiConfig, clone_config, integer, number, section, text
 from ..domain.charter import parse_charter
 from ..domain.pipelines import REALTIME_MODEL_PIPELINES
 from ..factories.fallback import primary_of
+from ..factories.tts import is_livekit_voice
 from ..memory import create_memory
 from ..tools.limits import enforce_tool_limit
 from ..utils.logging import get_logger
@@ -276,14 +277,21 @@ async def handle_full_config(
                 if not new_config.memory.user_id and new_config.kwami_id:
                     # Client sends full memory id (e.g. kwami_<auth>_<kwamiId>); use as-is so each kwami has its own memory
                     new_config.memory.user_id = new_config.kwami_id
-                memory = _reuse_existing_memory(state, new_config.memory)
-                if memory is None:
-                    memory = await create_memory(
-                        config=new_config.memory,
-                        kwami_id=new_config.kwami_id or "default",
-                        kwami_name=new_config.kwami_name,
-                        usage_tracker=state.usage_tracker,
-                    )
+                if not new_config.memory.user_id:
+                    # This used to fall back to kwami_id "default", i.e. the Zep
+                    # user "kwami_default" -- one graph shared by every session
+                    # that arrived without an id, each reading the others'
+                    # facts back into its prompt. No id, no memory.
+                    logger.warning("Config carries no kwami id; memory is off for this session")
+                else:
+                    memory = _reuse_existing_memory(state, new_config.memory)
+                    if memory is None:
+                        memory = await create_memory(
+                            config=new_config.memory,
+                            kwami_id=new_config.kwami_id or new_config.memory.user_id,
+                            kwami_name=new_config.kwami_name,
+                            usage_tracker=state.usage_tracker,
+                        )
 
         # 3. Create NEW Agent with this config
         # Only skip greeting if one was already delivered in this session.
@@ -476,7 +484,18 @@ async def update_voice(
         strip_model_prefix(str(new_model), new_provider) != agent.kwami_config.voice.tts_model
     )
 
-    if provider_changed or speed_changed or style_changed or model_changed:
+    # A Cartesia voice speaks on one of two engines: a UUID on Cartesia's own
+    # plugin, a voice designed in LiveKit ("v_") on LiveKit Inference. Neither
+    # takes the other's voice in `update_options` -- the plugin refuses anything
+    # but a UUID -- so moving between them builds the engine again.
+    route_changed = (
+        not provider_changed
+        and new_provider == "cartesia"
+        and bool(new_voice)
+        and is_livekit_voice(new_voice) != is_livekit_voice(agent.kwami_config.voice.tts_voice)
+    )
+
+    if provider_changed or speed_changed or style_changed or model_changed or route_changed:
         reason = (
             "provider change"
             if provider_changed
@@ -484,6 +503,8 @@ async def update_voice(
             if speed_changed
             else "model change"
             if model_changed
+            else "Cartesia to LiveKit voice"
+            if route_changed
             else "voice direction change"
         )
         logger.info("Switching TTS: %s -> %s (%s)", current_provider, new_provider, reason)
@@ -904,6 +925,8 @@ async def update_tools(
         # than one missing feature.
         combined = enforce_tool_limit(builtin_tools, client_tools)
         await agent.update_tools(combined)
+        # The trim is decided here; tell the app's Tools panel what came of it.
+        await agent.publish_tool_inventory()
 
         logger.info(
             "update_tools: registered %d client tools alongside %d built-in tools (%d total)",
