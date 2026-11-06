@@ -18,7 +18,9 @@ from .charter import address_directive, build_charter_guidance
 from .tool_gating import BRAIN_SEARCH_TOOLS
 
 # Memory context is untrusted in length; cap what reaches the system prompt.
-MAX_SYSTEM_MEMORY_CONTEXT_CHARS = 2200
+# The largest memory budget (the rich preset, see memory/context.py) plus room
+# for its headers; the per-preset budget is applied where the block is built.
+MAX_SYSTEM_MEMORY_CONTEXT_CHARS = 6400
 
 #: Language names for the codes the `change_language` tool accepts. A bare code
 #: in the prompt ("Respond in es") is markedly less reliable than the name.

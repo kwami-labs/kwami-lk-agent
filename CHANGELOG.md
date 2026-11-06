@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Search results arrive whole.** A message too large for one data packet goes to an app
+  that sets `kwami.messages=stream` as a LiveKit text stream on `kwami.message`, images
+  included; every other app still gets it trimmed to 14 KB.
+- **A thinking sound, if you want one.** `enhancements.thinkingSound` plays a soft keyboard
+  while the agent thinks, so a pause before the answer does not sound like a dropped call.
+  Off by default; read live, so it applies from the next turn.
 - **The app can see which tools reach the model.** A `tool_inventory` message names the
   built-ins that are on and the client tools the 128-tool trim left out, after entering
   the room and after every tools update.
@@ -20,6 +26,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
   Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
   being moved to OpenAI Realtime, and the app offers it on that basis.
+- **Memory carries the last conversation over, and follows the talk.** A session now starts
+  knowing how the previous one ended, recall is asked relative to it until the new session has
+  its own exchanges, and on the standard pipeline the memory block is read again every few
+  exchanges. The panel's retrieval preset sets how much memory reaches the prompt (1,500 /
+  3,000 / 6,000 characters); it used to change nothing, and `minFactRelevance` now applies.
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.

@@ -40,6 +40,7 @@ LISTENING_FIELDS = (
     "min_interruption_duration",
     "min_interruption_words",
     "preemptive_generation",
+    "thinking_sound",
     "vad_threshold",
     "vad_min_speech_duration",
     "vad_min_silence_duration",
@@ -62,6 +63,7 @@ LISTENING_KEYS = frozenset(
         "echoCancellation",
         "autoGainControl",
         "preemptiveGeneration",
+        "thinkingSound",
         "userAwayTimeout",
         "minConsecutiveSpeechDelay",
     }
@@ -132,6 +134,7 @@ def parse_listening(voice_data: Any) -> dict[str, Any]:
         ("echoCancellation", "echo_cancellation"),
         ("autoGainControl", "auto_gain_control"),
         ("preemptiveGeneration", "preemptive_generation"),
+        ("thinkingSound", "thinking_sound"),
     ):
         flag = boolean(enhancements, wire)
         flag = flag if flag is not None else boolean(voice_data, wire)

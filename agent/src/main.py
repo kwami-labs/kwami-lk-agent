@@ -36,6 +36,7 @@ from .runtime.away import USER_AWAY_SECONDS, PhoneAwayWatcher
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
+from .runtime.thinking_sound import ThinkingSound
 from .runtime.turn_metrics import TurnMetricsRelay
 from .runtime.turn_taking import noise_cancellation_selector, session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
@@ -348,6 +349,22 @@ async def _run_session(ctx: JobContext) -> None:
     )
 
     deps.bridge.attach(session, LiveKitRoomPublisher(ctx.room))
+
+    # A soft keyboard while the agent thinks, if the user switched it on in the
+    # Enhancements panel; read live, so it applies from the next turn.
+    thinking_sound = ThinkingSound(
+        lambda: bool(
+            state.current_agent is not None
+            and state.current_agent.kwami_config.voice.thinking_sound
+        )
+    )
+    thinking_sound.attach(ctx.room, session)
+
+    @session.on("agent_state_changed")
+    def on_agent_state(event):
+        thinking_sound.on_agent_state_changed(event)
+
+    ctx.add_shutdown_callback(thinking_sound.aclose)
 
     # Now that the room is connected, the participant list is real.
     participant_identity = resolve_user_identity(ctx.room)

@@ -114,6 +114,12 @@ greeting if one was already delivered.
 
 Partial update. `updateType` selects the branch.
 
+Among the listening settings, `enhancements.thinkingSound` (boolean, off by
+default) plays a soft keyboard clip while the agent is `thinking`, on a second
+audio track named `background_audio` that is only published the first time it
+plays. Clients must treat that track as background, not as the agent's voice
+(SDK: kwami-labs/kwami#152).
+
 | `updateType` | Effect |
 | --- | --- |
 | `voice` | Listening settings (`enhancements`, `vad`) are applied to the session first, on either pipeline and without a rebuild; a payload of only those stops there. Then dispatches on the live pipeline. A pipeline switch rebuilds; on `realtime`, voice and temperature go over the open socket and provider/model rebuild; otherwise TTS/STT options, with a rebuild on a provider change or a speed change the provider cannot apply live |
@@ -332,6 +338,12 @@ live browser iframe. Typical `type` values include search-result batches and
 browser session metadata (live view URL). Exact UI schemas live in the
 TypeScript SDK; the agent treats them as JSON objects and trims them to fit
 the 14 KB packet budget.
+
+An app that registers the text-stream topic `kwami.message` and sets the
+participant attribute `kwami.messages` to `stream` gets any payload over that
+budget **whole** instead, as a text stream on that topic addressed to it alone,
+with the same JSON as the data packet would carry. If the stream cannot be
+sent, or no participant advertises it, the payload is trimmed as above.
 
 ## Telephony bootstrap
 

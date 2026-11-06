@@ -7,8 +7,9 @@ The agent ships as a Docker image. There are two supported places to run it:
 | **LiveKit Cloud** (default) | `agent/` + `lk agent deploy` | You want LiveKit to own scaling, placement and restarts. |
 | **Cloudflare Workers + Containers** | `infra/` + `make deploy-cf` | You want the agent next to the rest of your Cloudflare estate, or a Worker-fronted health surface. |
 
-Both run the same image and the same `src.main start` entrypoint. One worker,
-one agent name: `kwami-agent` (`livekit.toml` + `@server.rtc_session`).
+Both run the same image and the same `src.main start` entrypoint. Production
+answers to one agent name: `kwami-agent` (`livekit.toml` + `@server.rtc_session`,
+overridable with `KWAMI_AGENT_NAME`).
 
 ```mermaid
 flowchart LR
@@ -39,6 +40,35 @@ make deploy           # cd agent && lk agent deploy
 LiveKit Cloud builds from `agent/Dockerfile` (or uses the image it builds on
 their side from the same context). CI already `docker build`s that context on
 every PR so a broken image is caught before you deploy.
+
+## Testing without touching production
+
+LiveKit dispatches a job to **any** registered worker whose agent name matches
+the one in the token's `RoomAgentDispatch`. That has two consequences worth
+knowing before you test anything:
+
+- **A local worker with the production name takes production calls.** Running
+  `python -m src.main dev` with the default name registers a second
+  `kwami-agent` next to the cloud one, and real users' sessions land on your
+  laptop at random. Give local and test workers their own name:
+
+  ```bash
+  KWAMI_AGENT_NAME=kwami-agent-lab uv run python -m src.main dev
+  ```
+
+  and dispatch to it explicitly (`RoomAgentDispatch(agent_name="kwami-agent-lab")`
+  from a test client, or `LIVEKIT_AGENT_NAME=kwami-agent-lab` on a local API).
+- **Deployments of one agent share it.** `lk agent deploy -d <deployment>`
+  targets a deployment of the agent in `livekit.toml`; deploying a second
+  deployment of the same agent has restarted the production worker. For a
+  long-lived test environment, create a separate agent (`lk agent create` from a
+  copy of `livekit.toml` with another `name`, e.g. `kwami-agent-pruebas`), set
+  `KWAMI_AGENT_NAME` to that name in its secrets, and point the test API's
+  `LIVEKIT_AGENT_NAME` at it.
+
+Before deploying production, check what is live (`lk agent versions` shows each
+version's `git_commit`) so a deploy from another branch does not silently drop
+someone else's change; `lk agent rollback` returns to the previous version.
 
 ## Image
 
