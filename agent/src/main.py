@@ -34,6 +34,7 @@ from .runtime import (
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
+from .runtime.turn_metrics import TurnMetricsRelay
 from .runtime.turn_taking import noise_cancellation_selector, session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
@@ -223,6 +224,11 @@ async def _run_session(ctx: JobContext) -> None:
     @session.on("session_usage_updated")
     def on_usage(event):
         state.usage_tracker.on_session_usage(event.usage)
+
+    # Each reply's latency, per stage, to the app's Metrics panel
+    # (runtime/turn_metrics.py). Session-wide: it outlives agent swaps.
+    turn_metrics = TurnMetricsRelay(LiveKitRoomPublisher(ctx.room))
+    session.on("conversation_item_added", turn_metrics.on_conversation_item_added)
 
     # Routing lives in runtime.dispatch so each branch is reachable from a test.
     router = DataMessageRouter(

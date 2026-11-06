@@ -244,6 +244,31 @@ sequenceDiagram
 Pending futures survive agent swaps. `SessionState.update_agent` moves
 unresolved calls onto the new `ClientToolManager`.
 
+### `metrics`
+
+How long one reply kept the user waiting, per stage, in milliseconds. Sent
+once per assistant reply by `runtime/turn_metrics.py`; the SDK passes it to
+`VoiceSession.updateLatency`, which feeds the app's Metrics panel.
+
+```json
+{
+  "type": "metrics",
+  "metrics": { "stt": 210, "endOfTurn": 800, "llm": 457, "tts": 250, "overall": 1500 }
+}
+```
+
+| Field | Framework timing | Measured on |
+| --- | --- | --- |
+| `stt` | `transcription_delay` | the user's message |
+| `endOfTurn` | `end_of_turn_delay` | the user's message |
+| `llm` | `llm_node_ttft` | the reply |
+| `tts` | `tts_node_ttfb` | the reply |
+| `overall` | `e2e_latency` (end of speech to first audio) | the reply |
+
+A stage that did not run is left out rather than sent as `0`: a realtime voice
+has no TTS of ours, and the greeting has no user turn behind it. The user's
+half belongs to the first reply after it only.
+
 ### Search and browser payloads
 
 Built-in tools also publish structured events so the UI can render cards and a
