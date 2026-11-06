@@ -12,6 +12,7 @@ in for are real is pinned in tests/contract/test_zep_contract.py.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from types import SimpleNamespace
 from typing import Any
@@ -344,7 +345,23 @@ async def test_a_real_user_creation_failure_aborts_initialize(zep_factory, caplo
     assert "Failed to create user" in caplog.text
 
 
-async def test_a_missing_thread_is_created_and_billed(zep_factory) -> None:
+async def test_initialize_creates_no_thread(zep_factory) -> None:
+    """A session that ends before anything is said used to leave an empty thread."""
+
+    class MissingThreadClient(FakeZepClient):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.thread = RecordingThread(exists=False)
+
+    zep_factory(MissingThreadClient)
+    memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1")
+
+    assert await memory.initialize() is True
+
+    assert memory._client.thread.created == []
+
+
+async def test_the_first_write_creates_the_thread_once_and_bills_it(zep_factory) -> None:
     class MissingThreadClient(FakeZepClient):
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
@@ -353,14 +370,20 @@ async def test_a_missing_thread_is_created_and_billed(zep_factory) -> None:
     zep_factory(MissingThreadClient)
     tracker = UsageTracker()
     memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1", usage_tracker=tracker)
-
     await memory.initialize()
 
-    assert memory._client.thread.created
+    await asyncio.gather(
+        memory.add_message("user", "hola"),
+        memory.add_message("user", "otra vez"),
+    )
+    await memory.add_message("user", "y otra")
+
+    assert len(memory._client.thread.created) == 1
+    assert len(memory._client.thread.added) == 3
     assert any(e["model_id"] == "zep/create_thread" for e in tracker.get_usage_summary())
 
 
-async def test_a_thread_creation_failure_aborts_initialize(zep_factory, caplog) -> None:
+async def test_a_thread_that_cannot_be_created_drops_the_write(zep_factory, caplog) -> None:
     class BrokenThreadClient(FakeZepClient):
         def __init__(self, **kwargs: Any) -> None:
             super().__init__(**kwargs)
@@ -368,11 +391,42 @@ async def test_a_thread_creation_failure_aborts_initialize(zep_factory, caplog) 
 
     zep_factory(BrokenThreadClient)
     memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1")
+    assert await memory.initialize() is True
 
     with caplog.at_level(logging.ERROR):
-        assert await memory.initialize() is False
+        await memory.buffer_user_message("hola")
+        await memory.add_exchange("buenas", "Jarvis")
+        await memory.add_message("user", "suelto")
 
+    assert memory._client.thread.added == []
     assert "Failed to create thread" in caplog.text
+    assert "they are lost" in caplog.text
+
+
+async def test_a_pending_message_with_no_thread_is_not_flushed(zep_factory, caplog) -> None:
+    class BrokenThreadClient(FakeZepClient):
+        def __init__(self, **kwargs: Any) -> None:
+            super().__init__(**kwargs)
+            self.thread = RecordingThread(exists=False, create_error=RuntimeError("500 boom"))
+
+    zep_factory(BrokenThreadClient)
+    memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1")
+    await memory.initialize()
+    memory._pending_user_message = ("hola", None)
+
+    with caplog.at_level(logging.WARNING):
+        await memory._flush_pending_message()
+
+    assert memory._client.thread.added == []
+    assert "No thread to flush" in caplog.text
+
+
+async def test_without_a_client_there_is_no_thread() -> None:
+    memory = ready_memory()
+    memory._thread_ready = False
+    memory._client = None
+
+    assert await memory._ensure_thread() is False
 
 
 # =============================================================================

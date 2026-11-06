@@ -70,6 +70,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A session's thread is created with its first message.** Every session created a Zep
+  thread before the greeting, so each reconnect or dropped call left an empty one behind and
+  paid two round trips for it. The thread now appears when there is something to store.
 - **Memory starts faster and keeps a custom ontology.** Each session start re-applied the
   default ontology, which replaced any the user set in the memory panel, and re-created the
   context template, both before the greeting. The ontology is now applied once per version

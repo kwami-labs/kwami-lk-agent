@@ -100,6 +100,11 @@ class KwamiMemory:
         # Writes that must not hold up a reply, kept so they are not collected.
         self._background: set[asyncio.Task] = set()
 
+        # Whether this session's thread exists in Zep yet; it is created with
+        # the first write, under the lock so two writes cannot both create it.
+        self._thread_ready = False
+        self._thread_lock = asyncio.Lock()
+
         # The previous session's ending, read once per session.
         self._last_conversation: LastConversation | None = None
         self._last_conversation_loaded = False
@@ -194,10 +199,13 @@ class KwamiMemory:
             if isinstance(first_name, str) and first_name.strip():
                 self._cached_user_name = first_name.strip()
 
+            # The thread is created with the first message, not here: a session
+            # that ends before anything is said (a reconnect, a dropped call)
+            # left an empty thread behind -- the live project is full of them --
+            # and paid two Zep round trips for it before the greeting.
             self._session_id = (
                 self.config.session_id or f"session_{self._user_id}_{uuid.uuid4().hex[:8]}"
             )
-            await self._ensure_session_exists(self._client)
 
             if self.config.configure_ontology:
                 await self._ensure_ontology(self._client, record)
@@ -291,6 +299,20 @@ class KwamiMemory:
         if ready:
             _TEMPLATES_READY.add(ready)
         return ready
+
+    async def _ensure_thread(self) -> bool:
+        """Make sure this session's thread exists before writing to it."""
+        client = self._client
+        if client is None:
+            return False
+        async with self._thread_lock:
+            if not self._thread_ready:
+                try:
+                    await self._ensure_session_exists(client)
+                except Exception:
+                    return False
+                self._thread_ready = True
+        return True
 
     async def _ensure_session_exists(self, client: AsyncZep) -> None:
         """Create thread (session) in Zep if it doesn't exist."""
@@ -392,6 +414,9 @@ class KwamiMemory:
 
         if not messages:
             return
+        if not await self._ensure_thread():
+            logger.error("No thread to store %s messages in; they are lost", len(messages))
+            return
 
         try:
             await self._client.thread.add_messages(
@@ -468,6 +493,9 @@ class KwamiMemory:
             # Use ignore_roles for assistant messages
             ignore_roles = ["assistant"] if role != "system" else None
 
+            if not await self._ensure_thread():
+                logger.error("No thread to store a %s message in", role)
+                return
             await self._client.thread.add_messages(
                 thread_id=self._session_id,
                 messages=[message],
@@ -517,6 +545,9 @@ class KwamiMemory:
                 name=user_name,
                 created_at=now,
             )
+            if not await self._ensure_thread():
+                logger.warning("No thread to flush a pending message into")
+                return
             await client.thread.add_messages(
                 thread_id=self._session_id,
                 messages=[message],
