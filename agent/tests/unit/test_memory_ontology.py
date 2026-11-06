@@ -291,3 +291,38 @@ async def test_a_successful_configuration_is_logged_with_the_counts(caplog) -> N
 
     assert "Configured ontology for user-1" in caplog.text
     assert f"{len(DEFAULT_ENTITY_TYPES)} entity types" in caplog.text
+
+
+def test_the_defaults_fit_zeps_limits() -> None:
+    """Zep takes at most 10 custom entity types and 10 custom edge types."""
+    assert len(DEFAULT_ENTITY_TYPES) <= 10
+    assert len(DEFAULT_EDGE_TYPES) <= 10
+
+
+def test_an_edge_may_start_from_several_types() -> None:
+    """A Person works somewhere too; their employer used to hang off the user."""
+    edges = _build_edge_models(
+        [
+            {
+                "name": "WORKS_AT",
+                "description": "d",
+                "source": "User",
+                "also_from": ["Person"],
+                "target": "Organization",
+            }
+        ]
+    )
+
+    _, constraints = edges["WORKS_AT"]
+    assert [(c.source, c.target) for c in constraints] == [
+        ("User", "Organization"),
+        ("Person", "Organization"),
+    ]
+
+
+def test_tasks_and_assets_are_part_of_the_defaults() -> None:
+    names = {e["name"] for e in DEFAULT_ENTITY_TYPES}
+    targets = {e["name"]: e.get("target") for e in DEFAULT_EDGE_TYPES}
+    assert {"Task", "Asset"} <= names
+    assert targets["HAS_TASK"] == "Task"
+    assert targets["HOLDS"] == "Asset"

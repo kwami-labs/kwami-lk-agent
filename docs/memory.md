@@ -135,6 +135,11 @@ erDiagram
     User ||--o{ Goal : HAS_GOAL
     User ||--o{ Product : USES
     User ||--o{ Preference : PREFERS
+    User ||--o{ Task : HAS_TASK
+    User ||--o{ Asset : HOLDS
+    Person ||--o{ Organization : WORKS_AT
+    Person ||--o{ Location : LIVES_IN
+    Person ||--o{ Project : WORKING_ON
 
     Person {
         string relationship
@@ -150,6 +155,14 @@ erDiagram
     }
     Procedure {
         string detail
+    }
+    Task {
+        string due
+        string status
+    }
+    Asset {
+        string symbol
+        string position
     }
 ```
 
