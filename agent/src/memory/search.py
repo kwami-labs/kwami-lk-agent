@@ -83,6 +83,10 @@ async def recall(
             summary = " ".join((getattr(node, "summary", None) or "").split())
             if not name or not summary:
                 continue
+            if name == user_id or name.lower().startswith("kwami_"):
+                # The user's own node is named after their Zep id until they
+                # have a first name on record; the model should not read ids.
+                name = "The user"
             results.append(
                 {
                     "content": f"{name}: {summary[:MAX_RECALL_SUMMARY_CHARS]}",
@@ -175,22 +179,37 @@ _EXCLUDED_NAMES = {
     "i",
 }
 
-# Regex patterns for extracting names from facts (ordered by confidence)
+#: One word of a name, accents included ("José", "Zoë").
+_NAME = r"([A-ZÀ-ÖØ-Þ][a-zß-öø-ÿ]+)"
+#: A straight or typographic apostrophe (U+2019), as transcripts use either.
+_APOSTROPHE = "['" + chr(0x2019) + "]"
+
+# Regex patterns for extracting names from facts (ordered by confidence).
+# The kwami speaks the user's language, so their own words reach the graph in
+# it: "Me llamo Daniel" must count as much as "My name is Daniel".
 _NAME_PATTERNS = [
-    r"(?:user'?s?\s+)?name\s+is\s+([A-Z][a-z]+)",
-    r"(?:i'?m|i am|my name is)\s+([A-Z][a-z]+)",
-    r"called\s+([A-Z][a-z]+)",
-    r"goes by\s+([A-Z][a-z]+)",
-    r"identified (?:as|themselves as)\s+([A-Z][a-z]+)",
-    r"introduced (?:as|themselves as)\s+([A-Z][a-z]+)",
-    r"([A-Z][a-z]+)\s+(?:is the user|is the human)",
-    r"the user(?:'s name)? is\s+([A-Z][a-z]+)",
+    rf"(?:user'?s?\s+)?name\s+is\s+{_NAME}",
+    rf"(?:i'?m|i am|my name is|my name's)\s+{_NAME}",
+    rf"called\s+{_NAME}",
+    rf"goes by\s+{_NAME}",
+    rf"identified (?:as|themselves as)\s+{_NAME}",
+    rf"introduced (?:as|themselves as)\s+{_NAME}",
+    rf"{_NAME}\s+(?:is the user|is the human)",
+    rf"the user(?:'s name)? is\s+{_NAME}",
+    # es / pt / it / fr
+    rf"(?:me llamo|mi nombre es|ll[aá]mame|se llama|su nombre es)\s+{_NAME}",
+    rf"(?:chamo-me|o meu nome [eé]|meu nome [eé]|me chamo)\s+{_NAME}",
+    rf"(?:mi chiamo|il mio nome [eè]|si chiama)\s+{_NAME}",
+    rf"(?:je m{_APOSTROPHE}appelle|mon nom est|s{_APOSTROPHE}appelle)\s+{_NAME}",
 ]
 
-# Pattern for facts starting with a capitalized name followed by a verb
+# Pattern for facts starting with a capitalized name followed by a verb, in
+# the languages the kwami speaks. Zep writes its own summaries in English.
 _NAME_VERB_PATTERN = re.compile(
-    r"^([A-Z][a-z]+)\s+(?:has|wants|likes|said|asked|mentioned|is|"
-    r"intends|lives|works|prefers|enjoys)"
+    rf"^{_NAME}\s+(?:has|wants|likes|said|asked|mentioned|is|intends|lives|works|"
+    r"prefers|enjoys|tiene|quiere|vive|trabaja|prefiere|es|est[aá]|dijo|pidi[oó]|"
+    r"tem|quer|mora|trabalha|prefere|[eé]|ha|vuole|vive|lavora|preferisce|"
+    r"a|veut|habite|travaille|pr[eé]f[eè]re|est)\b"
 )
 
 
@@ -204,6 +223,14 @@ def _is_valid_name(name: str, extra_excluded: set[str] | None = None) -> bool:
     return name[0].isupper() and name.isalpha()
 
 
+def _name_from_summary(summary: str, extra_excluded: set[str]) -> str | None:
+    """The name a summary of the user opens with: "Daniel lives in Valencia..."."""
+    match = _NAME_VERB_PATTERN.match(" ".join((summary or "").split()))
+    if match and _is_valid_name(match.group(1), extra_excluded):
+        return match.group(1)
+    return None
+
+
 def _extract_name_from_fact(fact: str, extra_excluded: set[str] | None = None) -> str | None:
     """Extract a user name from a fact string using regex patterns."""
     if not fact:
@@ -212,7 +239,8 @@ def _extract_name_from_fact(fact: str, extra_excluded: set[str] | None = None) -
     for pattern in _NAME_PATTERNS:
         match = re.search(pattern, fact, re.IGNORECASE)
         if match:
-            name = match.group(1).capitalize()
+            name = match.group(1)
+            name = name[0].upper() + name[1:]
             if _is_valid_name(name, extra_excluded):
                 return name
 
@@ -240,6 +268,19 @@ async def get_user_name(
         The user's name if found, None otherwise.
     """
     extra_excluded = {"kwami", kwami_name.lower()}
+
+    # Strategy 0: the user's own node. Zep keeps one per user and summarises
+    # what it knows of them -- in English, opening with their name once it has
+    # one ("Daniel lives in Valencia..."). One call, and it understood whatever
+    # language the user spoke.
+    try:
+        user_node = getattr(await client.user.get_node(user_id), "node", None)
+        name = _name_from_summary(getattr(user_node, "summary", "") or "", extra_excluded)
+        if name:
+            logger.info("Found user name from the user node: %s", redacted(name, keep=1))
+            return name
+    except Exception as e:
+        logger.debug("Could not read the user node: %s", e)
 
     # Strategy 1: Search for name-specific facts
     name_queries = [
