@@ -881,3 +881,49 @@ async def test_the_users_agents_join_the_team(sdk: Any, jarvis: Path) -> None:
     agents = sdk.last.options.agents
     assert set(agents) == {"clerk", "researcher", "reasoner", "reviewer", "facturas"}
     assert agents["facturas"].model == "claude-haiku-5-5"
+
+
+async def test_a_crash_says_what_claude_code_wrote_to_stderr(sdk, jarvis: Path) -> None:
+    class Failing(FakeSDKClient):
+        async def __aenter__(self) -> FakeSDKClient:
+            for line in [
+                "",
+                "  Error: EACCES: permission denied, mkdir '/app/.claude'  ",
+                "x" * 900,
+            ]:
+                self.options.stderr(line)
+            raise RuntimeError("Command failed with exit code 1")
+
+    sdk_module = claude_agent_sdk
+    original = sdk_module.ClaudeSDKClient
+    sdk_module.ClaudeSDKClient = Failing  # type: ignore[misc]
+    try:
+        result = await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    finally:
+        sdk_module.ClaudeSDKClient = original  # type: ignore[misc]
+    assert not result.ok
+    assert result.text.startswith("El ejecutor local falló: Command failed with exit code 1")
+    assert "Claude Code:" in result.text
+    assert len(result.text.split("Claude Code: ", 1)[1]) == executor.STDERR_TAIL_CHARS
+
+
+async def test_in_the_cloud_claude_code_gets_a_home_it_can_write(
+    sdk, jarvis: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(executor, "executor_in_cloud", lambda: True)
+    monkeypatch.setattr(executor.tempfile, "gettempdir", lambda: str(tmp_path))
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)))
+    env = sdk.last.options.env
+    home = tmp_path / "jarvis-claude-home"
+    assert env["HOME"] == str(home)
+    assert env["CLAUDE_CONFIG_DIR"] == str(home / ".claude")
+    assert (home / ".claude").is_dir()
+
+
+async def test_on_the_pc_claude_code_keeps_the_users_home(sdk, jarvis: Path) -> None:
+    sdk.messages = [_result("Hecho")]
+    await run_executor("ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)))
+    env = sdk.last.options.env
+    assert "CLAUDE_CONFIG_DIR" not in env
+    assert env.get("HOME", "") != str(Path(executor.tempfile.gettempdir()) / "jarvis-claude-home")

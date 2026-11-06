@@ -35,6 +35,7 @@ import re
 import shutil
 import tempfile
 import uuid
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -150,6 +151,24 @@ def _system_append() -> str:
         f"{SYSTEM_APPEND}\nThe user opened these folders of their PC to you, and their projects "
         f"are there:\n{named}\n"
     )
+
+
+#: What Claude Code last wrote to stderr, kept for when it fails: the SDK's own error
+#: only says "Check stderr output for details".
+STDERR_TAIL_LINES = 20
+STDERR_TAIL_CHARS = 600
+
+
+def cloud_home() -> dict[str, str]:
+    """A home Claude Code can write in a container, for its config and sessions.
+
+    Seen on LiveKit Cloud (2026-11-06): Claude Code exited with code 1 before its first
+    message. The container's own home is not one it can write, so in the cloud it gets
+    a folder under the temporary directory, the one place a container always allows.
+    """
+    home = Path(tempfile.gettempdir()) / "jarvis-claude-home"
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    return {"HOME": str(home), "CLAUDE_CONFIG_DIR": str(home / ".claude")}
 
 
 @dataclass
@@ -628,6 +647,10 @@ async def _run_in(
 
     lane = _Lanes(resuming=bool(resume))
     on_the_pc = not executor_in_cloud()
+    stderr_tail: deque[str] = deque(maxlen=STDERR_TAIL_LINES)
+    env = child_env(api_key)
+    if not on_the_pc:
+        env.update(cloud_home())
 
     async def guard(
         input_data: HookInput, tool_use_id: str | None, context: HookContext
@@ -657,7 +680,8 @@ async def _run_in(
         system_prompt={"type": "preset", "preset": "claude_code", "append": _system_append()},
         max_turns=config.max_turns,
         max_budget_usd=config.max_task_usd,
-        env=child_env(api_key),
+        env=env,
+        stderr=stderr_tail.append,
         setting_sources=[],
         hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[guard])]},
         # No MCP server at all, whatever the PC has configured.
@@ -750,9 +774,11 @@ async def _run_in(
                     if message.result:
                         texts.append(message.result)
     except Exception as e:
-        logger.exception("Local executor failed")
+        said = " | ".join(line.strip() for line in stderr_tail if line.strip())
+        said = said[-STDERR_TAIL_CHARS:]
+        logger.exception("Local executor failed%s", f"; Claude Code said: {said}" if said else "")
         return ExecutorResult(
-            f"El ejecutor local falló: {e}",
+            f"El ejecutor local falló: {e}" + (f" Claude Code: {said}" if said else ""),
             cost,
             False,
             session_id="" if lane.closed_session else session_id,
