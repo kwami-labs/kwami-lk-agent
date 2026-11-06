@@ -1086,3 +1086,16 @@ async def test_releasing_the_pool_without_a_client_is_a_no_op() -> None:
     memory = KwamiMemory(memory_config(), "k")
 
     await memory._aclose_client()
+
+
+async def test_a_ready_thread_is_not_created_again(zep_factory) -> None:
+    """Every write after the first finds the thread ready and creates nothing."""
+    zep_factory()
+    memory = KwamiMemory(memory_config(configure_ontology=False), "kwami-1")
+    await memory.initialize()
+
+    assert await memory._ensure_thread() is True
+    created = list(memory._client.thread.created)
+    assert await memory._ensure_thread() is True
+
+    assert memory._client.thread.created == created
