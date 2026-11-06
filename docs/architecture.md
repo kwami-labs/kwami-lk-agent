@@ -181,6 +181,17 @@ sequenceDiagram
     State->>API: POST /credits/usage/report (≤ 5s)
 ```
 
+### A silent phone caller
+
+A phone call has no hang-up button the agent can see, so a caller who walks away
+or loses signal used to leave a half-open line billed by the minute.
+`runtime/away.py` acts on the framework's `user_state_changed → away` (no speech
+on either side for `USER_AWAY_SECONDS`, 15 s), on SIP calls only: the agent asks
+once whether the caller is still there, and with no answer within 20 s it says
+goodbye and deletes the room. A call with a delegated task still running is never
+ended this way -- the caller may be waiting on it -- and app sessions are left
+alone.
+
 Identity for billing can arrive after the agent: a human may join the room
 late. `resolve_identity_on_join` adopts the first non-agent participant so
 usage is not silently dropped.

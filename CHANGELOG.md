@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.
+- **No more half-open phone lines.** A caller who goes silent is asked once whether
+  they are still there; with no answer, the agent says goodbye and hangs up. Never
+  while the brain is still working on something for them, and never in the app.
 
 - **Any model can take any job.** A brain model holds several jobs and a brief of its own,
   one model directs the rest, and Grok, OpenRouter, Groq, DeepSeek and Mistral join.

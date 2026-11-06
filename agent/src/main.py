@@ -31,6 +31,7 @@ from .runtime import (
     decode_data_message,
     resolve_identity_on_join,
 )
+from .runtime.away import USER_AWAY_SECONDS, PhoneAwayWatcher
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
@@ -186,7 +187,12 @@ async def _run_session(ctx: JobContext) -> None:
     _bridges[ctx.room.name] = deps.bridge
     # Turn-taking tuned for Spanish: multilingual end-of-turn detection,
     # learned endpointing and early LLM generation (runtime/turn_taking.py).
-    session = AgentSession(userdata=deps, turn_handling=session_turn_handling())
+    session = AgentSession(
+        userdata=deps,
+        turn_handling=session_turn_handling(),
+        # When the user counts as away; the phone hang-up below acts on it.
+        user_away_timeout=USER_AWAY_SECONDS,
+    )
 
     def build_agent(config, vad, memory=None, skip_greeting=False):
         """Build on the keys this user connected, and report those parts as theirs."""
@@ -257,6 +263,24 @@ async def _run_session(ctx: JobContext) -> None:
 
     # Register cleanup for when the session ends
     ctx.add_shutdown_callback(state.cleanup)
+
+    # A caller who goes quiet on the phone is asked once, then the line is
+    # freed -- never while the brain is working for them (runtime/away.py).
+    away = PhoneAwayWatcher(
+        session,
+        ctx.room,
+        working=lambda: deps.bridge.working,
+        end_call=ctx.delete_room,
+    )
+
+    @session.on("user_state_changed")
+    def on_user_state(event):
+        away.on_user_state_changed(event)
+
+    async def _stop_away_watch() -> None:
+        away.close()
+
+    ctx.add_shutdown_callback(_stop_away_watch)
 
     # Telephony sessions get their persona from the Kwami API. Neither the id
     # resolution nor the fetch needs the session, so start the fetch NOW and
