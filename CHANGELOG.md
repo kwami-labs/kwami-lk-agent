@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
+  Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
+  being moved to OpenAI Realtime, and the app offers it on that basis.
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.

@@ -29,7 +29,9 @@ def voice(**overrides) -> KwamiVoiceConfig:
 
 @pytest.fixture(autouse=True)
 def keys(fake_key):
-    for name in ("OPENAI_API_KEY", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
+    # GOOGLE_API_KEY too: without it Gemini Live goes to LiveKit Inference, which
+    # has its own tests at the end of this module.
+    for name in ("OPENAI_API_KEY", "GOOGLE_API_KEY", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET"):
         fake_key(name)
 
 
@@ -438,3 +440,96 @@ def test_a_saved_model_openai_withdrew_is_replaced(monkeypatch):
     llm_factory._build(object(), "openai", "gpt-5.1-chat-latest")
 
     assert built["model"] == "gpt-4.1-mini"
+
+
+# =============================================================================
+# Gemini Live through LiveKit Inference
+# =============================================================================
+
+
+@pytest.fixture
+def no_google_key(env_setting):
+    env_setting("GOOGLE_API_KEY", None)
+
+
+def test_without_a_google_key_gemini_live_runs_on_livekit_inference(
+    no_google_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = StrictGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+
+    result = create_realtime_model(
+        voice(realtime_provider="google", realtime_model="", realtime_voice="Puck")
+    )
+
+    assert type(result).__module__ == "livekit.agents.inference.realtime.openai"
+    assert result.model == "google/gemini-3.8-live"
+    assert result._opts.voice == "Puck"
+    assert plugin.calls == []
+
+
+def test_on_the_hybrid_pipeline_inference_gemini_answers_in_text(no_google_key) -> None:
+    result = create_realtime_model(
+        voice(
+            pipeline_type="hybrid",
+            realtime_provider="google",
+            realtime_model="gemini-3.8-live",
+            realtime_voice="Charon",
+        )
+    )
+
+    assert result._opts.modalities == ["text"]
+
+
+class KeyedGoogleRealtime(StrictGoogleRealtime):
+    """The same strict stand-in, for a call that carries the user's own key."""
+
+    def RealtimeModel(self, *, api_key: str, **kwargs: Any):  # noqa: N802
+        self.calls.append({"api_key": api_key})
+        return super().RealtimeModel(**kwargs)
+
+
+def test_a_users_own_google_key_keeps_the_google_plugin(
+    no_google_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = KeyedGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+    config = voice(realtime_provider="google", realtime_model="", realtime_voice="Puck")
+    config.user_keys = {"GOOGLE_API_KEY": "their-own-key"}
+
+    assert create_realtime_model(config) == "realtime:gemini-3.8-live"
+    assert plugin.calls[0] == {"api_key": "their-own-key"}
+
+
+def test_a_model_inference_does_not_serve_stays_on_the_plugin(
+    no_google_key, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin = StrictGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+
+    result = create_realtime_model(
+        voice(realtime_provider="google", realtime_model="gemini-2.5-flash-native-audio")
+    )
+
+    assert result == "realtime:gemini-2.5-flash-native-audio"
+
+
+def test_without_livekit_credentials_there_is_no_inference_either(
+    no_google_key, env_setting, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_setting("LIVEKIT_API_KEY", None)
+    plugin = StrictGoogleRealtime()
+    monkeypatch.setattr(realtime_module, "google", plugin)
+
+    config = voice(realtime_provider="google", realtime_model="")
+    assert create_realtime_model(config) == "realtime:gemini-3.8-live"
+
+
+def test_the_app_offers_gemini_live_on_livekit_credentials_alone(env_setting) -> None:
+    from src.factories.availability import REALTIME_REQUIREMENTS, _met
+
+    assert _met(REALTIME_REQUIREMENTS["google"], {"GOOGLE_API_KEY": "k"})
+    assert _met(
+        REALTIME_REQUIREMENTS["google"], {"LIVEKIT_API_KEY": "k", "LIVEKIT_API_SECRET": "s"}
+    )
+    assert not _met(REALTIME_REQUIREMENTS["google"], {"LIVEKIT_API_KEY": "k"})
