@@ -38,6 +38,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Memory starts faster and keeps a custom ontology.** Each session start re-applied the
+  default ontology, which replaced any the user set in the memory panel, and re-created the
+  context template, both before the greeting. The ontology is now applied once per version
+  (recorded on the user's Zep metadata) and the template once per worker. The user's name is
+  kept on their Zep record, so it is known at once next time and Zep ties it to their node.
 - **The whole turn is heard.** A turn whose words say it has not finished is held, and the
   pieces are answered and remembered as one. A quick answer is spoken as the worker wrote it.
 

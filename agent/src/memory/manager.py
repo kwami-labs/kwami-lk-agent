@@ -14,14 +14,15 @@ Key improvements over monolithic memory.py:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..constants import Timeouts
 from ..domain import KwamiMemoryConfig
-from .context import MemoryContext, get_context, setup_context_template
+from .context import TEMPLATE_PREFIX, MemoryContext, get_context, setup_context_template
 from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
@@ -32,6 +33,21 @@ from .utils import get_zep_imports, logger, redacted
 
 if TYPE_CHECKING:
     from zep_cloud.client import AsyncZep
+
+
+#: Stamped on the Zep user's metadata once the default ontology is applied, so
+#: later sessions know not to apply it again. Bump it when the default entity or
+#: edge types change, and every graph still on the old defaults is updated on
+#: its next session. The value "custom" means the user set their own ontology in
+#: the panel, which is never overwritten.
+ONTOLOGY_METADATA_KEY = "kwami_ontology"
+ONTOLOGY_VERSION = "2026-11"
+CUSTOM_ONTOLOGY = "custom"
+
+# What this worker process has already done, so a user's second session -- or
+# a reconnect -- does not pay for it again. Sets of Zep user ids and template ids.
+_ONTOLOGY_SETTLED: set[str] = set()
+_TEMPLATES_READY: set[str] = set()
 
 
 class KwamiMemory:
@@ -70,6 +86,8 @@ class KwamiMemory:
 
         # Cached user name (avoid repeated lookups)
         self._cached_user_name: str | None = None
+        # Writes that must not hold up a reply, kept so they are not collected.
+        self._background: set[asyncio.Task] = set()
 
     # ========================================================================
     # Properties
@@ -142,19 +160,22 @@ class KwamiMemory:
             )
             self._user_id = self.config.user_id or f"kwami_{self.kwami_id}"
 
-            await self._ensure_user_exists(self._client)
+            record = await self._ensure_user_exists(self._client)
+            # A name the user gave before is on their Zep record: no graph
+            # search is needed to greet them by it.
+            first_name = getattr(record, "first_name", None) if record is not None else None
+            if isinstance(first_name, str) and first_name.strip():
+                self._cached_user_name = first_name.strip()
 
             self._session_id = (
                 self.config.session_id or f"session_{self._user_id}_{uuid.uuid4().hex[:8]}"
             )
             await self._ensure_session_exists(self._client)
 
-            # Configure ontology (entity/edge types) if enabled
             if self.config.configure_ontology:
-                await configure_ontology(self._client, self._user_id)
+                await self._ensure_ontology(self._client, record)
 
-            # Set up context template for structured retrieval
-            self._template_id = await setup_context_template(self._client, self._user_id)
+            self._template_id = await self._ensure_template(self._client)
 
             self._initialized = True
             logger.info(
@@ -170,14 +191,18 @@ class KwamiMemory:
             self._initialized = False
             return False
 
-    async def _ensure_user_exists(self, client: AsyncZep) -> None:
+    async def _ensure_user_exists(self, client: AsyncZep) -> Any:
         """Create user in Zep if it doesn't exist.
 
         The Zep "user" represents the HUMAN user, not the AI assistant.
+
+        Returns the existing record, or None when the user was just created (or
+        created by a concurrent session) and so has no metadata or name yet.
         """
         try:
-            await client.user.get(self._user_id)
+            record = await client.user.get(self._user_id)
             logger.debug("User %s already exists", self._user_id)
+            return record
         except Exception:
             try:
                 await client.user.add(
@@ -190,13 +215,51 @@ class KwamiMemory:
                 )
                 self._record_usage("zep/create_user")
                 logger.info("Created Zep user: %s", self._user_id)
+                return None
             except Exception as e:
                 error_msg = str(e).lower()
                 if "400" in error_msg and "already exists" in error_msg:
                     logger.info("User %s already exists (race condition)", self._user_id)
-                    return
+                    return None
                 logger.error("Failed to create user %s: %s", self._user_id, e)
                 raise
+
+    async def _ensure_ontology(self, client: AsyncZep, record: Any) -> None:
+        """Apply the default ontology once per version, never over a custom one.
+
+        This ran `set_ontology` on every session start: a Zep round trip before
+        the greeting each time, and a replace that silently threw away any
+        ontology the user had set for this kwami in the memory panel. Now the
+        user's Zep metadata records which defaults were applied, and this worker
+        remembers users it has already checked.
+        """
+        if self._user_id in _ONTOLOGY_SETTLED:
+            return
+        metadata = dict(getattr(record, "metadata", None) or {}) if record is not None else {}
+        if metadata.get(ONTOLOGY_METADATA_KEY) in (ONTOLOGY_VERSION, CUSTOM_ONTOLOGY):
+            _ONTOLOGY_SETTLED.add(self._user_id)
+            return
+        if not await configure_ontology(client, self._user_id):
+            return
+        metadata[ONTOLOGY_METADATA_KEY] = ONTOLOGY_VERSION
+        try:
+            await client.user.update(user_id=self._user_id, metadata=metadata)
+        except Exception as e:
+            # Applied but not stamped: the next session applies it again, which
+            # is the old behaviour, not a failure.
+            logger.warning("Could not record the ontology version for %s: %s", self._user_id, e)
+            return
+        _ONTOLOGY_SETTLED.add(self._user_id)
+
+    async def _ensure_template(self, client: AsyncZep) -> str | None:
+        """The context template, set up once per worker rather than per session."""
+        template_id = f"{TEMPLATE_PREFIX}-{self._user_id}"
+        if template_id in _TEMPLATES_READY:
+            return template_id
+        ready = await setup_context_template(client, self._user_id)
+        if ready:
+            _TEMPLATES_READY.add(ready)
+        return ready
 
     async def _ensure_session_exists(self, client: AsyncZep) -> None:
         """Create thread (session) in Zep if it doesn't exist."""
@@ -538,6 +601,7 @@ class KwamiMemory:
             self._record_usage("zep/get_user_name")
             if name:
                 self._cached_user_name = name
+                self._in_background(self._store_user_name(name))
             return name
         except Exception as e:
             logger.debug("Could not get user name: %s", e)
@@ -546,12 +610,40 @@ class KwamiMemory:
     def set_user_name(self, name: str) -> None:
         """Manually set the cached user name.
 
-        Useful when the user introduces themselves in conversation.
+        Useful when the user introduces themselves in conversation. The name is
+        also written to the user's Zep record, in the background.
 
         Args:
             name: The user's name.
         """
         self._cached_user_name = name
+        if self._initialized and self._client is not None:
+            self._in_background(self._store_user_name(name))
+
+    async def _store_user_name(self, name: str) -> None:
+        """Keep the name on the user's Zep record.
+
+        Zep names the user's own node in the graph after the record's first
+        name, so this ties "the user" and the name they go by into one entity
+        instead of two -- and the next session reads it with the record it
+        already fetches, instead of searching the graph for it.
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.user.update(user_id=self._user_id, first_name=name)
+        except Exception as e:
+            logger.debug("Could not store the user's name on their Zep record: %s", e)
+
+    def _in_background(self, coro: Any) -> None:
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     # ========================================================================
     # Session Management
