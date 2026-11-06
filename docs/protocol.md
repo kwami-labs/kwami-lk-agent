@@ -148,8 +148,18 @@ For `tools`, `config` is the tool-definition list itself (not wrapped).
 client tool. OpenAI rejects a request carrying more than 128 tools outright, so
 the combined list is trimmed to fit rather than sent over: built-ins are kept in
 preference to client tools, and anything dropped is logged at `error` with its
-name. A warning fires from 85% of the limit. Today the total is 93 — 40
-built-in and 53 from `kwami-app`.
+name. A warning fires from 85% of the limit. Only the built-ins the session
+actually offers count: those withheld for a missing credential, a locked voice
+or searches given to the brain leave their place to client tools. `kwami-app`
+registers about a hundred client tools against 47 built-ins, so the trim is
+routine; it reports the outcome in [`tool_inventory`](#tool_inventory).
+
+**Definitions that are refused.** A client tool is skipped, with a warning, when
+its name is not one every provider accepts (`[A-Za-z_][A-Za-z0-9_-]{0,63}`) or
+its `parameters` are not an object schema with a schema per property. Either
+would make the provider reject every request of the session, not just lose one
+tool. The SDK's shorthand -- a bare map of property name to schema -- is accepted
+and wrapped as `{"type": "object", "properties": ..., "required": []}`.
 
 ### `tool_result`
 
@@ -286,6 +296,34 @@ once per assistant reply by `runtime/turn_metrics.py`; the SDK passes it to
 A stage that did not run is left out rather than sent as `0`: a realtime voice
 has no TTS of ours, and the greeting has no user turn behind it. The user's
 half belongs to the first reply after it only.
+
+### `tool_inventory`
+
+What the model is offered, sent after the agent enters the room, after every
+`tools` update and whenever the search tools are re-gated. The app's Tools
+panel shows it; client tools in `dropped` exist in the app but not for the model.
+
+```json
+{
+  "type": "tool_inventory",
+  "limit": 128,
+  "total": 128,
+  "builtin": ["change_ai_model", "web_search", "..."],
+  "client": 96,
+  "dropped": ["read_emails", "send_email"]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `limit` | The ceiling the list was trimmed to |
+| `total` | Tools offered, built-in and client |
+| `builtin` | Names of the agent's own tools that are on, sorted |
+| `client` | How many of the client's tools made it |
+| `dropped` | Client tools left out, in the order the client registered them |
+
+Names only: the client already has the definitions, and the payload has to fit
+the 14 KB packet budget.
 
 ### Search and browser payloads
 
