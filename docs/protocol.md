@@ -244,6 +244,24 @@ sequenceDiagram
 Pending futures survive agent swaps. `SessionState.update_agent` moves
 unresolved calls onto the new `ClientToolManager`.
 
+#### Over LiveKit RPC
+
+An app that registers the RPC method `kwami.client_tool` and sets the
+participant attribute `kwami.client_tools` to `rpc` gets tool calls as RPCs
+instead, addressed to it alone:
+
+```json
+{ "toolCallId": "550e8400-...", "name": "set_ui_control", "arguments": { "domain": "theme" } }
+```
+
+Here `arguments` is an **object**. The RPC's return value is the result; an
+error the handler throws (an RPC application error) reaches the model as
+`Error from client: <message>`, and the same 30-second deadline applies. If the
+RPC is refused for reasons that are not the tool's (`UNSUPPORTED_METHOD`,
+`UNSUPPORTED_SERVER`, `UNSUPPORTED_VERSION`, `REQUEST_PAYLOAD_TOO_LARGE`), the
+call is retried over the data channel above. An app without the attribute never
+sees an RPC.
+
 ### `metrics`
 
 How long one reply kept the user waiting, per stage, in milliseconds. Sent

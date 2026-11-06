@@ -17,9 +17,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The user's own agents.** Specialists defined in the app join the executor's team on
   the PC and in the cloud, a job can run as one of them with its model and tools, and
   the voice can hand a task to one by name.
+- **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
+  Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
+  being moved to OpenAI Realtime, and the app offers it on that basis.
 - **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
   TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
   the SDK already understood but never received.
+- **Client tools over LiveKit RPC.** An app that sets `kwami.client_tools=rpc` gets
+  each tool call as an RPC to it alone, with the app's own error and deadline; any
+  other app keeps the data-channel `tool_call`/`tool_result` pair.
 - **No more half-open phone lines.** A caller who goes silent is asked once whether
   they are still there; with no answer, the agent says goodbye and hangs up. Never
   while the brain is still working on something for them, and never in the app.
@@ -43,11 +49,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Memory starts faster and keeps a custom ontology.** Each session start re-applied the
+  default ontology, which replaced any the user set in the memory panel, and re-created the
+  context template, both before the greeting. The ontology is now applied once per version
+  (recorded on the user's Zep metadata) and the template once per worker. The user's name is
+  kept on their Zep record, so it is known at once next time and Zep ties it to their node.
 - **The whole turn is heard.** A turn whose words say it has not finished is held, and the
   pieces are answered and remembered as one. A quick answer is spoken as the worker wrote it.
 
 ### Fixed
 
+- **No more shared memory for sessions without a kwami.** A config that named no kwami
+  fell back to the Zep user `kwami_default`, one graph every such session wrote into and
+  recalled from. Those sessions now run without memory. The live e2e suite deletes the
+  Zep users it creates.
 - **A browser vendor with no credit no longer ends the browsing.** A key says
   nothing about the balance behind it: a 402 from Browser Use left the panel dead
   with the raw httpx message, URL included, in front of the model. Launching now
