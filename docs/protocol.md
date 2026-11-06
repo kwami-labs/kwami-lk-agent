@@ -339,6 +339,12 @@ browser session metadata (live view URL). Exact UI schemas live in the
 TypeScript SDK; the agent treats them as JSON objects and trims them to fit
 the 14 KB packet budget.
 
+An app that registers the text-stream topic `kwami.message` and sets the
+participant attribute `kwami.messages` to `stream` gets any payload over that
+budget **whole** instead, as a text stream on that topic addressed to it alone,
+with the same JSON as the data packet would carry. If the stream cannot be
+sent, or no participant advertises it, the payload is trimmed as above.
+
 ## Telephony bootstrap
 
 Phone sessions have no frontend to send `config`. The worker resolves
