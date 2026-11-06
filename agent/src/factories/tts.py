@@ -265,14 +265,35 @@ def _create_rime_tts(config: KwamiVoiceConfig):
 
 
 def _create_cartesia_tts(config: KwamiVoiceConfig):
-    """Create Cartesia TTS."""
+    """Create Cartesia TTS.
+
+    A voice designed in LiveKit carries a "v_" id and is served through LiveKit
+    Inference; Cartesia's own library voices (UUID ids) use the direct plugin.
+    """
     voice = config.tts_voice or CartesiaVoices.DEFAULT
 
     # Check for friendly name mapping
     if voice.lower() in CartesiaVoices.NAME_MAP:
         voice = CartesiaVoices.NAME_MAP[voice.lower()]
 
-    # Cartesia uses UUID format voice IDs
+    model = strip_model_prefix(config.tts_model or "", "cartesia") or "sonic-3"
+
+    # Without it the plugin speaks English: a Spanish voice then reads Spanish
+    # text with English phonetics. Cartesia takes the bare code ("es").
+    language = session_language(config)
+
+    # Voices designed in LiveKit carry a "v_" id, not a Cartesia UUID. The direct
+    # plugin rejects them ("voice ID must be a valid UUID"), so route them through
+    # LiveKit Inference, the way Rime and the ElevenLabs fallback already do.
+    if voice.startswith("v_"):
+        logger.info("🔊 Using LiveKit Inference for Cartesia: cartesia/%s:%s", model, voice)
+        return inference.TTS(
+            model=f"cartesia/{model}",
+            voice=voice,
+            language=language or NOT_GIVEN,
+        )
+
+    # The direct Cartesia plugin takes UUID voice IDs only.
     if voice and len(voice) < 30 and "-" not in voice:
         logger.warning(
             "Voice '%s' may be invalid for Cartesia (expected UUID format). Using default: %s",
@@ -280,12 +301,6 @@ def _create_cartesia_tts(config: KwamiVoiceConfig):
             CartesiaVoices.DEFAULT,
         )
         voice = CartesiaVoices.DEFAULT
-
-    model = strip_model_prefix(config.tts_model or "", "cartesia") or "sonic-2"
-
-    # Without it the plugin speaks English: a Spanish voice then reads Spanish
-    # text with English phonetics. Cartesia takes the bare code ("es").
-    language = session_language(config)
 
     return cartesia.TTS(
         **config.key_for("CARTESIA_API_KEY"),
