@@ -838,7 +838,7 @@ async def test_a_cloud_run_in_a_thread_folder_restores_it_first(
     store = _ThreadStore({"u/k/threads/t1/a.md": b"previo"})
     seen: list[bool] = []
 
-    async def run_in(root: Path, *args: Any) -> ExecutorResult:
+    async def run_in(root: Path, *args: Any, **kwargs: Any) -> ExecutorResult:
         seen.append((root / "a.md").read_bytes() == b"previo")
         (root / "b.md").write_bytes(b"nuevo")
         return ExecutorResult("Hecho.", 0.1, True)
@@ -861,10 +861,63 @@ async def test_a_given_folder_is_used_as_it_is(
 ) -> None:
     roots: list[Path] = []
 
-    async def run_in(root: Path, *args: Any) -> ExecutorResult:
+    async def run_in(root: Path, *args: Any, **kwargs: Any) -> ExecutorResult:
         roots.append(root)
         return ExecutorResult("Hecho.", 0.1, True)
 
     monkeypatch.setattr(executor, "_run_in", run_in)
     result = await executor.run_executor("k", "m", "t", ExecutorConfig(), root=tmp_path)
     assert roots == [tmp_path] and result.uploaded == 0
+
+
+# -- a host other users share has no shell --------------------------------------
+
+
+def _shared_runs(tmp_path: Path) -> dict[str, dict[str, Any]]:
+    """The two ways a run lands on a shared host: the voice agent's cloud folder,
+    and a clone the cloud work thread made."""
+    return {
+        "cloud": {"cloud": CloudWorkspace(store=None)},
+        "root": {"root": tmp_path / "clone"},
+    }
+
+
+@pytest.mark.parametrize("where", ["cloud", "root"])
+async def test_a_shared_host_offers_no_shell(sdk, tmp_path: Path, where: str) -> None:
+    kwargs = _shared_runs(tmp_path)[where]
+    if where == "root":
+        kwargs["root"].mkdir()
+    await run_executor("ak", "m", "t", ExecutorConfig(), **kwargs)
+    options = sdk.last.options
+    assert "Bash" not in options.tools and "Bash" not in options.allowed_tools
+    assert "Bash" in options.disallowed_tools
+    assert executor.NO_SHELL in options.system_prompt["append"]
+    # The rest of a full run is still there: it edits, and it has its team.
+    assert {"Write", "Edit", "Agent"} <= set(options.allowed_tools)
+
+
+@pytest.mark.parametrize("where", ["cloud", "root"])
+async def test_a_shared_host_refuses_any_command(sdk, tmp_path: Path, where: str) -> None:
+    """Even one that names nothing outside: a script written into the folder reads
+    the agent's environment from /proc without naming it on the command line."""
+    kwargs = _shared_runs(tmp_path)[where]
+    if where == "root":
+        kwargs["root"].mkdir()
+    sdk.tool_calls = [
+        {"tool_name": "Bash", "tool_input": {"command": "python3 leer.py"}},
+        {"tool_name": "Write", "tool_input": {"file_path": "leer.py"}},
+    ]
+    await run_executor("ak", "m", "t", ExecutorConfig(), **kwargs)
+    refused, allowed = sdk.last.decisions
+    assert refused["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert refused["hookSpecificOutput"]["permissionDecisionReason"] == executor.NO_SHELL
+    assert allowed == {}
+
+
+async def test_the_users_own_pc_keeps_its_shell(sdk, jarvis: Path) -> None:
+    sdk.tool_calls = [{"tool_name": "Bash", "tool_input": {"command": "python3 leer.py"}}]
+    await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    options = sdk.last.options
+    assert "Bash" in options.allowed_tools and "Bash" not in options.disallowed_tools
+    assert executor.NO_SHELL not in options.system_prompt["append"]
+    assert sdk.last.decisions == [{}]

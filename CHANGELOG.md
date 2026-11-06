@@ -80,6 +80,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No shell on a server other users share.** On LiveKit Cloud a code task ran Claude
+  Code with Bash in the agent's own container, as the agent's system user, so a script
+  written into the task folder could read the agent's environment from `/proc` -- the
+  Supabase service key and every other deployment secret -- and other users' folders.
+  The voice agent's cloud runs and the cloud work thread now edit files without a
+  shell; the user's own PC keeps it.
 - **No more shared memory for sessions without a kwami.** A config that named no kwami
   fell back to the Zep user `kwami_default`, one graph every such session wrote into and
   recalled from. Those sessions now run without memory. The live e2e suite deletes the
