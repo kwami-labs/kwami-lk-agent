@@ -273,10 +273,12 @@ class CloudWorker(Worker):
         key = await self._key_for(job.user_id)
         if not key:
             return ExecutorResult(NO_KEY, 0.0, False)
+        # The public copy has the same name under its own owner, whoever owns the user's.
+        name = repo.name.rsplit("/", 1)[-1]
         parent = Path(tempfile.mkdtemp(prefix="jarvis-repo-"))
-        root = parent / repo.name
+        root = parent / name
         try:
-            return await self._work_on_clone(job, repo.name, root, key, left, on_progress)
+            return await self._work_on_clone(job, name, root, key, left, on_progress)
         except SelfWorkError as e:
             logger.warning("Job %s: %s", job.id, e)
             return ExecutorResult(f"No he podido terminar en la nube: {e}", 0.0, False)
