@@ -1,13 +1,18 @@
 # Brain work thread
 
 The work thread is the process on the user's PC that does what the brain is
-asked to do. It lives in `agent/src/brain/worker.py`. A voice call or a
-schedule queues a job in Supabase (`brain_jobs`); the work thread takes it,
-runs it, and leaves the result for the call or the next greeting.
+asked to do. It lives in `agent/src/brain/worker.py`. A voice call, a schedule or
+the app (`POST /brain/jobs` on the API) queues a job in Supabase (`brain_jobs`);
+the work thread takes it, runs it, and leaves the result for the call or the next
+greeting.
+
+A second worker, in the cloud (`agent/src/brain/cloud.py`), takes the work the PC
+is not there for, for the users who allow it. What it makes comes back to the PC
+the next time the PC is on. See [The cloud and the PC](#the-cloud-and-the-pc).
 
 ## What it does
 
-- Takes **one job at a time**, only for the user given in `--user`.
+- Takes up to **3 jobs at once** (`WORK_SLOTS`), only for the user given in `--user`.
 - Each loop (`tick`) first fails stale jobs, then reads the month's spend,
   then claims the next job through the `brain_claim_job` RPC. It sleeps 10 s
   when the queue is empty.
@@ -52,6 +57,7 @@ Ctrl+C. It exits with code 2 and logs the reason when something is missing.
 | `ANTHROPIC_API_KEY` | Optional: the fallback when the login cannot do the work |
 | `KWAMI_GOOGLE_WORK_TOKEN` | Optional: the user's token for Google, from `POST /google/work-thread/token`. Without it, the thread has no Google. A task uses Google or commands, the web and team members, never both |
 | `KWAMI_SELF_REPO_OWNER` | Optional: the GitHub owner whose repositories self-improvement works on. Without it, none |
+| Migration 029 | Optional: bringing home what the cloud made (`brain_sync`), and the user's agents (`brain_agents`) |
 | A valid `--user` | The Supabase user id whose jobs it takes |
 
 Migration 021 is not in this repository: the code only refers to it. It must be
@@ -77,5 +83,80 @@ on a machine without a Documents folder, exits with code 2.
   over to the user.
 - **Failures:** a crash in a job is recorded as a failed job; a failing tick is
   logged and the loop carries on.
-- **One process per user:** the thread works through jobs serially, so a long
-  job delays the ones behind it.
+- **One process per user:** the thread runs up to 3 jobs at once; a fourth waits
+  for a free slot.
+- **Logs:** from INFO up to stderr (`utils.logging.log_to_console`). The PC's
+  launcher writes them to `~\.jarvis\logs\worker.log`.
+
+## The cloud and the PC
+
+Migration 029 (kwami-lk-api) adds where a job may run, a cloud worker, and the
+way back to the PC.
+
+### Where a job runs
+
+`brain_jobs.target` says who may take it:
+
+| `target` | Taken by |
+| --- | --- |
+| `auto` (default) | The user's PC when it is there. The cloud once no PC of the user has been seen for 90 s (`RUNNER_FRESH_SECONDS`) and the job has waited 60 s (`CLOUD_PATIENCE_SECONDS`), so a PC that is switching on gets the first go |
+| `pc` | Only the PC, however long that takes |
+| `cloud` | Only the cloud, even with the PC on |
+
+The cloud takes only `work` jobs (never thinking or orders), only of users who
+allowed it (`brain_cloud_settings.enabled`, off by default, switched from the
+app), and never more than 2 of one user at once (`CLOUD_PER_USER`). Both claims
+are single SQL statements with `SKIP LOCKED` (`brain_claim_job`,
+`brain_claim_cloud_job`), so two workers never take the same job.
+
+In a call with the PC off, the bridge sends long work and code to the cloud's
+queue when a cloud worker is there and the user allowed it, so the job outlives
+the call; otherwise it runs in the call, as before.
+
+### The cloud work thread
+
+`CloudWorker` (`brain/cloud.py`) is this worker without the PC. It runs inside the
+voice agent's own process when `KWAMI_CLOUD_WORKER=true` (see
+[deployment](./deployment.md#the-brains-cloud-work-thread)), or anywhere with
+`uv run python -m src.brain.cloud`. What differs from the PC:
+
+- **No Claude login:** it spends the user's own Anthropic key, connected from the
+  app, or the deployment's `ANTHROPIC_API_KEY` for the user ids in
+  `KWAMI_CLOUD_OWNERS`. Same 2 USD per task and monthly cap.
+- **No shell:** a host other users share runs Claude Code without Bash, so no
+  model-written program can read the agent's environment (`executor.NO_SHELL`).
+  The image still carries bubblewrap and socat for Claude Code's own sandbox.
+- **No user files:** each thread works in a folder kept in Storage
+  (`jarvis-files/<user>/<kwami>/threads/<thread>`), restored for a follow-up;
+  only what changed goes up again, never the sandbox's empty placeholders.
+- **No GitHub credentials:** a change to Jarvis's own code is made on an anonymous
+  clone of `KWAMI_CLOUD_REPO_OWNER`'s public repository (`dev`) and kept as a
+  patch, after the same forbidden-file and secret checks as on the PC.
+- **No session to resume:** a follow-up is told what the thread found so far.
+
+### Bringing the cloud's work home
+
+What the cloud made is listed in `brain_sync`. The PC's worker brings it home
+beside its own jobs (`brain/sync.py`), one item at a time, every minute (every
+30 minutes before migration 029):
+
+- **files** go to `Documents\Jarvis\nube\<title> (<thread>)`. A file the user
+  changed is never overwritten: the cloud's version lands beside it as
+  `name (nube).ext`. `.nube.json` remembers what Jarvis wrote, to tell the two
+  apart.
+- **patch** is applied with `git am --3way` on the thread's branch of the clone
+  the PC already keeps; the repository's tests run and the pull request is opened
+  as for work done on the PC. A patch that no longer fits is not forced: it ends
+  `conflict` and the user is told.
+
+Each item ends `applied`, `conflict` or `failed`, which the app shows, and the next
+greeting says what came home.
+
+### The user's agents
+
+Agents defined in the app (`brain_agents`, `/brain/agents` on the API) join the
+executor's team on the PC and in the cloud, under the same rules as the folder's
+own `agents/<name>.json` (on the PC a file of the same name wins). A job with
+`agent_id` runs as that agent: its brief, its model and the narrowest executor
+mode that has its tools. A voice call can hand a task to one by name
+(`delegate_task(agent=...)`).
