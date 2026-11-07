@@ -16,7 +16,7 @@ and then read [Architecture](./architecture.md).
 | [Configuration](./configuration.md) | Environment variables, `KwamiConfig`, and provider catalogues |
 | [Memory](./memory.md) | Zep Cloud threads, knowledge graph, ontology, and greeting injection |
 | [Security](./security.md) | Threat model, browser SSRF, prompt-injection, secrets, billing identity |
-| [Brain work thread](./brain-worker.md) | The PC-side process that runs the brain's jobs: start-up, requirements, limits |
+| [Brain work thread](./brain-worker.md) | The PC-side process that runs the brain's jobs: start-up, requirements, limits; the cloud worker, bringing its work home, and the user's agents |
 | [Billing](./billing.md) | Usage tracking, credit reporting, and identity resolution |
 | [Development](./development.md) | Local setup, Makefile, layout, and coding conventions |
 | [Testing](./testing.md) | Unit, contract, integration, and live e2e layers |
