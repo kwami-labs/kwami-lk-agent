@@ -412,7 +412,7 @@ async def test_work_left_uncommitted_is_kept_too(public_repo: str) -> None:
         jobs, Recorder(act=_writes("notas.md")), store=store, repo_base=public_repo
     ).tick()
     patch = next(iter(store.uploads.values())).decode()
-    assert "notas.md" in patch and "work left uncommitted in the cloud" in patch
+    assert "notas.md" in patch and "chore(jarvis)" in patch
 
 
 async def test_no_change_means_no_patch(public_repo: str) -> None:
@@ -593,3 +593,15 @@ async def test_no_placeholders_means_nothing_extra_to_commit(public_repo: str) -
         jobs, Recorder(act=_writes("a.py", commit=True)), store=store, repo_base=public_repo
     ).tick()
     assert "drop the sandbox" not in next(iter(store.uploads.values())).decode()
+
+
+def test_the_cloud_brief_does_not_ask_for_what_it_cannot_do() -> None:
+    brief = cloud_module.CLOUD_SELF_TASK.format(slug="o/r", branch="jarvis/nube-1", task="x")
+    assert "There is no shell here" in brief
+    assert "Commit your work" not in brief and "run them" not in brief
+
+
+def test_the_commit_is_named_after_the_job() -> None:
+    assert cloud_module.commit_subject("Añade un  saludo") == "chore(jarvis): añade un saludo"
+    assert cloud_module.commit_subject("   ") == "chore(jarvis): change asked from the cloud"
+    assert len(cloud_module.commit_subject("x" * 200)) == cloud_module.COMMIT_SUBJECT_CHARS
