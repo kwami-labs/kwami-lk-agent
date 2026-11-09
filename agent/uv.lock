@@ -1,11 +1,11 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'emscripten'",
-    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
     "python_full_version >= '3.13' and sys_platform != 'emscripten'",
-    "(python_full_version < '3.13' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' or (python_full_version == '3.12.*' and sys_platform != 'emscripten')",
 ]
 
 [manifest]
@@ -131,21 +131,21 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.125.0"
+version = "2.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "distro" },
     { name = "docstring-parser" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "jiter" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/62/f8/6f0560884b5363848347bd640b6c1d04abc25e7aa61787a232f790c6b60a/anthropic-0.125.0.tar.gz", hash = "sha256:e0cdd336580cb7411c1cdab69f80973e9bf4bff7f8e08141811d46307d45c682", size = 1112593, upload-time = "2026-08-19T22:00:42.837Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4a/a8/0e50326e4c408f4b4ee3aae4c3bbd60012570b88bc5887effc8542509068/anthropic-2.6.0.tar.gz", hash = "sha256:a38d8698258a4cb33a9bc9d2f0ced1d96b71010870e5ed703807d21021a0da24", size = 1958763, upload-time = "2026-11-05T18:59:09.557Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/1a/b1bd30cda3790557e8791bec5922a6ec8fabb6fa8b008c76a39cf7be6152/anthropic-0.125.0-py3-none-any.whl", hash = "sha256:3486013602eca76d8b12540764e53654f02cf4951110bca86cf06e67428a9f21", size = 1184067, upload-time = "2026-08-19T22:00:44.596Z" },
+    { url = "https://files.pythonhosted.org/packages/38/0b/705a05ab68558914e725cf1143d7e409fa3bb596c35bca1eceab42402abe/anthropic-2.6.0-py3-none-any.whl", hash = "sha256:4325cdf9346fa29183674b6ee6289ebad5b2b0a935758f7350fa504032da1d9b", size = 2445307, upload-time = "2026-11-05T18:59:11.474Z" },
 ]
 
 [[package]]
@@ -1036,7 +1036,7 @@ google = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.0" },
-    { name = "anthropic", specifier = ">=0.116,<1" },
+    { name = "anthropic", specifier = ">=0.116,<3" },
     { name = "claude-agent-sdk", specifier = ">=0.2.165" },
     { name = "cryptography", specifier = ">=46" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -1262,16 +1262,16 @@ wheels = [
 
 [[package]]
 name = "livekit-plugins-anthropic"
-version = "1.8.6"
+version = "1.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
     { name = "httpx" },
     { name = "livekit-agents" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d7/84/8a36c53980284bf4a58460cf2b9baf2379c046fc59ca971459fc5fef0a35/livekit_plugins_anthropic-1.8.6.tar.gz", hash = "sha256:7c147f63831ac7bffd2c4ed384090905a505dae38310766b40fa90d8847791a1", size = 9421, upload-time = "2026-10-09T22:12:20.256Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a8/0f/afa6cf67c79b30f2082cff2e2fbc4a10b23ff34f3269d772e5e4d0dc978a/livekit_plugins_anthropic-1.8.1.tar.gz", hash = "sha256:94fdc4f93b56efbdfb616e46db27df697f3433588df689476f0eb2a6f9597c39", size = 9370, upload-time = "2026-09-10T18:58:56.064Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/bc/98c6ba18dec9c3561e1f1a673af7d40a924cbf987f613101063ad8eb30c5/livekit_plugins_anthropic-1.8.6-py3-none-any.whl", hash = "sha256:adedcb652bdfafebdc190870c0439239427be1999912265ba275211ade978a65", size = 11136, upload-time = "2026-10-09T22:12:19.014Z" },
+    { url = "https://files.pythonhosted.org/packages/4d/44/4bf8d9be299725ee5ac326263b692d00258e20726d832263356af4032d4a/livekit_plugins_anthropic-1.8.1-py3-none-any.whl", hash = "sha256:df386be19212733c87ea4b319c2e3ef3355c33171b72eed44cddad3fe30a5b28", size = 11131, upload-time = "2026-09-10T18:58:54.28Z" },
 ]
 
 [[package]]
