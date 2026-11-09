@@ -24,6 +24,8 @@ export const CONTAINER_SECRET_KEYS = [
   "MISTRAL_API_KEY",
   "CEREBRAS_API_KEY",
   "XAI_API_KEY",
+  "OPENROUTER_API_KEY",
+  "KWAMI_PROVIDER_KEYS_SECRET",
   "TAVILY_API_KEY",
   "SERPAPI_KEY",
   "ZEP_API_KEY",
@@ -40,6 +42,10 @@ export const CONTAINER_SECRET_KEYS = [
   // Settings reads both; only one of the two ever reached the container.
   "ELEVENLABS_API_KEY",
   "KWAMI_API_KEY",
+  // The user's own Supabase, written directly when there is no Kwami API.
+  // The secret key bypasses RLS.
+  "SUPABASE_URL",
+  "SUPABASE_SECRET_KEY",
   // Carries the trace backend's API key ("api-key=..."), so it is a secret
   // rather than a var even though the other OTEL_* settings are not.
   "OTEL_EXPORTER_OTLP_HEADERS",
@@ -61,8 +67,12 @@ export function containerEnvFromWorker(env: Env): Record<string, string> {
     KWAMI_API_URL: env.KWAMI_API_URL,
     KWAMI_API_TIMEOUT: env.KWAMI_API_TIMEOUT,
     KWAMI_ALLOW_BROWSER_JS: env.KWAMI_ALLOW_BROWSER_JS,
+    KWAMI_HEADLESS_ALLOW_NO_SANDBOX: env.KWAMI_HEADLESS_ALLOW_NO_SANDBOX,
     KWAMI_BROWSER_PROVIDER: env.KWAMI_BROWSER_PROVIDER,
     KWAMI_LOG_FORMAT: env.KWAMI_LOG_FORMAT,
+    KWAMI_CLOUD_WORKER: env.KWAMI_CLOUD_WORKER,
+    KWAMI_CLOUD_OWNERS: env.KWAMI_CLOUD_OWNERS,
+    KWAMI_CLOUD_REPO_OWNER: env.KWAMI_CLOUD_REPO_OWNER,
     OTEL_EXPORTER_OTLP_ENDPOINT: env.OTEL_EXPORTER_OTLP_ENDPOINT,
     OTEL_SERVICE_NAME: env.OTEL_SERVICE_NAME,
   };

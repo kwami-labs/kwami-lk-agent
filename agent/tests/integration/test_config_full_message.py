@@ -439,7 +439,7 @@ async def test_a_zero_temperature_survives_an_llm_update(captured, create_agent_
 
     await update_llm(FakeSession(), state, agent, {"temperature": 0}, None, create_agent_fn)
 
-    assert captured["config"].voice.llm_temperature == 0
+    assert agent.kwami_config.voice.llm_temperature == 0
 
 
 async def test_max_tokens_arrives_under_both_spellings(captured, create_agent_fn) -> None:
@@ -449,7 +449,67 @@ async def test_max_tokens_arrives_under_both_spellings(captured, create_agent_fn
 
     await update_llm(FakeSession(), state, agent, {"max_tokens": 512}, None, create_agent_fn)
 
-    assert captured["config"].voice.llm_max_tokens == 512
+    assert agent.kwami_config.voice.llm_max_tokens == 512
+
+
+async def test_sampling_knobs_alone_do_not_rebuild_the_pipeline(captured, create_agent_fn) -> None:
+    """The app resends its LLM right after connecting; a rebuild cut the greeting."""
+    agent = FakeAgent()
+    state = SessionState()
+    state.current_agent = agent
+    voice = agent.kwami_config.voice
+
+    await update_llm(
+        FakeSession(),
+        state,
+        agent,
+        {"provider": voice.llm_provider, "model": voice.llm_model, "temperature": 0.3},
+        None,
+        create_agent_fn,
+    )
+
+    assert "config" not in captured
+    assert voice.llm_temperature == 0.3
+
+
+async def test_a_full_config_ignores_a_text_model_as_the_realtime_one(
+    captured, create_agent_fn
+) -> None:
+    """gemini-3.5-flash on Live closed the session with 1008."""
+    await run_config(
+        {
+            "voice": {
+                "type": "realtime",
+                "realtimeProvider": "google",
+                "realtimeModel": "gemini-3.5-flash",
+            }
+        },
+        create_agent_fn,
+    )
+
+    assert captured["config"].voice.realtime_model != "gemini-3.5-flash"
+
+
+async def test_a_text_model_never_replaces_the_realtime_model(captured, create_agent_fn) -> None:
+    """gemini-3.5-flash as the Live model closed the session with 1008."""
+    agent = FakeAgent()
+    agent.kwami_config.voice.pipeline_type = "realtime"
+    agent.kwami_config.voice.realtime_provider = "google"
+    agent.kwami_config.voice.realtime_model = "gemini-3.1-flash-live-preview"
+    state = SessionState()
+    state.current_agent = agent
+
+    await update_llm(
+        FakeSession(),
+        state,
+        agent,
+        {"provider": "google", "model": "gemini-3.5-flash"},
+        None,
+        create_agent_fn,
+    )
+
+    assert "config" not in captured
+    assert agent.kwami_config.voice.realtime_model == "gemini-3.1-flash-live-preview"
 
 
 # =============================================================================
@@ -775,3 +835,115 @@ async def test_locale_is_independent_of_the_spoken_language(captured, create_age
 
     assert captured["config"].locale == "en-GB"
     assert captured["config"].soul.language == "es"
+
+
+# =============================================================================
+# Voice direction and the owed greeting
+# =============================================================================
+
+
+async def test_voice_directions_arrive_bounded(captured, create_agent_fn) -> None:
+    from src.handlers.config_handler import MAX_VOICE_STYLE_CHARS
+
+    await run_config(
+        {
+            "voice": {
+                "realtime": {"style": "Calma de mayordomo."},
+                "tts": {"style": "x" * (MAX_VOICE_STYLE_CHARS + 50)},
+            }
+        },
+        create_agent_fn,
+    )
+
+    voice = captured["config"].voice
+    assert voice.realtime_style == "Calma de mayordomo."
+    assert len(voice.tts_style) == MAX_VOICE_STYLE_CHARS
+
+
+async def test_the_first_config_marks_the_greeting_as_owed(create_agent_fn) -> None:
+    """The reconfigured agent greets; until it is heard, the greeting is owed."""
+
+    class SessionWithDeps(FakeSession):
+        userdata = type("Deps", (), {"greeting_owed": False})()
+
+    session = SessionWithDeps()
+    await handle_full_config(session, SessionState(), {}, vad=None, create_agent_fn=create_agent_fn)
+
+    assert session.userdata.greeting_owed is True
+
+
+async def test_a_new_tts_direction_rebuilds_the_engine(captured, create_agent_fn) -> None:
+    agent = FakeAgent()
+    agent.kwami_config.voice.tts_style = "antes"
+    state = SessionState()
+    state.current_agent = agent
+
+    await update_voice(
+        FakeSession(), state, agent, {"ttsStyle": "  después  "}, None, create_agent_fn
+    )
+
+    assert captured["config"].voice.tts_style == "después"
+
+
+async def test_a_text_model_sent_as_the_realtime_one_is_ignored(
+    captured, create_agent_fn, caplog
+) -> None:
+    default = KwamiConfig().voice.realtime_model
+
+    with caplog.at_level(logging.WARNING):
+        await run_config(
+            {"voice": {"realtime": {"provider": "google", "model": "gemini-3.5-flash"}}},
+            create_agent_fn,
+        )
+
+    assert captured["config"].voice.realtime_model == default
+    assert "not a realtime one" in caplog.text
+
+
+def test_llm_sampling_is_applied_to_the_running_client() -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=0.7, max_completion_tokens=100, max_tokens=50)
+    agent = SimpleNamespace(kwami_config=KwamiConfig(), llm=SimpleNamespace(_opts=opts))
+    new_voice = replace(agent.kwami_config.voice, llm_temperature=0.2, llm_max_tokens=256)
+
+    _apply_llm_knobs_live(agent, new_voice)
+
+    assert (opts.temperature, opts.max_completion_tokens) == (0.2, 256)
+    assert opts.max_tokens == 50, "only the first token limit the client has is set"
+
+
+def test_a_client_built_without_temperature_gets_none() -> None:
+    """Claude from Opus 4.7 on answers 400 to a temperature."""
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=None, max_output_tokens=100)
+    agent = SimpleNamespace(kwami_config=KwamiConfig(), llm=SimpleNamespace(_opts=opts))
+    new_voice = replace(agent.kwami_config.voice, llm_temperature=0.2, llm_max_tokens=256)
+
+    _apply_llm_knobs_live(agent, new_voice)
+
+    assert opts.temperature is None
+    assert opts.max_output_tokens == 256
+
+
+def test_a_client_without_a_token_limit_keeps_none() -> None:
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from src.handlers.config_handler import _apply_llm_knobs_live
+
+    opts = SimpleNamespace(temperature=0.7)
+    agent = SimpleNamespace(kwami_config=KwamiConfig(), llm=SimpleNamespace(_opts=opts))
+    new_voice = replace(agent.kwami_config.voice, llm_temperature=0.2, llm_max_tokens=256)
+
+    _apply_llm_knobs_live(agent, new_voice)
+
+    assert vars(opts) == {"temperature": 0.2}
+    assert agent.kwami_config.voice.llm_max_tokens == 256

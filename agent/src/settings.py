@@ -29,7 +29,8 @@ DEFAULT_KWAMI_API_TIMEOUT = 30.0
 #: Which cloud-browser vendor backs the navigation panel. Browserbase is the
 #: default because its Contexts persist the user's logins across sessions,
 #: which is what makes "carry on where I left off" work; "browser_use" keeps
-#: the original Browser Use Cloud path available unchanged.
+#: the original Browser Use Cloud path available unchanged; "local" opens Chrome
+#: on the agent's own machine, for an agent running on the user's computer.
 DEFAULT_BROWSER_PROVIDER = "browserbase"
 
 _TRUTHY = frozenset({"1", "true", "yes", "on"})
@@ -51,6 +52,11 @@ PROVIDER_KEY_NAMES: tuple[str, ...] = (
     "DEEPSEEK_API_KEY",
     "CEREBRAS_API_KEY",
     "XAI_API_KEY",
+    "MISTRAL_API_KEY",
+    "OPENROUTER_API_KEY",
+    # LiveKit Inference (Rime, the cloud turn detector) signs with these.
+    "LIVEKIT_API_KEY",
+    "LIVEKIT_API_SECRET",
 )
 
 #: Every environment variable `from_env` reads, in one enumerable place.
@@ -68,6 +74,8 @@ PROVIDER_KEY_NAMES: tuple[str, ...] = (
 #:
 #: Both now derive from this tuple rather than restating it, and
 #: `tests/unit/test_settings_env_inventory.py` fails if it drifts from the code.
+DEFAULT_AGENT_NAME = "kwami-agent"
+
 ENV_VAR_NAMES: tuple[str, ...] = (
     "KWAMI_API_URL",
     "KWAMI_API_KEY",
@@ -81,11 +89,23 @@ ENV_VAR_NAMES: tuple[str, ...] = (
     "TAVILY_API_KEY",
     "SERPAPI_KEY",
     "KWAMI_BROWSER_PROVIDER",
+    "KWAMI_HEADLESS_CHROMIUM",
+    "KWAMI_HEADLESS_ALLOW_NO_SANDBOX",
     "BROWSER_USE_API_KEY",
     "BROWSERBASE_API_KEY",
     "BROWSERBASE_PROJECT_ID",
     "KWAMI_ALLOW_BROWSER_JS",
-    "MISTRAL_API_KEY",
+    "SUPABASE_URL",
+    "SUPABASE_SECRET_KEY",
+    "KWAMI_STORAGE",
+    "KWAMI_EXECUTOR_MODE",
+    "KWAMI_PROVIDER_KEYS_SECRET",
+    "KWAMI_SELF_REPO_OWNER",
+    "KWAMI_GOOGLE_WORK_TOKEN",
+    "KWAMI_AGENT_NAME",
+    "KWAMI_CLOUD_WORKER",
+    "KWAMI_CLOUD_OWNERS",
+    "KWAMI_CLOUD_REPO_OWNER",
     *PROVIDER_KEY_NAMES,
 )
 
@@ -124,6 +144,24 @@ class Settings:
     kwami_api_url: str = DEFAULT_KWAMI_API_URL
     kwami_api_key: str = ""
     kwami_api_timeout: float = DEFAULT_KWAMI_API_TIMEOUT
+    #: Whether KWAMI_API_URL was given at all. `kwami_api_url` always holds a
+    #: value (the localhost default), so this is what tells "talk to the API on
+    #: localhost" apart from "there is no API": on LiveKit Cloud there is none,
+    #: and the agent writes to Supabase instead. True for a directly built
+    #: Settings, which carries the URL it was given.
+    kwami_api_url_set: bool = True
+
+    # The user's own Supabase, written directly when there is no Kwami API.
+    # The secret (service-role) key bypasses RLS, so it lives only in the
+    # agent's secrets, never in the app.
+    supabase_url: str = ""
+    supabase_secret_key: str = ""
+    #: Where the agent keeps what outlives a session. "auto" (default): the
+    #: Kwami API when it is configured, Supabase directly otherwise. "supabase":
+    #: Supabase directly even with KWAMI_API_URL set -- what LiveKit Cloud
+    #: needs, since its secrets can be added but not removed one by one and an
+    #: old KWAMI_API_URL is there. "api": never Supabase directly.
+    storage: str = "auto"
 
     #: "json" turns on one-JSON-object-per-line output with the session
     #: correlation fields at the top level. Anything else is human-readable.
@@ -148,6 +186,10 @@ class Settings:
 
     # Cloud browsing
     browser_provider: str = DEFAULT_BROWSER_PROVIDER
+    #: Path to a Chromium the image ships, which makes it the last browser to try.
+    headless_chromium: str = ""
+    #: Run it even where the container forbids its sandbox: see docs/security.md.
+    headless_allow_no_sandbox: bool = False
     browser_use_api_key: str = ""
     browserbase_api_key: str = ""
     browserbase_project_id: str = ""
@@ -156,6 +198,31 @@ class Settings:
     # LLM providers reached through an OpenAI-compatible endpoint, which need
     # their key passed explicitly rather than picked up by a plugin helper.
     mistral_api_key: str = ""
+
+    #: Where the brain's code executor works. "local": the user's
+    #: Documents/Jarvis. "cloud": a temporary folder whose results are uploaded
+    #: to Storage. "auto" (default): cloud when there is no Documents folder,
+    #: which is the case in every container and never on the user's PC.
+    executor_mode: str = "auto"
+    #: Opens the model keys users connected from the app. Without it, only this
+    #: deployment's own keys are used.
+    provider_keys_secret: str = ""
+    #: Whose repositories Jarvis may open pull requests on. Empty: nobody's.
+    self_repo_owner: str = ""
+    #: One user's way into Google from their PC's work thread. Issued by the API.
+    google_work_token: str = ""
+    #: The dispatch name LiveKit routes calls by. A local worker for testing
+    #: takes another one (KWAMI_AGENT_NAME=kwami-agent-lab), so it does not
+    #: compete with the deployed agent for real calls.
+    agent_name: str = DEFAULT_AGENT_NAME
+    #: Whether this worker also runs the brain's cloud work thread (`brain/cloud.py`):
+    #: the jobs of users who let the cloud work for them while their PC is off.
+    cloud_worker: bool = False
+    #: Users whose cloud work may spend this deployment's own Anthropic key. Everyone
+    #: else needs their own key, connected from the app.
+    cloud_owners: tuple[str, ...] = ()
+    #: Where the cloud clones Jarvis's own code from, read-only and without credentials.
+    cloud_repo_owner: str = "kwami-labs"
 
     # Provider credentials the livekit plugins read themselves. Mirrored here so
     # that "is this provider usable?" is answerable without touching os.environ.
@@ -171,6 +238,10 @@ class Settings:
             kwami_api_url=_env_str("KWAMI_API_URL", DEFAULT_KWAMI_API_URL).rstrip("/"),
             kwami_api_key=_env_str("KWAMI_API_KEY"),
             kwami_api_timeout=_env_float("KWAMI_API_TIMEOUT", DEFAULT_KWAMI_API_TIMEOUT),
+            kwami_api_url_set=bool(_env_str("KWAMI_API_URL")),
+            supabase_url=_env_str("SUPABASE_URL").rstrip("/"),
+            supabase_secret_key=_env_str("SUPABASE_SECRET_KEY"),
+            storage=_env_str("KWAMI_STORAGE", "auto").strip().lower(),
             log_format=_env_str("KWAMI_LOG_FORMAT").strip().lower(),
             environment=_env_str("ENVIRONMENT"),
             otel_endpoint=_env_str("OTEL_EXPORTER_OTLP_ENDPOINT"),
@@ -182,11 +253,23 @@ class Settings:
             browser_provider=_env_str("KWAMI_BROWSER_PROVIDER", DEFAULT_BROWSER_PROVIDER)
             .strip()
             .lower(),
+            headless_chromium=_env_str("KWAMI_HEADLESS_CHROMIUM"),
+            headless_allow_no_sandbox=_env_bool("KWAMI_HEADLESS_ALLOW_NO_SANDBOX"),
             browser_use_api_key=_env_str("BROWSER_USE_API_KEY"),
             browserbase_api_key=_env_str("BROWSERBASE_API_KEY"),
             browserbase_project_id=_env_str("BROWSERBASE_PROJECT_ID"),
             allow_browser_js=_env_bool("KWAMI_ALLOW_BROWSER_JS"),
             mistral_api_key=_env_str("MISTRAL_API_KEY"),
+            executor_mode=_env_str("KWAMI_EXECUTOR_MODE", "auto").strip().lower(),
+            provider_keys_secret=_env_str("KWAMI_PROVIDER_KEYS_SECRET"),
+            self_repo_owner=_env_str("KWAMI_SELF_REPO_OWNER").strip(),
+            google_work_token=_env_str("KWAMI_GOOGLE_WORK_TOKEN").strip(),
+            agent_name=_env_str("KWAMI_AGENT_NAME").strip() or DEFAULT_AGENT_NAME,
+            cloud_worker=_env_bool("KWAMI_CLOUD_WORKER"),
+            cloud_owners=tuple(
+                part.strip() for part in _env_str("KWAMI_CLOUD_OWNERS").split(",") if part.strip()
+            ),
+            cloud_repo_owner=_env_str("KWAMI_CLOUD_REPO_OWNER").strip() or "kwami-labs",
             provider_keys={
                 name: _env_str(name) for name in PROVIDER_KEY_NAMES if os.environ.get(name)
             },
@@ -196,6 +279,27 @@ class Settings:
     def memory_enabled(self) -> bool:
         """Memory is on exactly when a Zep credential is available."""
         return bool(self.zep_api_key)
+
+    @property
+    def kwami_api_enabled(self) -> bool:
+        """The Kwami API is configured: an explicit URL and the internal key."""
+        return bool(self.kwami_api_key and self.kwami_api_url and self.kwami_api_url_set)
+
+    @property
+    def supabase_enabled(self) -> bool:
+        return bool(self.supabase_url and self.supabase_secret_key)
+
+    @property
+    def supabase_direct(self) -> bool:
+        """Write straight to Supabase: it is configured and there is no API.
+
+        By default the API wins when both are present, because it is what
+        bills credits and what the app's local setup already goes through.
+        `storage` overrides that either way.
+        """
+        if self.storage == "api" or not self.supabase_enabled:
+            return False
+        return self.storage == "supabase" or not self.kwami_api_enabled
 
     def has_provider_key(self, name: str) -> bool:
         return bool(self.provider_keys.get(name))

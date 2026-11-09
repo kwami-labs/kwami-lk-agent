@@ -62,8 +62,14 @@ def javascript_execution_enabled() -> bool:
 
 
 def _is_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    # ::ffff:127.0.0.1 is loopback, written so that the checks below miss it.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
     return (
-        ip.is_private
+        # Not only the private ranges: carrier NAT (100.64.0.0/10) is no more public.
+        not ip.is_global
+        or ip.is_private
         or ip.is_loopback
         or ip.is_link_local
         or ip.is_reserved
@@ -144,6 +150,28 @@ def validate_url(url: str, *, resolve_dns: bool = True) -> str:
                 raise UnsafeURLError(f"'{hostname}' resolves to the non-public address {address}")
 
     return candidate
+
+
+def public_addresses(hostname: str) -> list[str]:
+    """The addresses a connection to this host may use, for whoever opens it themselves.
+
+    Raises UnsafeURLError when the name or any address behind it is not public, or when
+    it resolves to nothing. Connecting to what this returns leaves DNS rebinding no room.
+    """
+    hostname = hostname.strip().lower().rstrip(".")
+    if not hostname or hostname in BLOCKED_HOSTNAMES or hostname.endswith(".localhost"):
+        raise UnsafeURLError(f"'{hostname}' is not a public address")
+    addresses = _resolved_addresses(hostname)
+    if not addresses:
+        raise UnsafeURLError(f"'{hostname}' does not resolve")
+    for address in addresses:
+        try:
+            blocked = _is_blocked_ip(ipaddress.ip_address(address))
+        except ValueError:
+            blocked = True
+        if blocked:
+            raise UnsafeURLError(f"'{hostname}' resolves to the non-public address {address}")
+    return addresses
 
 
 async def validate_url_async(url: str, *, resolve_dns: bool = True) -> str:

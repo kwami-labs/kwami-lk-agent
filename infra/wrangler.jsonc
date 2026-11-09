@@ -17,6 +17,7 @@
     "KWAMI_API_URL": "https://api.kwami.io",
     "KWAMI_API_TIMEOUT": "30.0",
     "KWAMI_ALLOW_BROWSER_JS": "false",
+    "KWAMI_HEADLESS_ALLOW_NO_SANDBOX": "false",
     // browserbase (default) or browser_use. Must match what is
     // actually configured as a secret, or the agent falls back to the
     // other vendor and the user loses their saved logins.
@@ -24,6 +25,11 @@
     // The Worker beside this already logs JSON; matching it means one
     // aggregator query covers both halves of a session.
     "KWAMI_LOG_FORMAT": "json",
+    // The brain's cloud work thread (agent/src/brain/cloud.py): off until the
+    // database has migration 029 and someone decides who it may spend for.
+    "KWAMI_CLOUD_WORKER": "false",
+    "KWAMI_CLOUD_OWNERS": "",
+    "KWAMI_CLOUD_REPO_OWNER": "kwami-labs",
     // Tracing is off until an endpoint is set. Standard OTEL_* names, so
     // pointing this at a collector is a deploy-time decision.
     "OTEL_EXPORTER_OTLP_ENDPOINT": "",
@@ -80,6 +86,7 @@
         "KWAMI_API_URL": "https://api.kwami.io",
         "KWAMI_API_TIMEOUT": "30.0",
         "KWAMI_ALLOW_BROWSER_JS": "false",
+        "KWAMI_HEADLESS_ALLOW_NO_SANDBOX": "false",
     // browserbase (default) or browser_use. Must match what is
     // actually configured as a secret, or the agent falls back to the
     // other vendor and the user loses their saved logins.
@@ -87,6 +94,11 @@
     // The Worker beside this already logs JSON; matching it means one
     // aggregator query covers both halves of a session.
     "KWAMI_LOG_FORMAT": "json",
+    // The brain's cloud work thread (agent/src/brain/cloud.py): off until the
+    // database has migration 029 and someone decides who it may spend for.
+    "KWAMI_CLOUD_WORKER": "false",
+    "KWAMI_CLOUD_OWNERS": "",
+    "KWAMI_CLOUD_REPO_OWNER": "kwami-labs",
     // Tracing is off until an endpoint is set. Standard OTEL_* names, so
     // pointing this at a collector is a deploy-time decision.
     "OTEL_EXPORTER_OTLP_ENDPOINT": "",

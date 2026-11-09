@@ -133,6 +133,27 @@ def test_a_config_update_is_spawned_and_serialized() -> None:
     assert state.spawned == ["handle_config_update"]
 
 
+def test_a_brain_update_reconfigures_the_bridge_without_a_rebuild() -> None:
+    class FakeBridge:
+        configs: list[Any] = []
+
+        def configure(self, config: Any) -> None:
+            self.configs.append(config)
+
+    bridge = FakeBridge()
+    state = FakeState()
+    router = DataMessageRouter(
+        session=object(), state=state, deps=type("D", (), {"bridge": bridge})()
+    )
+    message = {"type": "config_update", "updateType": "brain", "config": {"council": "on_request"}}
+    assert router.handle(message) == "config_update"
+    assert state.spawned == []
+    assert [c.council for c in bridge.configs] == ["on_request"]
+    # No bridge in this job (a placeholder without deps): nothing to configure.
+    assert _router(state).handle(message) == "config_update"
+    assert state.spawned == []
+
+
 def test_a_browser_close_request_closes_a_live_browser() -> None:
     state = FakeState(browser=FakeBrowser())
     assert _router(state).handle({"type": "browser_close_request"}) == "browser_close_request"

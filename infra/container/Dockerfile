@@ -37,6 +37,23 @@ FROM ghcr.io/astral-sh/uv:python${PYTHON_VERSION}-bookworm-slim AS runtime
 ENV PYTHONUNBUFFERED=1 \
     PATH="/app/.venv/bin:$PATH"
 
+# The browser of last resort: see agent/src/browser/headless_chrome.py.
+# chromium-sandbox is only a Recommends, and it does not start without a sandbox.
+# git: the brain's cloud work thread clones Jarvis's public repositories.
+# bubblewrap and socat: Claude Code isolates the commands it runs, strips their secrets
+# and proxies their network with them.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    chromium-sandbox \
+    bubblewrap \
+    socat \
+    git \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+  && rm -rf /var/lib/apt/lists/*
+RUN chromium --version
+ENV KWAMI_HEADLESS_CHROMIUM=/usr/bin/chromium
+
 ARG UID=10001
 RUN adduser \
     --disabled-password \

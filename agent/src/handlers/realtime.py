@@ -27,6 +27,7 @@ from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..domain import clone_config, number, text
+from ..domain.pipelines import HYBRID_PIPELINE, PIPELINES, REALTIME_PIPELINE, STANDARD_PIPELINE
 from ..utils.logging import get_logger
 from ..utils.provider import strip_model_prefix
 
@@ -37,9 +38,7 @@ if TYPE_CHECKING:
 
 logger = get_logger("realtime_config")
 
-REALTIME_PIPELINE = "realtime"
-STANDARD_PIPELINE = "standard"
-PIPELINE_TYPES = (STANDARD_PIPELINE, REALTIME_PIPELINE)
+PIPELINE_TYPES = PIPELINES
 
 #: Keys that only mean something to the realtime pipeline. Their presence is
 #: what tells a mixed `voice` payload apart from a plain TTS one.
@@ -50,6 +49,8 @@ REALTIME_KEYS = (
     "realtimeModel",
     "realtime_voice",
     "realtimeVoice",
+    "realtime_style",
+    "realtimeStyle",
 )
 
 
@@ -66,10 +67,9 @@ REALTIME_KEYS = (
 #: pipeline was unreachable from the product.
 PIPELINE_KEYS = ("pipelineType", "pipeline_type", "pipeline", "type")
 
-#: Every spelling either side uses, mapped to this codebase's two.
-#: `hybrid` is in the SDK's union but has no implementation here; it resolves to
-#: the standard pipeline, which is what it degrades to, and says so out loud
-#: rather than being silently dropped.
+#: Every spelling either side uses, mapped to this codebase's three.
+#: `hybrid` is the SDK's name for a realtime model that answers in text for a
+#: TTS to speak (domain/pipelines.py).
 PIPELINE_ALIASES: dict[str, str] = {
     "standard": STANDARD_PIPELINE,
     "stt-llm-tts": STANDARD_PIPELINE,
@@ -77,7 +77,11 @@ PIPELINE_ALIASES: dict[str, str] = {
     "sttllmtts": STANDARD_PIPELINE,
     "normal": STANDARD_PIPELINE,
     "classic": STANDARD_PIPELINE,
-    "hybrid": STANDARD_PIPELINE,
+    "hybrid": HYBRID_PIPELINE,
+    "realtime-tts": HYBRID_PIPELINE,
+    "realtime_tts": HYBRID_PIPELINE,
+    "live-tts": HYBRID_PIPELINE,
+    "half-cascade": HYBRID_PIPELINE,
     "realtime": REALTIME_PIPELINE,
     "real-time": REALTIME_PIPELINE,
     "real_time": REALTIME_PIPELINE,
@@ -87,7 +91,7 @@ PIPELINE_ALIASES: dict[str, str] = {
 
 
 def normalize_pipeline_type(raw: Any) -> str | None:
-    """Map any client's spelling onto `standard` or `realtime`, or None.
+    """Map any client's spelling onto `standard`, `realtime` or `hybrid`, or None.
 
     Returning None for an unrecognised value is deliberate: the pipeline branch
     is chosen by equality against `"realtime"`, so passing a typo through would
@@ -102,9 +106,22 @@ def normalize_pipeline_type(raw: Any) -> str | None:
     if resolved is None:
         logger.warning("Ignoring unknown pipeline type %r", raw)
         return None
-    if normalized == "hybrid":
-        logger.warning("Pipeline type 'hybrid' is not implemented; using the standard pipeline")
     return resolved
+
+
+#: Name fragments of models that speak a realtime (bidirectional audio)
+#: protocol. Gemini's are "...-live-..." or "...-native-audio-..."; OpenAI's
+#: "gpt-realtime" and "gpt-4o-realtime-preview". A text model under any of
+#: these providers is not one, and handed to the realtime socket it is a 1008.
+REALTIME_MODEL_MARKERS = ("live", "native-audio", "realtime")
+
+
+def is_realtime_model(provider: str | None, model: str | None) -> bool:
+    """True when `model` can drive the realtime pipeline."""
+    if not model:
+        return False
+    name = strip_model_prefix(model, provider or "").lower()
+    return any(marker in name for marker in REALTIME_MODEL_MARKERS)
 
 
 def requested_pipeline(config: dict[str, Any]) -> str | None:
@@ -141,6 +158,9 @@ def apply_realtime_fields(voice_config: Any, config: dict[str, Any]) -> set[str]
         changed.add("realtime_provider")
 
     model_in = text(config, "realtime_model", "realtimeModel")
+    if model_in and not is_realtime_model(voice_config.realtime_provider, model_in):
+        logger.warning("Ignoring %r as the realtime model: it is not a realtime one", model_in)
+        model_in = None
     if model_in:
         # Strip against the provider that will actually be used, which may be
         # the one this same payload just set.
@@ -154,11 +174,57 @@ def apply_realtime_fields(voice_config: Any, config: dict[str, Any]) -> set[str]
         voice_config.realtime_voice = voice_in
         changed.add("realtime_voice")
 
+    # A style key that is present but empty clears the direction, so it is
+    # read with `in` rather than through `text`, which drops empty strings.
+    for key in ("realtime_style", "realtimeStyle"):
+        if key in config and isinstance(config[key], str):
+            style_in = config[key].strip()[:1200]
+            if style_in != voice_config.realtime_style:
+                voice_config.realtime_style = style_in
+                changed.add("realtime_style")
+            break
+
     temperature_in = number(config, "temperature", "llm_temperature", "llmTemperature")
     if temperature_in is not None and temperature_in != voice_config.llm_temperature:
         voice_config.llm_temperature = temperature_in
         changed.add("llm_temperature")
 
+    return changed
+
+
+#: Standard-pipeline fields a pipeline switch may carry, wire name -> config field.
+STANDARD_FIELDS: dict[str, str] = {
+    "stt_provider": "stt_provider",
+    "stt_model": "stt_model",
+    "stt_language": "stt_language",
+    "llm_provider": "llm_provider",
+    "llm_model": "llm_model",
+    "tts_provider": "tts_provider",
+    "tts_model": "tts_model",
+    "tts_voice": "tts_voice",
+    "tts_style": "tts_style",
+}
+
+
+def apply_standard_fields(voice_config: Any, config: dict[str, Any]) -> set[str]:
+    """Copy STT/LLM/TTS fields off a pipeline switch onto a voice config.
+
+    Switching to the standard pipeline used to rebuild with whatever STT, LLM
+    and TTS the session connected with -- in a realtime session those were
+    never looked at, and could name a provider with no key. Sending them with
+    the switch makes "use Gemini TTS now" one message that cannot land on a
+    stale engine. Accepts snake_case and camelCase.
+    """
+    changed: set[str] = set()
+    for wire, field_name in STANDARD_FIELDS.items():
+        camel = wire.split("_")[0] + "".join(p.title() for p in wire.split("_")[1:])
+        for key in (wire, camel):
+            value = config.get(key)
+            if isinstance(value, str) and (value or field_name == "tts_style"):
+                if getattr(voice_config, field_name) != value:
+                    setattr(voice_config, field_name, value)
+                    changed.add(field_name)
+                break
     return changed
 
 
@@ -238,9 +304,17 @@ async def update_realtime(
     vad: Any,
     create_agent_fn: Any,
 ) -> None:
-    """Apply a realtime-pipeline voice update, live where the provider allows it."""
+    """Apply a realtime-pipeline voice update, live where the provider allows it.
+
+    On the hybrid pipeline the TTS speaks, so the TTS fields of the same
+    payload count too: a character switched to another engine sends both, and
+    reading only the realtime half left the old TTS speaking (seen on
+    2026-10-23, "Realtime update carried no changes").
+    """
     voice_config = replace(agent.kwami_config.voice)
     changed = apply_realtime_fields(voice_config, config)
+    if voice_config.pipeline_type == HYBRID_PIPELINE:
+        changed |= {f for f in apply_standard_fields(voice_config, config) if f.startswith("tts_")}
 
     if not changed:
         logger.debug("Realtime update carried no changes")
@@ -289,6 +363,7 @@ async def switch_pipeline(
     voice_config = replace(agent.kwami_config.voice)
     voice_config.pipeline_type = target
     apply_realtime_fields(voice_config, config)
+    apply_standard_fields(voice_config, config)
 
     logger.info("Switching pipeline: %s -> %s", agent.kwami_config.voice.pipeline_type, target)
     _rebuild(session, state, agent, voice_config, vad, create_agent_fn)

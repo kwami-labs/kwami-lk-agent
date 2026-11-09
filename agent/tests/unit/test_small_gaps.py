@@ -163,3 +163,15 @@ async def test_an_agent_on_its_way_out_does_not_count(caplog) -> None:
 
 async def test_an_empty_room_is_not_a_duplicate() -> None:
     assert await should_disconnect_as_duplicate(RoomWith(), "agent-1") is False
+
+
+def test_all_thirty_gemini_live_voices_are_accepted() -> None:
+    """The plugin's `Voice` literal is the list the server accepts."""
+    from typing import get_args
+
+    from livekit.plugins.google.realtime.api_proto import Voice
+
+    from src.constants import RealtimeVoices, resolve_realtime_voice
+
+    assert set(get_args(Voice)) == RealtimeVoices.GOOGLE
+    assert resolve_realtime_voice("google", "iapetus") == "Iapetus"

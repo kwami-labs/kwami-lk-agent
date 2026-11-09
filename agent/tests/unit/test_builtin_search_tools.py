@@ -16,6 +16,7 @@ is about what happens when the upstream is unhelpful rather than when it works:
 from __future__ import annotations
 
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -251,15 +252,43 @@ async def test_the_432_body_is_not_repeated_to_the_user() -> None:
 
 
 @respx.mock
-async def test_an_unexpected_status_reports_the_provider_message() -> None:
+async def test_an_unexpected_status_keeps_the_providers_message_to_itself() -> None:
     respx.post(TAVILY).mock(return_value=httpx.Response(500, json={"message": "boom"}))
-    assert "boom" in await Tools().web_search(None, "kwami")
+    result = await Tools().web_search(None, "kwami")
+    assert "boom" not in result
+    assert "temporarily unavailable" in result
 
 
 @respx.mock
 async def test_a_network_failure_is_a_sentence_not_an_exception() -> None:
     respx.post(TAVILY).mock(side_effect=httpx.ConnectError("dns"))
-    assert "Search failed" in await Tools().web_search(None, "kwami")
+    assert "temporarily unavailable" in await Tools().web_search(None, "kwami")
+
+
+@respx.mock
+@pytest.mark.parametrize("status", [402, 433])
+async def test_a_spent_plan_is_called_that(status: int) -> None:
+    respx.post(TAVILY).mock(return_value=httpx.Response(status, json={}))
+    assert "no credit left" in await Tools().web_search(None, "kwami")
+
+
+@respx.mock
+async def test_tavily_failing_moves_the_search_to_serpapi() -> None:
+    respx.post(TAVILY).mock(return_value=httpx.Response(432, json={}))
+    respx.get("https://serpapi.com/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "organic_results": [
+                    {"title": "Kwami", "link": "https://kwami.io", "snippet": "a companion"}
+                ]
+            },
+        )
+    )
+    with patch("src.tools.web_fallback.get_settings", return_value=MagicMock(serpapi_key="k")):
+        result = await Tools().web_search(None, "kwami")
+    assert "Kwami" in result
+    assert "unavailable" not in result
 
 
 @respx.mock

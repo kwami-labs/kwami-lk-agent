@@ -21,6 +21,7 @@ const baseEnv = {
   KWAMI_API_URL: "https://api.example.com",
   KWAMI_API_TIMEOUT: "30.0",
   KWAMI_ALLOW_BROWSER_JS: "false",
+  KWAMI_HEADLESS_ALLOW_NO_SANDBOX: "false",
   KWAMI_BROWSER_PROVIDER: "browserbase",
 } as unknown as Env;
 

@@ -3,10 +3,10 @@
 import asyncio
 from pathlib import Path
 
-from dotenv import load_dotenv
+from .envfile import load_env_file
 
-# Load .env from the root directory
-load_dotenv(Path(__file__).parent.parent.parent / ".env")
+# Load .env from the root directory (skipped while git-crypt keeps it locked)
+load_env_file(Path(__file__).parent.parent.parent / ".env")
 
 from livekit import rtc
 from livekit.agents import (
@@ -18,7 +18,10 @@ from livekit.agents import (
     room_io,
 )
 
-from .domain import KwamiConfig
+from .adapters.publisher import LiveKitRoomPublisher
+from .brain import Bridge
+from .brain.cloud import cloud_worker
+from .factories.audio import prewarm_resampler
 from .factories.vad import prewarm_vad
 from .health import heartbeat_path, run_heartbeat, write_heartbeat
 from .runtime import (
@@ -28,9 +31,14 @@ from .runtime import (
     apply_runtime_config,
     decode_data_message,
     resolve_identity_on_join,
-    route_metrics,
 )
+from .runtime.away import USER_AWAY_SECONDS, PhoneAwayWatcher
+from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
+from .runtime.recovery import install_realtime_rescue
+from .runtime.thinking_sound import ThinkingSound
+from .runtime.turn_metrics import TurnMetricsRelay
+from .runtime.turn_taking import noise_cancellation_selector, session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
 from .session import create_session_state
 from .settings import Settings, get_settings, set_settings
@@ -41,7 +49,7 @@ from .utils.logging import (
     get_logger,
     session_context,
 )
-from .utils.room import resolve_user_identity
+from .utils.room import is_agent_participant, resolve_user_identity
 
 logger = get_logger()
 
@@ -54,15 +62,24 @@ configure_logging()
 configure_tracing()
 logger.info("Settings resolved: %s", get_settings().describe())
 
-server = AgentServer()
+# A delegated task still running when the call ends is finished, not dropped
+# (brain/bridge.py). on_session_end is where that waits, so it gets the time.
+BRAIN_DRAIN_SECONDS = 840.0
+server = AgentServer(session_end_timeout=BRAIN_DRAIN_SECONDS + 60.0)
+
+#: Bridges by room, for `on_session_end`, which only receives the JobContext.
+_bridges: dict[str, Bridge] = {}
 
 # Strong reference to the heartbeat task: the loop holds only a weak one, and a
 # collected heartbeat would read to the probe as a dead worker.
 _heartbeat_task: asyncio.Task | None = None
+#: The brain's cloud work thread, when this deployment runs one (KWAMI_CLOUD_WORKER).
+_cloud_task: asyncio.Task | None = None
 
 
 def prewarm(proc: JobProcess) -> None:
-    """Prewarm the VAD model for faster startup."""
+    """Prewarm soxr's FFT cache and the VAD model before any session starts."""
+    prewarm_resampler()
     proc.userdata["vad"] = prewarm_vad()
 
 
@@ -84,8 +101,6 @@ def _on_worker_registered(*_args: object) -> None:
     global _heartbeat_task
 
     write_heartbeat("registered")
-    if _heartbeat_task is not None and not _heartbeat_task.done():
-        return
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
@@ -95,11 +110,62 @@ def _on_worker_registered(*_args: object) -> None:
         # an event handler where the traceback goes nowhere useful.
         logger.warning("worker_registered fired outside the event loop; no heartbeat started")
         return
+    _start_cloud_worker(loop)
+    if _heartbeat_task is not None and not _heartbeat_task.done():
+        return
     _heartbeat_task = loop.create_task(run_heartbeat(), name="health_heartbeat")
     logger.info("Health heartbeat started at %s", heartbeat_path())
 
 
-@server.rtc_session(agent_name="kwami-agent")
+def _start_cloud_worker(loop: asyncio.AbstractEventLoop) -> None:
+    """Run the brain's cloud work thread beside the calls, once per process.
+
+    It lives in the worker's own process, not in a job: a job ends with its call,
+    and this has to keep going while the user's PC is off. A reconnect fires
+    `worker_registered` again, so the guard keeps it single.
+    """
+    global _cloud_task
+
+    if _cloud_task is not None and not _cloud_task.done():
+        return
+    worker = cloud_worker()
+    if worker is None:
+        return
+    _cloud_task = loop.create_task(worker.run_forever(asyncio.Event()), name="brain_cloud")
+    logger.info("Brain cloud work thread started as %s", worker.runner_id)
+
+
+#: How long to wait for the app's config before asking for it, and how often.
+CONFIG_REQUEST_AFTER_SECONDS = 4.0
+CONFIG_REQUEST_ATTEMPTS = 3
+
+
+async def _request_config_if_missing(state, room) -> None:
+    """Ask the app to resend its config if it has not arrived.
+
+    Telephony sessions (a kwami_id from the dispatch) get theirs from the API
+    instead and never reach this.
+    """
+    publisher = LiveKitRoomPublisher(room)
+    for attempt in range(CONFIG_REQUEST_ATTEMPTS):
+        await asyncio.sleep(CONFIG_REQUEST_AFTER_SECONDS)
+        if state.config_received:
+            return
+        logger.warning(
+            "No config from the app after %.0fs; asking for it (attempt %d)",
+            CONFIG_REQUEST_AFTER_SECONDS * (attempt + 1),
+            attempt + 1,
+        )
+        await publisher.publish({"type": "config_request"})
+
+
+async def _close_brain(ctx: JobContext) -> None:
+    bridge = _bridges.pop(ctx.room.name, None)
+    if bridge is not None:
+        await bridge.close(timeout=BRAIN_DRAIN_SECONDS)
+
+
+@server.rtc_session(agent_name=get_settings().agent_name, on_session_end=_close_brain)
 async def entrypoint(ctx: JobContext) -> None:
     """Main entry point for Kwami agent sessions.
 
@@ -127,15 +193,38 @@ async def _run_session(ctx: JobContext) -> None:
     # Skip greeting -- this is a placeholder agent until the frontend sends
     # the real config via the "config" data message. The configured agent
     # will greet properly with the correct persona, voice, and memory.
-    config = KwamiConfig()
+    # Without an app (Console, phone) this IS the agent: its voice comes from
+    # the KWAMI_DEFAULT_* secrets and the job metadata (runtime/defaults.py).
+    config = placeholder_config(job_metadata=getattr(ctx.job, "metadata", None))
     initial_agent = create_agent_from_config(config, vad, skip_greeting=True)
 
     # Create session and state
     # Dependencies live on the session's userdata, which the framework threads
     # into every tool's RunContext. This is what replaces the ContextVar the
     # tools used to hunt the room through.
-    deps = AgentDeps(settings=get_settings(), room=ctx.room)
-    session = AgentSession(userdata=deps)
+    settings = get_settings()
+    deps = AgentDeps(settings=settings, room=ctx.room)
+    deps.bridge = Bridge(
+        keys=settings.provider_keys, tavily_key=settings.tavily_api_key, settings=settings
+    )
+    _bridges[ctx.room.name] = deps.bridge
+    # Turn-taking tuned for Spanish: multilingual end-of-turn detection,
+    # learned endpointing and early LLM generation (runtime/turn_taking.py).
+    session = AgentSession(
+        userdata=deps,
+        turn_handling=session_turn_handling(),
+        # When the user counts as away; the phone hang-up below acts on it.
+        user_away_timeout=USER_AWAY_SECONDS,
+    )
+
+    def build_agent(config, vad, memory=None, skip_greeting=False):
+        """Build on the keys this user connected, and report those parts as theirs."""
+        config.voice.user_keys = deps.bridge.voice_keys
+        own_keys = deps.bridge.voice_key_providers
+        state.usage_tracker.mark_own_keys(own_keys)
+        logger.info("Voice on the user's own keys: %s", sorted(own_keys) or "none")
+        return create_agent_from_config(config, vad, memory, skip_greeting=skip_greeting)
+
     state = create_session_state(
         initial_agent=initial_agent,
         user_identity=user_identity,
@@ -152,25 +241,37 @@ async def _run_session(ctx: JobContext) -> None:
     deps.reconfigure = Reconfigurator(
         state=state,
         vad=vad,
-        create_agent_fn=create_agent_from_config,
+        create_agent_fn=build_agent,
     )
 
-    # Wire up metrics events for usage tracking
-    @session.on("metrics_collected")
-    def on_metrics(event):
-        route_metrics(state.usage_tracker, event.metrics)
+    # Usage tracking. `metrics_collected` is deprecated from livekit-agents 1.8;
+    # this event carries the session's running totals per model instead.
+    # A realtime model that dies for good moves the call to the standard
+    # pipeline instead of closing it (runtime/recovery.py).
+    install_realtime_rescue(session, state, vad, build_agent, LiveKitRoomPublisher(ctx.room))
+
+    @session.on("session_usage_updated")
+    def on_usage(event):
+        state.usage_tracker.on_session_usage(event.usage)
+
+    # Each reply's latency, per stage, to the app's Metrics panel
+    # (runtime/turn_metrics.py). Session-wide: it outlives agent swaps.
+    turn_metrics = TurnMetricsRelay(LiveKitRoomPublisher(ctx.room))
+    session.on("conversation_item_added", turn_metrics.on_conversation_item_added)
 
     # Routing lives in runtime.dispatch so each branch is reachable from a test.
     router = DataMessageRouter(
         session=session,
         state=state,
         vad=vad,
-        create_agent_fn=create_agent_from_config,
+        create_agent_fn=build_agent,
         room=ctx.room,
         # So a tool invoked from a data message reaches the same AgentDeps a
         # tool invoked from a model turn does.
         deps=deps,
     )
+
+    state.user_keys_ready = deps.bridge.keys_ready
 
     def handle_data(data: rtc.DataPacket) -> None:
         message = decode_data_message(data.data)
@@ -185,6 +286,24 @@ async def _run_session(ctx: JobContext) -> None:
 
     # Register cleanup for when the session ends
     ctx.add_shutdown_callback(state.cleanup)
+
+    # A caller who goes quiet on the phone is asked once, then the line is
+    # freed -- never while the brain is working for them (runtime/away.py).
+    away = PhoneAwayWatcher(
+        session,
+        ctx.room,
+        working=lambda: deps.bridge.working,
+        end_call=ctx.delete_room,
+    )
+
+    @session.on("user_state_changed")
+    def on_user_state(event):
+        away.on_user_state_changed(event)
+
+    async def _stop_away_watch() -> None:
+        away.close()
+
+    ctx.add_shutdown_callback(_stop_away_watch)
 
     # Telephony sessions get their persona from the Kwami API. Neither the id
     # resolution nor the fetch needs the session, so start the fetch NOW and
@@ -205,14 +324,55 @@ async def _run_session(ctx: JobContext) -> None:
         agent=initial_agent,
         room=ctx.room,
         room_options=room_io.RoomOptions(
-            audio_input=True,
+            audio_input=room_io.AudioInputOptions(
+                # Noise and background voices out before the VAD, the turn
+                # detector, the STT or a realtime model hear them; otherwise
+                # they read as the user talking and cut the agent off.
+                noise_cancellation=noise_cancellation_selector(
+                    lambda: (
+                        state.current_agent.kwami_config.voice
+                        if state.current_agent is not None
+                        else None
+                    )
+                ),
+                # The browser already levels the microphone. A second gain
+                # stage here lifted the room's noise floor in every pause --
+                # exactly the audio that trips the VAD.
+                auto_gain_control=False,
+            ),
             audio_output=True,
+            # The camera or a shared screen, when the app publishes one, goes
+            # to a realtime model that can see (Gemini Live): the "Audio +
+            # Video" mode. A standard pipeline ignores it.
+            video_input=True,
         ),
     )
 
+    deps.bridge.attach(session, LiveKitRoomPublisher(ctx.room))
+
+    # A soft keyboard while the agent thinks, if the user switched it on in the
+    # Enhancements panel; read live, so it applies from the next turn.
+    thinking_sound = ThinkingSound(
+        lambda: bool(
+            state.current_agent is not None
+            and state.current_agent.kwami_config.voice.thinking_sound
+        )
+    )
+    thinking_sound.attach(ctx.room, session)
+
+    @session.on("agent_state_changed")
+    def on_agent_state(event):
+        thinking_sound.on_agent_state_changed(event)
+
+    ctx.add_shutdown_callback(thinking_sound.aclose)
+
     # Now that the room is connected, the participant list is real.
+    participant_identity = resolve_user_identity(ctx.room)
     if not state.user_identity:
-        state.user_identity = resolve_user_identity(ctx.room)
+        state.user_identity = participant_identity
+    # The app's token names the participant after the Supabase user. The
+    # brain's ledger and file uploads are keyed on it.
+    deps.bridge.set_user(participant_identity or "")
     logger.info(
         "Room connected with %d remote participant(s); user identity: %s",
         len(ctx.room.remote_participants),
@@ -224,17 +384,24 @@ async def _run_session(ctx: JobContext) -> None:
         # A human can join after the agent; without this the session would
         # finish with no user_identity and its usage would never be billed.
         resolve_identity_on_join(state, participant)
+        if not is_agent_participant(participant):
+            deps.bridge.set_user(participant.identity or "")
 
     await apply_runtime_config(
         session,
         state,
         vad,
-        create_agent_from_config,
+        build_agent,
         runtime_config_task,
         kwami_id,
     )
 
     logger.info("Kwami session started")
+
+    # The app's config can be lost if it was sent before this agent was in the
+    # room. Rather than talk as the placeholder, ask for it again.
+    if not kwami_id:
+        state.spawn(_request_config_if_missing(state, ctx.room), name="config_request")
 
 
 if __name__ == "__main__":  # pragma: no cover - process entry point

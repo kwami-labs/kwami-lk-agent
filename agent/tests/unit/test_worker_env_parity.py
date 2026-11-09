@@ -37,6 +37,23 @@ ALLOWED_ABSENT = {
     # in the container image, so forwarding the variable would point the Google
     # SDK at nothing. GOOGLE_API_KEY is the supported route on this target.
     "GOOGLE_APPLICATION_CREDENTIALS",
+    # Where the brain's executor works. Its "auto" default already picks the
+    # cloud mode in any container, which is the only mode that makes sense here.
+    "KWAMI_EXECUTOR_MODE",
+    # Where the agent keeps its state. This target forwards KWAMI_API_URL, and
+    # the "auto" default then uses the API, which is what this target is for.
+    "KWAMI_STORAGE",
+    # A knob for a local test worker, so it does not answer real calls. A
+    # deployed worker must keep the default dispatch name the API routes to.
+    "KWAMI_AGENT_NAME",
+    # Self-improvement runs on the user's PC only: the cloud must not hold GitHub
+    # credentials, so a container has no use for whose repositories they are.
+    "KWAMI_SELF_REPO_OWNER",
+    # A path inside the image, set by the Dockerfile that installs the browser.
+    "KWAMI_HEADLESS_CHROMIUM",
+    # One user's token for the work thread on their own PC: a container serves
+    # everyone, and the thread never runs there.
+    "KWAMI_GOOGLE_WORK_TOKEN",
 }
 
 

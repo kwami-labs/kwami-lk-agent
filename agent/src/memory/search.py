@@ -4,6 +4,7 @@ Provides typed entity search, user identity extraction, and
 general graph querying capabilities.
 """
 
+import asyncio
 import re
 from collections import Counter
 from typing import TYPE_CHECKING
@@ -14,55 +15,86 @@ if TYPE_CHECKING:
     from zep_cloud.client import AsyncZep
 
 
-async def search_thread(
+#: How much of an entity's summary a recall result carries.
+MAX_RECALL_SUMMARY_CHARS = 280
+
+
+def _fact_line(edge) -> str | None:
+    fact = getattr(edge, "fact", None)
+    if not fact:
+        return None
+    invalid_at = getattr(edge, "invalid_at", None)
+    if invalid_at:
+        return f"{fact} (no longer true since {invalid_at})"
+    return fact
+
+
+async def recall(
     client: "AsyncZep",
-    session_id: str,
+    user_id: str,
     query: str,
-    limit: int = 5,
-    user_id: str = "",
+    limit: int = 8,
 ) -> list[dict]:
-    """Search a user's memories for relevant context.
+    """Facts and entities about `query`, best first.
 
-    Args:
-        client: The async Zep client.
-        session_id: The thread/session ID, reported back on each result.
-        query: Search query.
-        limit: Maximum number of results.
-        user_id: The Zep user whose graph is searched. Required.
-
-    Returns:
-        List of search results with content and score.
+    The search this replaced looked at facts only, five at a time, so asking about a
+    person or a project returned scattered edges and never the entity's own
+    summary -- usually the most useful thing Zep holds about it. Both are
+    searched here, side by side, reranked by Zep's cross-encoder. A fact that
+    has stopped being true says so instead of being presented as current.
     """
     if not user_id:
-        logger.warning("search_thread called without a user_id; cannot search the graph")
+        logger.warning("recall called without a user_id; cannot search the graph")
         return []
 
-    try:
-        # zep-cloud has no `thread.search`. Recall is served by the user's
-        # knowledge graph, which is where facts actually live -- the old call
-        # raised AttributeError every time, so `recall_memories` always
-        # answered "I don't have any memories about that yet".
-        results = await client.graph.search(
+    edges_result, nodes_result = await asyncio.gather(
+        client.graph.search(
             user_id=user_id,
             query=query,
             scope="edges",
+            reranker="cross_encoder",
             limit=limit,
-        )
+        ),
+        client.graph.search(
+            user_id=user_id,
+            query=query,
+            scope="nodes",
+            reranker="cross_encoder",
+            limit=max(2, limit // 2),
+        ),
+        return_exceptions=True,
+    )
 
-        edges = getattr(results, "edges", None) or []
-        return [
-            {
-                "content": fact,
-                "score": getattr(edge, "score", 0) or 0,
-                "thread_id": session_id,
-            }
-            for edge in edges
-            if (fact := getattr(edge, "fact", None))
-        ]
-
-    except Exception as e:
-        logger.error("Failed to search memories: %s", e)
-        return []
+    results: list[dict] = []
+    if isinstance(edges_result, BaseException):
+        logger.error("Failed to search facts: %s", edges_result)
+    else:
+        for edge in getattr(edges_result, "edges", None) or []:
+            line = _fact_line(edge)
+            if line:
+                results.append(
+                    {"content": line, "score": getattr(edge, "score", 0) or 0, "kind": "fact"}
+                )
+    if isinstance(nodes_result, BaseException):
+        logger.error("Failed to search entities: %s", nodes_result)
+    else:
+        for node in getattr(nodes_result, "nodes", None) or []:
+            name = getattr(node, "name", None)
+            summary = " ".join((getattr(node, "summary", None) or "").split())
+            if not name or not summary:
+                continue
+            if name == user_id or name.lower().startswith("kwami_"):
+                # The user's own node is named after their Zep id until they
+                # have a first name on record; the model should not read ids.
+                name = "The user"
+            results.append(
+                {
+                    "content": f"{name}: {summary[:MAX_RECALL_SUMMARY_CHARS]}",
+                    "score": getattr(node, "score", 0) or 0,
+                    "kind": "entity",
+                }
+            )
+    return results
 
 
 async def get_entities_by_type(
@@ -147,22 +179,37 @@ _EXCLUDED_NAMES = {
     "i",
 }
 
-# Regex patterns for extracting names from facts (ordered by confidence)
+#: One word of a name, accents included ("José", "Zoë").
+_NAME = r"([A-ZÀ-ÖØ-Þ][a-zß-öø-ÿ]+)"
+#: A straight or typographic apostrophe (U+2019), as transcripts use either.
+_APOSTROPHE = "['" + chr(0x2019) + "]"
+
+# Regex patterns for extracting names from facts (ordered by confidence).
+# The kwami speaks the user's language, so their own words reach the graph in
+# it: "Me llamo Daniel" must count as much as "My name is Daniel".
 _NAME_PATTERNS = [
-    r"(?:user'?s?\s+)?name\s+is\s+([A-Z][a-z]+)",
-    r"(?:i'?m|i am|my name is)\s+([A-Z][a-z]+)",
-    r"called\s+([A-Z][a-z]+)",
-    r"goes by\s+([A-Z][a-z]+)",
-    r"identified (?:as|themselves as)\s+([A-Z][a-z]+)",
-    r"introduced (?:as|themselves as)\s+([A-Z][a-z]+)",
-    r"([A-Z][a-z]+)\s+(?:is the user|is the human)",
-    r"the user(?:'s name)? is\s+([A-Z][a-z]+)",
+    rf"(?:user'?s?\s+)?name\s+is\s+{_NAME}",
+    rf"(?:i'?m|i am|my name is|my name's)\s+{_NAME}",
+    rf"called\s+{_NAME}",
+    rf"goes by\s+{_NAME}",
+    rf"identified (?:as|themselves as)\s+{_NAME}",
+    rf"introduced (?:as|themselves as)\s+{_NAME}",
+    rf"{_NAME}\s+(?:is the user|is the human)",
+    rf"the user(?:'s name)? is\s+{_NAME}",
+    # es / pt / it / fr
+    rf"(?:me llamo|mi nombre es|ll[aá]mame|se llama|su nombre es)\s+{_NAME}",
+    rf"(?:chamo-me|o meu nome [eé]|meu nome [eé]|me chamo)\s+{_NAME}",
+    rf"(?:mi chiamo|il mio nome [eè]|si chiama)\s+{_NAME}",
+    rf"(?:je m{_APOSTROPHE}appelle|mon nom est|s{_APOSTROPHE}appelle)\s+{_NAME}",
 ]
 
-# Pattern for facts starting with a capitalized name followed by a verb
+# Pattern for facts starting with a capitalized name followed by a verb, in
+# the languages the kwami speaks. Zep writes its own summaries in English.
 _NAME_VERB_PATTERN = re.compile(
-    r"^([A-Z][a-z]+)\s+(?:has|wants|likes|said|asked|mentioned|is|"
-    r"intends|lives|works|prefers|enjoys)"
+    rf"^{_NAME}\s+(?:has|wants|likes|said|asked|mentioned|is|intends|lives|works|"
+    r"prefers|enjoys|tiene|quiere|vive|trabaja|prefiere|es|est[aá]|dijo|pidi[oó]|"
+    r"tem|quer|mora|trabalha|prefere|[eé]|ha|vuole|vive|lavora|preferisce|"
+    r"a|veut|habite|travaille|pr[eé]f[eè]re|est)\b"
 )
 
 
@@ -176,6 +223,14 @@ def _is_valid_name(name: str, extra_excluded: set[str] | None = None) -> bool:
     return name[0].isupper() and name.isalpha()
 
 
+def _name_from_summary(summary: str, extra_excluded: set[str]) -> str | None:
+    """The name a summary of the user opens with: "Daniel lives in Valencia..."."""
+    match = _NAME_VERB_PATTERN.match(" ".join((summary or "").split()))
+    if match and _is_valid_name(match.group(1), extra_excluded):
+        return match.group(1)
+    return None
+
+
 def _extract_name_from_fact(fact: str, extra_excluded: set[str] | None = None) -> str | None:
     """Extract a user name from a fact string using regex patterns."""
     if not fact:
@@ -184,7 +239,8 @@ def _extract_name_from_fact(fact: str, extra_excluded: set[str] | None = None) -
     for pattern in _NAME_PATTERNS:
         match = re.search(pattern, fact, re.IGNORECASE)
         if match:
-            name = match.group(1).capitalize()
+            name = match.group(1)
+            name = name[0].upper() + name[1:]
             if _is_valid_name(name, extra_excluded):
                 return name
 
@@ -212,6 +268,19 @@ async def get_user_name(
         The user's name if found, None otherwise.
     """
     extra_excluded = {"kwami", kwami_name.lower()}
+
+    # Strategy 0: the user's own node. Zep keeps one per user and summarises
+    # what it knows of them -- in English, opening with their name once it has
+    # one ("Daniel lives in Valencia..."). One call, and it understood whatever
+    # language the user spoke.
+    try:
+        user_node = getattr(await client.user.get_node(user_id), "node", None)
+        name = _name_from_summary(getattr(user_node, "summary", "") or "", extra_excluded)
+        if name:
+            logger.info("Found user name from the user node: %s", redacted(name, keep=1))
+            return name
+    except Exception as e:
+        logger.debug("Could not read the user node: %s", e)
 
     # Strategy 1: Search for name-specific facts
     name_queries = [

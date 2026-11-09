@@ -94,4 +94,6 @@ def test_get_user_context_supports_the_template_free_call(client: AsyncZep) -> N
     params = inspect.signature(client.thread.get_user_context).parameters
     assert "template_id" in params
     assert params["template_id"].default is None
-    assert "min_rating" in params
+    # Gone in zep-cloud 3.28: the fallback must not pass them.
+    assert "min_rating" not in params
+    assert "mode" not in params

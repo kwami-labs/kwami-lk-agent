@@ -1,5 +1,6 @@
 """Tools for Kwami agent."""
 
+from .brain import BrainToolsMixin
 from .builtin import AgentToolsMixin
 from .client import ClientToolManager
 from .knowledge import KnowledgeToolsMixin
@@ -9,6 +10,7 @@ from .trading import TradingToolsMixin
 
 __all__ = [
     "AgentToolsMixin",
+    "BrainToolsMixin",
     "ClientToolManager",
     "KnowledgeToolsMixin",
     "MediaToolsMixin",

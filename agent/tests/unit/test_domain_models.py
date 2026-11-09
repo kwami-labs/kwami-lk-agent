@@ -103,7 +103,7 @@ def test_longest_alias_wins() -> None:
 def test_realtime_resolves_against_the_speech_to_speech_families() -> None:
     choice = resolve_model("gemini", current_provider="openai", realtime=True)
     assert choice.provider == "google"
-    assert choice.model == "gemini-2.0-flash-exp"
+    assert choice.model == "gemini-3.8-live"
 
 
 def test_realtime_does_not_offer_a_chat_only_provider() -> None:

@@ -80,6 +80,29 @@ DEFAULT_ENTITY_TYPES: list[dict] = [
             "detail": "Description of the procedure or workflow steps",
         },
     },
+    {
+        "name": "Task",
+        "description": (
+            "Something the user has to do or asked to be done: a to-do, an errand, a "
+            "commitment or a reminder, usually with a moment it is due. Not a long-running "
+            "Project and not a Goal."
+        ),
+        "fields": {
+            "due": "When it is due or should happen (e.g., tomorrow 9:00, before Friday)",
+            "status": "Whether it is pending, done or cancelled",
+        },
+    },
+    {
+        "name": "Asset",
+        "description": (
+            "A financial instrument or holding the user owns, trades or follows: a stock, "
+            "a fund, a cryptocurrency, a currency pair, an account."
+        ),
+        "fields": {
+            "symbol": "Ticker or symbol, if any (e.g., AAPL, BTC, EURUSD)",
+            "position": "The user's position or interest (e.g., holds, watching, sold)",
+        },
+    },
 ]
 
 
@@ -104,18 +127,22 @@ DEFAULT_EDGE_TYPES: list[dict] = [
         "name": "WORKS_AT",
         "description": "Employment or work relationship with an organization.",
         "fields": {
-            "role": "The user's role or position at the organization",
+            "role": "The role or position at the organization",
         },
         "source": "User",
+        # The people in the user's life work somewhere too; without this their
+        # employer could only hang off the user.
+        "also_from": ["Person"],
         "target": "Organization",
     },
     {
         "name": "LIVES_IN",
-        "description": "The user's current residence or location.",
+        "description": "Where someone currently lives.",
         "fields": {
             "detail": "Details about living arrangement or duration",
         },
         "source": "User",
+        "also_from": ["Person"],
         "target": "Location",
     },
     {
@@ -129,11 +156,12 @@ DEFAULT_EDGE_TYPES: list[dict] = [
     },
     {
         "name": "WORKING_ON",
-        "description": "Projects or tasks the user is actively working on.",
+        "description": "Projects someone is actively working on.",
         "fields": {
-            "detail": "Details about the user's involvement",
+            "detail": "Details about the involvement",
         },
         "source": "User",
+        "also_from": ["Person"],
         "target": "Project",
     },
     {
@@ -162,6 +190,24 @@ DEFAULT_EDGE_TYPES: list[dict] = [
         },
         "source": "User",
         # No target - preferences can be about anything
+    },
+    {
+        "name": "HAS_TASK",
+        "description": "Something the user has to do, or asked the assistant to do or remind them of.",
+        "fields": {
+            "detail": "What it involves",
+        },
+        "source": "User",
+        "target": "Task",
+    },
+    {
+        "name": "HOLDS",
+        "description": "A financial asset the user owns, trades or watches.",
+        "fields": {
+            "detail": "Size, entry, intent or anything else said about the position",
+        },
+        "source": "User",
+        "target": "Asset",
     },
 ]
 
@@ -248,7 +294,7 @@ def _build_edge_models(
         name = edge["name"]
         desc = edge.get("description", name)
         fields = edge.get("fields", {})
-        source = edge.get("source", "User")
+        sources = [edge.get("source", "User"), *edge.get("also_from", [])]
         target = edge.get("target")
 
         # Build annotations and field defaults
@@ -273,12 +319,15 @@ def _build_edge_models(
             },
         )
 
-        # Build source/target constraint
-        constraint_kwargs = {"source": source}
-        if target:
-            constraint_kwargs["target"] = target
+        # One source/target constraint per source the edge may start from.
+        constraints = []
+        for source in sources:
+            constraint_kwargs = {"source": source}
+            if target:
+                constraint_kwargs["target"] = target
+            constraints.append(EntityEdgeSourceTarget(**constraint_kwargs))
 
-        edges[name] = (model_cls, [EntityEdgeSourceTarget(**constraint_kwargs)])
+        edges[name] = (model_cls, constraints)
 
     return edges
 

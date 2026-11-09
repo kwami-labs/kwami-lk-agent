@@ -14,24 +14,51 @@ Key improvements over monolithic memory.py:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..constants import Timeouts
 from ..domain import KwamiMemoryConfig
-from .context import MemoryContext, get_context, setup_context_template
+from .context import (
+    ContextBudget,
+    LastConversation,
+    MemoryContext,
+    budget_for,
+    get_context,
+    load_last_conversation,
+    setup_shared_template,
+)
 from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
     get_user_name,
-    search_thread,
+    recall,
 )
 from .utils import get_zep_imports, logger, redacted
 
 if TYPE_CHECKING:
     from zep_cloud.client import AsyncZep
+
+
+#: Stamped on the Zep user's metadata once the default ontology is applied, so
+#: later sessions know not to apply it again. Bump it when the default entity or
+#: edge types change, and every graph still on the old defaults is updated on
+#: its next session. The value "custom" means the user set their own ontology in
+#: the panel, which is never overwritten.
+ONTOLOGY_METADATA_KEY = "kwami_ontology"
+ONTOLOGY_VERSION = "2026-11-2"
+CUSTOM_ONTOLOGY = "custom"
+
+# What this worker process has already done, so a user's second session -- or
+# a reconnect -- does not pay for it again. Sets of Zep user ids and template ids.
+_ONTOLOGY_SETTLED: set[str] = set()
+_TEMPLATES_READY: set[str] = set()
+
+#: Exchanges between refreshes of the memory block while a session runs.
+REFRESH_EVERY_EXCHANGES = 3
 
 
 class KwamiMemory:
@@ -70,6 +97,21 @@ class KwamiMemory:
 
         # Cached user name (avoid repeated lookups)
         self._cached_user_name: str | None = None
+        # Writes that must not hold up a reply, kept so they are not collected.
+        self._background: set[asyncio.Task] = set()
+
+        # Whether this session's thread exists in Zep yet; it is created with
+        # the first write, under the lock so two writes cannot both create it.
+        self._thread_ready = False
+        self._thread_lock = asyncio.Lock()
+
+        # The previous session's ending, read once per session.
+        self._last_conversation: LastConversation | None = None
+        self._last_conversation_loaded = False
+        # Exchanges written to this session's thread, and whether the memory
+        # block in the prompt is due to be read again.
+        self._exchanges = 0
+        self._refresh_due = False
 
     # ========================================================================
     # Properties
@@ -94,6 +136,14 @@ class KwamiMemory:
     def session_id(self) -> str | None:
         """The Zep thread ID, or None before initialize() has assigned one."""
         return self._session_id or None
+
+    @property
+    def budget(self) -> ContextBudget:
+        """How much memory the retrieval preset puts in the prompt.
+
+        Read from the config each time: a live config update changes the knob.
+        """
+        return budget_for(self.config.max_context_messages)
 
     def set_usage_tracker(self, usage_tracker) -> None:
         """Attach the shared session usage tracker."""
@@ -123,6 +173,11 @@ class KwamiMemory:
             logger.warning("Memory is disabled or API key not configured")
             return False
 
+        if not self.config.user_id and self.kwami_id in ("", "default"):
+            # "kwami_default" is a graph every id-less session would share.
+            logger.warning("Memory needs a per-kwami user id; not initializing")
+            return False
+
         AsyncZep, _, _ = get_zep_imports()
         if AsyncZep is None:
             logger.error("zep_cloud not available, disabling memory")
@@ -137,19 +192,25 @@ class KwamiMemory:
             )
             self._user_id = self.config.user_id or f"kwami_{self.kwami_id}"
 
-            await self._ensure_user_exists(self._client)
+            record = await self._ensure_user_exists(self._client)
+            # A name the user gave before is on their Zep record: no graph
+            # search is needed to greet them by it.
+            first_name = getattr(record, "first_name", None) if record is not None else None
+            if isinstance(first_name, str) and first_name.strip():
+                self._cached_user_name = first_name.strip()
 
+            # The thread is created with the first message, not here: a session
+            # that ends before anything is said (a reconnect, a dropped call)
+            # left an empty thread behind -- the live project is full of them --
+            # and paid two Zep round trips for it before the greeting.
             self._session_id = (
                 self.config.session_id or f"session_{self._user_id}_{uuid.uuid4().hex[:8]}"
             )
-            await self._ensure_session_exists(self._client)
 
-            # Configure ontology (entity/edge types) if enabled
             if self.config.configure_ontology:
-                await configure_ontology(self._client, self._user_id)
+                await self._ensure_ontology(self._client, record)
 
-            # Set up context template for structured retrieval
-            self._template_id = await setup_context_template(self._client, self._user_id)
+            self._template_id = await self._ensure_template(self._client)
 
             self._initialized = True
             logger.info(
@@ -165,14 +226,18 @@ class KwamiMemory:
             self._initialized = False
             return False
 
-    async def _ensure_user_exists(self, client: AsyncZep) -> None:
+    async def _ensure_user_exists(self, client: AsyncZep) -> Any:
         """Create user in Zep if it doesn't exist.
 
         The Zep "user" represents the HUMAN user, not the AI assistant.
+
+        Returns the existing record, or None when the user was just created (or
+        created by a concurrent session) and so has no metadata or name yet.
         """
         try:
-            await client.user.get(self._user_id)
+            record = await client.user.get(self._user_id)
             logger.debug("User %s already exists", self._user_id)
+            return record
         except Exception:
             try:
                 await client.user.add(
@@ -185,13 +250,73 @@ class KwamiMemory:
                 )
                 self._record_usage("zep/create_user")
                 logger.info("Created Zep user: %s", self._user_id)
+                return None
             except Exception as e:
                 error_msg = str(e).lower()
                 if "400" in error_msg and "already exists" in error_msg:
                     logger.info("User %s already exists (race condition)", self._user_id)
-                    return
+                    return None
                 logger.error("Failed to create user %s: %s", self._user_id, e)
                 raise
+
+    async def _ensure_ontology(self, client: AsyncZep, record: Any) -> None:
+        """Apply the default ontology once per version, never over a custom one.
+
+        This ran `set_ontology` on every session start: a Zep round trip before
+        the greeting each time, and a replace that silently threw away any
+        ontology the user had set for this kwami in the memory panel. Now the
+        user's Zep metadata records which defaults were applied, and this worker
+        remembers users it has already checked.
+        """
+        if self._user_id in _ONTOLOGY_SETTLED:
+            return
+        metadata = dict(getattr(record, "metadata", None) or {}) if record is not None else {}
+        if metadata.get(ONTOLOGY_METADATA_KEY) in (ONTOLOGY_VERSION, CUSTOM_ONTOLOGY):
+            _ONTOLOGY_SETTLED.add(self._user_id)
+            return
+        if not await configure_ontology(client, self._user_id):
+            return
+        metadata[ONTOLOGY_METADATA_KEY] = ONTOLOGY_VERSION
+        try:
+            await client.user.update(user_id=self._user_id, metadata=metadata)
+        except Exception as e:
+            # Applied but not stamped: the next session applies it again, which
+            # is the old behaviour, not a failure.
+            logger.warning("Could not record the ontology version for %s: %s", self._user_id, e)
+            return
+        _ONTOLOGY_SETTLED.add(self._user_id)
+
+    async def _ensure_template(self, client: AsyncZep) -> str | None:
+        """The context template of the current budget, set up once per worker.
+
+        One template per budget, shared by every user, rather than an identical
+        one per user id.
+        """
+        template_id = self.budget.template_id
+        if template_id in _TEMPLATES_READY:
+            return template_id
+        ready = await setup_shared_template(client, self.budget)
+        if ready:
+            _TEMPLATES_READY.add(ready)
+        return ready
+
+    async def _ensure_thread(self) -> bool:
+        """Make sure this session's thread exists before writing to it."""
+        client = self._client
+        if client is None:
+            return False
+        # Every exit returns inside the block: Python 3.11 attributes the
+        # with-statement's own exit to its first line, so a fall-through arc
+        # out of it is reported as never taken.
+        async with self._thread_lock:
+            if self._thread_ready:
+                return True
+            try:
+                await self._ensure_session_exists(client)
+            except Exception:
+                return False
+            self._thread_ready = True
+            return True
 
     async def _ensure_session_exists(self, client: AsyncZep) -> None:
         """Create thread (session) in Zep if it doesn't exist."""
@@ -293,6 +418,9 @@ class KwamiMemory:
 
         if not messages:
             return
+        if not await self._ensure_thread():
+            logger.error("No thread to store %s messages in; they are lost", len(messages))
+            return
 
         try:
             await self._client.thread.add_messages(
@@ -301,6 +429,11 @@ class KwamiMemory:
                 ignore_roles=["assistant"],
             )
             self._record_usage("zep/add_messages")
+            self._exchanges += 1
+            # The first exchange moves recall from the last session onto this
+            # one; after that, every few exchanges as the talk moves on.
+            if self._exchanges == 1 or self._exchanges % REFRESH_EVERY_EXCHANGES == 0:
+                self._refresh_due = True
             logger.debug(
                 "Added %s messages to memory (user: %s, assistant: %s)",
                 len(messages),
@@ -364,6 +497,9 @@ class KwamiMemory:
             # Use ignore_roles for assistant messages
             ignore_roles = ["assistant"] if role != "system" else None
 
+            if not await self._ensure_thread():
+                logger.error("No thread to store a %s message in", role)
+                return
             await self._client.thread.add_messages(
                 thread_id=self._session_id,
                 messages=[message],
@@ -413,6 +549,9 @@ class KwamiMemory:
                 name=user_name,
                 created_at=now,
             )
+            if not await self._ensure_thread():
+                logger.warning("No thread to flush a pending message into")
+                return
             await client.thread.add_messages(
                 thread_id=self._session_id,
                 messages=[message],
@@ -423,26 +562,59 @@ class KwamiMemory:
             logger.warning("Failed to flush pending message: %s", e)
 
     async def add_fact(self, fact: str) -> None:
-        """Add a fact about the user as a system message.
+        """Write a fact about the user straight into their graph.
 
-        In Zep v3, facts are automatically extracted from messages.
-        This frames the fact as a system message to trigger extraction.
+        This used to be a system message in the conversation thread ("Important
+        information learned: ..."), so every remembered fact also became a line
+        of the transcript -- in the middle of the conversation history the
+        panel shows. `graph.add` hands the text to the same extraction without
+        touching the thread.
 
         Args:
             fact: The fact to add (e.g., "User's name is Alex").
         """
-        await self.add_message(
-            role="system",
-            content=f"Important information learned: {fact}",
-            name="System",
+        if not self._initialized or not self._client:
+            return
+        if not fact or not fact.strip():
+            return
+        await self._client.graph.add(
+            user_id=self._user_id,
+            type="text",
+            data=fact.strip(),
+            source_description=f"Asked to remember by {self.kwami_name}",
         )
+        self._record_usage("zep/add_fact")
+        logger.debug("Added fact to the graph: %s", redacted(fact))
 
     # ========================================================================
     # Context Retrieval
     # ========================================================================
 
+    def take_refresh_due(self) -> bool:
+        """Whether the prompt's memory block should be read again; clears it."""
+        due, self._refresh_due = self._refresh_due, False
+        return due
+
+    async def last_conversation(self) -> LastConversation | None:
+        """The end of the most recent earlier session, read once per session."""
+        if not self._last_conversation_loaded and self._client is not None:
+            self._last_conversation = await load_last_conversation(
+                self._client,
+                self._user_id,
+                self._session_id,
+                self.config.max_context_messages,
+            )
+            self._last_conversation_loaded = True
+        return self._last_conversation
+
     async def get_context(self) -> MemoryContext:
         """Get memory context for LLM injection.
+
+        Until this session has an exchange of its own, its thread is empty, and
+        Zep's context for an empty thread has nothing to be relevant to. So the
+        context is asked relative to the last session that had one, and that
+        session's ending comes along -- what the user and the kwami were in the
+        middle of when they last spoke.
 
         Returns:
             MemoryContext with summary, facts, entities, and recent messages.
@@ -451,16 +623,25 @@ class KwamiMemory:
             return MemoryContext()
 
         try:
+            budget = self.budget
+            template_id = await self._ensure_template(self._client)
+            last = await self.last_conversation()
+            on_last = last is not None and self._exchanges == 0
             context = await get_context(
                 client=self._client,
                 user_id=self._user_id,
-                session_id=self._session_id,
-                template_id=self._template_id,
+                session_id=last.thread_id if on_last and last else self._session_id,
+                template_id=template_id,
                 kwami_name=self.kwami_name,
                 max_messages=self.config.max_context_messages,
                 min_relevance=self.config.min_fact_relevance,
                 include_facts=self.config.include_facts,
+                budget=budget,
+                recent_messages=last.messages if on_last and last else None,
             )
+            if last is not None:
+                context.last_conversation = last.messages
+                context.last_conversation_at = last.ended_at
             # Same rule as graph search: get_context swallows its own errors
             # and returns an empty context, so bill only on a real result.
             if context.has_content():
@@ -486,9 +667,7 @@ class KwamiMemory:
         """
         if not self._initialized or not self._client:
             return []
-        results = await search_thread(
-            self._client, self._session_id, query, limit, user_id=self._user_id
-        )
+        results = await recall(self._client, self._user_id, query, limit)
         # Bill only when the call produced something. The search helper swallows
         # its own exceptions and returns [], so an unconditional record here
         # charged the user for calls that never reached Zep.
@@ -533,6 +712,7 @@ class KwamiMemory:
             self._record_usage("zep/get_user_name")
             if name:
                 self._cached_user_name = name
+                self._in_background(self._store_user_name(name))
             return name
         except Exception as e:
             logger.debug("Could not get user name: %s", e)
@@ -541,12 +721,40 @@ class KwamiMemory:
     def set_user_name(self, name: str) -> None:
         """Manually set the cached user name.
 
-        Useful when the user introduces themselves in conversation.
+        Useful when the user introduces themselves in conversation. The name is
+        also written to the user's Zep record, in the background.
 
         Args:
             name: The user's name.
         """
         self._cached_user_name = name
+        if self._initialized and self._client is not None:
+            self._in_background(self._store_user_name(name))
+
+    async def _store_user_name(self, name: str) -> None:
+        """Keep the name on the user's Zep record.
+
+        Zep names the user's own node in the graph after the record's first
+        name, so this ties "the user" and the name they go by into one entity
+        instead of two -- and the next session reads it with the record it
+        already fetches, instead of searching the graph for it.
+        """
+        client = self._client
+        if client is None:
+            return
+        try:
+            await client.user.update(user_id=self._user_id, first_name=name)
+        except Exception as e:
+            logger.debug("Could not store the user's name on their Zep record: %s", e)
+
+    def _in_background(self, coro: Any) -> None:
+        try:
+            task = asyncio.get_running_loop().create_task(coro)
+        except RuntimeError:
+            coro.close()
+            return
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
 
     # ========================================================================
     # Session Management

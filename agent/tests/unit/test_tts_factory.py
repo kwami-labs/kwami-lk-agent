@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 
 import pytest
+from livekit.agents.utils import is_given
 
 from src.constants import (
     CartesiaVoices,
@@ -145,12 +146,58 @@ def test_a_zero_speed_becomes_the_default() -> None:
 # =============================================================================
 
 
-def test_elevenlabs_goes_through_livekit_inference() -> None:
+def test_elevenlabs_uses_the_plugin_on_our_own_key() -> None:
+    """Inference was the only path, so ELEVEN_API_KEY was never used, and on
+    2026-10-18 Inference no longer knew eleven_turbo_v2_5."""
+    instance = create_tts(
+        voice_config(tts_provider="elevenlabs", tts_voice=ElevenLabsVoices.DEFAULT)
+    )
+
+    assert type(instance).__module__.startswith("livekit.plugins.elevenlabs")
+
+
+def test_elevenlabs_without_a_key_goes_through_livekit_inference(env_setting) -> None:
+    env_setting("ELEVEN_API_KEY", None)
+    env_setting("ELEVENLABS_API_KEY", None)
+
     instance = create_tts(
         voice_config(tts_provider="elevenlabs", tts_voice=ElevenLabsVoices.DEFAULT)
     )
 
     assert type(instance).__module__.startswith("livekit.agents")
+
+
+def test_the_alias_key_spelling_also_reaches_the_plugin(env_setting) -> None:
+    env_setting("ELEVEN_API_KEY", None)
+    env_setting("ELEVENLABS_API_KEY", "alias-key")
+
+    instance = create_tts(voice_config(tts_provider="elevenlabs"))
+
+    assert type(instance).__module__.startswith("livekit.plugins.elevenlabs")
+
+
+@pytest.mark.parametrize(("language", "expected"), [("es", "es"), ("es-ES", "es")])
+def test_elevenlabs_speaks_the_session_language(language: str, expected: str) -> None:
+    """Flash v2.5 guesses the language per sentence; a short Spanish reply came
+    out with English phonetics."""
+    instance = create_tts(voice_config(tts_provider="elevenlabs", stt_language=language))
+
+    assert instance._opts.language == expected
+
+
+def test_elevenlabs_guesses_on_a_multilingual_session() -> None:
+    instance = create_tts(voice_config(tts_provider="elevenlabs", stt_language="multi"))
+
+    assert not is_given(instance._opts.language)
+
+
+def test_inference_elevenlabs_also_gets_the_language(env_setting) -> None:
+    env_setting("ELEVEN_API_KEY", None)
+    env_setting("ELEVENLABS_API_KEY", None)
+
+    instance = create_tts(voice_config(tts_provider="elevenlabs", stt_language="es"))
+
+    assert instance._opts.language == "es"
 
 
 def test_a_short_voice_name_is_rejected_as_an_elevenlabs_id(caplog) -> None:
@@ -174,7 +221,7 @@ def test_an_elevenlabs_model_is_normalised(caplog) -> None:
     with caplog.at_level(logging.INFO):
         create_tts(voice_config(tts_provider="elevenlabs", tts_model="eleven-flash-v2.5"))
 
-    assert "elevenlabs/eleven_flash_v2_5" in caplog.text
+    assert "ElevenLabs plugin: eleven_flash_v2_5" in caplog.text
 
 
 def test_an_elevenlabs_prefix_is_stripped(caplog) -> None:
@@ -231,11 +278,102 @@ def test_a_friendly_cartesia_name_is_mapped_to_its_uuid() -> None:
     assert create_tts(voice_config(tts_provider="cartesia", tts_voice=friendly)) is not None
 
 
+@pytest.mark.parametrize(("language", "expected"), [("es", "es"), ("es-ES", "es")])
+def test_cartesia_speaks_the_session_language(language: str, expected: str) -> None:
+    """The plugin defaults to English; a Spanish voice then sounds foreign."""
+    instance = create_tts(voice_config(tts_provider="cartesia", stt_language=language))
+
+    assert instance._opts.language == expected
+
+
+def test_cartesia_keeps_its_default_on_a_multilingual_session() -> None:
+    instance = create_tts(voice_config(tts_provider="cartesia", stt_language="multi"))
+
+    assert instance._opts.language == "en"
+
+
 def test_a_short_non_uuid_cartesia_voice_falls_back(caplog) -> None:
     with caplog.at_level(logging.WARNING):
         create_tts(voice_config(tts_provider="cartesia", tts_voice="zzz"))
 
     assert "expected UUID format" in caplog.text
+
+
+# =============================================================================
+# Voices designed in LiveKit Cloud ("v_...")
+# =============================================================================
+
+JARVIS_LIVEKIT_VOICE = "v_ZMPWZvfoRpsC"
+
+
+@pytest.mark.parametrize(
+    ("voice", "expected"),
+    [
+        (JARVIS_LIVEKIT_VOICE, True),
+        (f" {JARVIS_LIVEKIT_VOICE} ", True),
+        ("v_", False),
+        ("v_ab", False),
+        ("V_ZMPWZvfoRpsC", False),
+        ("v_ZMPW-ZvfoRpsC", False),
+        (CartesiaVoices.DEFAULT, False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_a_livekit_voice_is_told_by_its_id(voice, expected: bool) -> None:
+    assert tts_module.is_livekit_voice(voice) is expected
+
+
+def test_a_livekit_voice_speaks_through_inference_on_its_model() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="cartesia", tts_model="sonic-3.5", tts_voice=JARVIS_LIVEKIT_VOICE)
+    )
+
+    assert type(instance).__module__.startswith("livekit.agents.inference")
+    assert instance.model == "cartesia/sonic-3.5"
+    assert instance._opts.voice == JARVIS_LIVEKIT_VOICE
+
+
+def test_a_livekit_voice_saved_without_a_model_speaks_on_sonic_3_5() -> None:
+    """LiveKit designs its voices on Sonic 3.5; the plugin default would be Sonic 3.
+
+    The config's own default model is OpenAI's "tts-1": it used to reach the
+    gateway as "cartesia/tts-1", a model that does not exist.
+    """
+    for model in ("", "tts-1", "cartesia/tts-1"):
+        instance = create_tts(
+            voice_config(tts_provider="cartesia", tts_model=model, tts_voice=JARVIS_LIVEKIT_VOICE)
+        )
+        assert instance.model == "cartesia/sonic-3.5", model
+
+
+def test_a_cartesia_voice_with_another_providers_model_speaks_on_sonic_3() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="cartesia", tts_model="tts-1", tts_voice=CartesiaVoices.DEFAULT)
+    )
+
+    assert instance._opts.model == "sonic-3"
+
+
+def test_a_livekit_voice_keeps_the_session_language() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="cartesia", tts_voice=JARVIS_LIVEKIT_VOICE, stt_language="es")
+    )
+
+    assert instance._opts.language == "es"
+
+
+def test_a_livekit_voice_asks_for_no_cartesia_key(env_setting, caplog) -> None:
+    """LiveKit Inference bills the project: no CARTESIA_API_KEY warning for it."""
+    env_setting("CARTESIA_API_KEY", None)
+    with caplog.at_level(logging.WARNING):
+        create_tts(voice_config(tts_provider="cartesia", tts_voice=JARVIS_LIVEKIT_VOICE))
+    assert "CARTESIA_API_KEY" not in caplog.text
+
+    # A Cartesia voice of its own still needs the key, and says so.
+    with caplog.at_level(logging.WARNING):
+        create_tts(voice_config(tts_provider="cartesia", tts_voice=CartesiaVoices.DEFAULT))
+    assert "CARTESIA_API_KEY" in caplog.text
 
 
 def test_deepgram_is_constructed_with_a_known_voice() -> None:
@@ -252,9 +390,20 @@ def test_an_unknown_deepgram_voice_falls_back(caplog) -> None:
 
 
 def test_an_explicit_deepgram_model_wins_over_the_derived_one() -> None:
-    assert (
-        create_tts(voice_config(tts_provider="deepgram", tts_model="aura-2-thalia-en")) is not None
+    instance = create_tts(voice_config(tts_provider="deepgram", tts_model="aura-2-thalia-en"))
+
+    assert instance._opts.model == "aura-2-thalia-en"
+
+
+@pytest.mark.parametrize("model", ["tts-1", "aura-1", "deepgram/aura-1", ""])
+def test_a_non_deepgram_model_is_replaced_by_the_voice_model(model: str) -> None:
+    """The config default is OpenAI's "tts-1" and the app sends "aura-1":
+    Deepgram answered 400 to both."""
+    instance = create_tts(
+        voice_config(tts_provider="deepgram", tts_model=model, tts_voice="asteria")
     )
+
+    assert instance._opts.model == "aura-asteria-en"
 
 
 # =============================================================================
@@ -279,11 +428,34 @@ class StrictGoogle:
     environment, so what is pinned is our call shape, not the SDK's."""
 
     class TTS:
-        def __init__(self, *, voice: str, speaking_rate: float) -> None:
-            self.voice = voice
+        # `voice_name`: the plugin has no `voice`, which raised a TypeError and
+        # silently swapped every Google TTS session for OpenAI.
+        def __init__(self, *, voice_name: str, speaking_rate: float) -> None:
+            self.voice = voice_name
             self.speaking_rate = speaking_rate
 
 
+@pytest.fixture
+def google_cloud_credentials(fake_key):
+    fake_key("GOOGLE_APPLICATION_CREDENTIALS", value="service-account.json")
+
+
+def test_google_without_a_service_account_falls_back_with_a_reason(
+    monkeypatch: pytest.MonkeyPatch, env_setting, caplog
+) -> None:
+    """GOOGLE_API_KEY serves Gemini TTS only; Cloud TTS needs a service account."""
+    monkeypatch.setattr(tts_module, "google", StrictGoogle)
+    env_setting("GOOGLE_APPLICATION_CREDENTIALS", None)
+    env_setting("GOOGLE_API_KEY", "gemini-key")
+
+    with caplog.at_level(logging.ERROR):
+        instance = create_tts(voice_config(tts_provider="google"))
+
+    assert type(instance).__module__.startswith("livekit.plugins.openai")
+    assert "GOOGLE_APPLICATION_CREDENTIALS" in caplog.text
+
+
+@pytest.mark.usefixtures("google_cloud_credentials")
 def test_google_receives_the_voice_and_speaking_rate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -297,6 +469,7 @@ def test_google_receives_the_voice_and_speaking_rate(
     assert instance.speaking_rate == 1.25
 
 
+@pytest.mark.usefixtures("google_cloud_credentials")
 def test_google_defaults_its_voice(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tts_module, "google", StrictGoogle)
 
@@ -436,3 +609,18 @@ def test_an_unknown_provider_has_a_generic_default() -> None:
 
 def test_the_default_lookup_is_case_insensitive() -> None:
     assert get_default_voice("OpenAI") == OpenAIVoices.DEFAULT
+
+
+@pytest.mark.parametrize("voice", ["marin", "cedar", "ballad", "verse"])
+def test_the_newest_openai_voices_need_the_newest_model(voice: str, caplog) -> None:
+    create_tts(voice_config(tts_provider="openai", tts_model="gpt-4o-mini-tts", tts_voice=voice))
+    assert "not supported" not in caplog.text
+    create_tts(voice_config(tts_provider="openai", tts_model="tts-1", tts_voice=voice))
+    assert "not supported" in caplog.text
+
+
+def test_an_aura_2_voice_is_the_model_whatever_the_family_says() -> None:
+    instance = create_tts(
+        voice_config(tts_provider="deepgram", tts_model="aura-2", tts_voice="aura-2-nestor-es")
+    )
+    assert instance.model == "aura-2-nestor-es"

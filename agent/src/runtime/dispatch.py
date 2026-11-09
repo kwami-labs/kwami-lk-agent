@@ -16,6 +16,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from ..brain import parse_brain
 from ..domain.tool_result import was_refused
 from ..handlers import handle_config_update, handle_full_config, handle_tool_result
 from ..utils.logging import get_logger
@@ -26,6 +27,8 @@ logger = get_logger("dispatch")
 # A "find similar" query is built from a client-supplied title.
 MAX_SIMILAR_TITLE_CHARS = 80
 SIMILAR_SEARCH_RESULTS = 5
+# A typed message is a chat turn, not a document.
+MAX_TYPED_CHARS = 4000
 
 
 def decode_data_message(raw: Any) -> dict[str, Any] | None:
@@ -102,6 +105,8 @@ class DataMessageRouter:
             "browser_close_request": self._on_browser_close,
             "browser_open_request": self._on_browser_open,
             "search_similar": self._on_search_similar,
+            "text": self._on_text,
+            "interrupt": self._on_interrupt,
         }.get(msg_type)
 
         if handler is None:
@@ -114,6 +119,7 @@ class DataMessageRouter:
     # -- individual routes --------------------------------------------------
 
     def _on_config(self, message: dict[str, Any]) -> None:
+        self.state.config_received = True
         self.state.spawn(
             self.state.run_serialized(
                 handle_full_config(
@@ -124,6 +130,12 @@ class DataMessageRouter:
         )
 
     def _on_config_update(self, message: dict[str, Any]) -> None:
+        if message.get("updateType") == "brain":
+            # The brain belongs to the job, not to an agent: no rebuild, no lock.
+            bridge = getattr(self.deps, "bridge", None)
+            if bridge is not None:
+                bridge.configure(parse_brain(message.get("config")))
+            return
         self.state.spawn(
             self.state.run_serialized(
                 handle_config_update(
@@ -132,6 +144,36 @@ class DataMessageRouter:
             ),
             name="handle_config_update",
         )
+
+    def _on_text(self, message: dict[str, Any]) -> None:
+        """A message typed in the app's chat box: answer it like a spoken turn.
+
+        The SDK's `sendText` publishes `{type: "text"}` on the data channel,
+        and nothing routed it: every typed message was decoded, matched no
+        handler and dropped at debug level, so the chat box never reached the
+        agent. Whatever is being said is cut off first, as a spoken
+        interruption would be.
+        """
+        text = message.get("text")
+        if not isinstance(text, str) or not text.strip():
+            return
+        text = text.strip()[:MAX_TYPED_CHARS]
+        self._interrupt_quietly()
+        try:
+            self.session.generate_reply(user_input=text)
+        except Exception:
+            logger.exception("Could not answer a typed message")
+
+    def _on_interrupt(self, message: dict[str, Any]) -> None:
+        """The app's "Interrupt" button. Also had no route before."""
+        self._interrupt_quietly()
+
+    def _interrupt_quietly(self) -> None:
+        try:
+            self.session.interrupt()
+        except Exception as e:
+            # Nothing playing, or a turn that cannot be interrupted.
+            logger.debug("Interrupt skipped: %s", e)
 
     def _on_tool_result(self, message: dict[str, Any]) -> None:
         handle_tool_result(

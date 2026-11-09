@@ -7,8 +7,121 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Search results arrive whole.** A message too large for one data packet goes to an app
+  that sets `kwami.messages=stream` as a LiveKit text stream on `kwami.message`, images
+  included; every other app still gets it trimmed to 14 KB.
+- **A thinking sound, if you want one.** `enhancements.thinkingSound` plays a soft keyboard
+  while the agent thinks, so a pause before the answer does not sound like a dropped call.
+  Off by default; read live, so it applies from the next turn.
+- **The app can see which tools reach the model.** A `tool_inventory` message names the
+  built-ins that are on and the client tools the 128-tool trim left out, after entering
+  the room and after every tools update.
+- **More room for client tools.** Built-ins withheld for a missing credential, a locked
+  voice or searches given to the brain no longer take a client tool's place in the trim.
+- **A client tool cannot end the session.** One whose name a provider refuses, or whose
+  parameters are not an object schema, is skipped with a warning instead of making every
+  request fail; the SDK's shorthand schema is wrapped as the SDK wraps it.
+- **Recall finds people and things, not just loose facts.** `recall_memories` searches
+  entities alongside facts (reranked), lists an entity's summary, and marks facts that
+  have stopped being true. `remember_fact` writes to the graph instead of adding a system
+  line to the conversation transcript. The ontology gains Task and Asset, and work, home
+  and project links can start from a Person, not only the user (version `2026-11-2`,
+  applied to existing users on their next session unless they set their own).
+- **Gemini Live without a Google key.** When the deployment has no Google key, Gemini
+  Live 3.8 runs on LiveKit Inference with the LiveKit credentials instead of the call
+  being moved to OpenAI Realtime, and the app offers it on that basis.
+- **Memory carries the last conversation over, and follows the talk.** A session now starts
+  knowing how the previous one ended, recall is asked relative to it until the new session has
+  its own exchanges, and on the standard pipeline the memory block is read again every few
+  exchanges. The panel's retrieval preset sets how much memory reaches the prompt (1,500 /
+  3,000 / 6,000 characters); it used to change nothing, and `minFactRelevance` now applies.
+- **Real latency on the Metrics panel.** Every reply sends its STT, end-of-turn, LLM,
+  TTS and end-to-end timings, as measured by livekit-agents, in the `metrics` message
+  the SDK already understood but never received.
+- **Client tools over LiveKit RPC.** An app that sets `kwami.client_tools=rpc` gets
+  each tool call as an RPC to it alone, with the app's own error and deadline; any
+  other app keeps the data-channel `tool_call`/`tool_result` pair.
+- **The voice never runs out of backups.** Speech-to-text, the voice LLM and text-to-speech
+  each end their fallback chain on LiveKit Inference (Deepgram Nova-3, GPT-4.1 mini,
+  Cartesia Sonic-3), which needs only the LiveKit project's credentials: a spent or missing
+  provider key no longer leaves a stage with nothing to fall back to.
+- **No more half-open phone lines.** A caller who goes silent is asked once whether
+  they are still there; with no answer, the agent says goodbye and hangs up. Never
+  while the brain is still working on something for them, and never in the app.
+
+- **Any model can take any job.** A brain model holds several jobs and a brief of its own,
+  one model directs the rest, and Grok, OpenRouter, Groq, DeepSeek and Mistral join.
+- **The work thread.** A process on the user's PC takes queued work, with Claude on that PC's
+  own login first and on the API key only when the login cannot.
+- **Live + TTS.** A realtime model hears and thinks, and a TTS speaks.
+- **A voice pipeline on the user's own keys.** The keys someone connects power their voice
+  stages too. That usage is reported as theirs, and the API charges for the platform instead.
+- **`KWAMI_BROWSER_PROVIDER=local`**, a real Chrome window for an agent running on
+  the user's own computer. Free, with its own profile, and never chosen unless
+  asked for.
+
+- **A browser that needs no vendor.** The image ships Chromium, tried last when
+  every vendor refuses. It remembers no logins and the panel shows screenshots of
+  it. It does not start without its sandbox, all its connections go through a proxy
+  that refuses what is not public, and at most 4 run at once. What it still risks is
+  in `docs/security.md`.
+
+- **Jarvis keeps working with the PC off.** A cloud work thread (`KWAMI_CLOUD_WORKER`)
+  takes the work of users who allow it from the app, on their own Anthropic key, keeps
+  each thread's files in Storage, and leaves changes to Jarvis's own code as patches.
+  When the PC is on again it brings everything home without stopping either side:
+  files into `Jarvis\nube`, never over the user's own, and patches as pull requests.
+- **The user's own agents.** Specialists defined in the app join the executor's team on
+  the PC and in the cloud, a job can run as one of them with its model and tools, and
+  the voice can hand a task to one by name.
+
+### Changed
+
+- **A session's thread is created with its first message.** Every session created a Zep
+  thread before the greeting, so each reconnect or dropped call left an empty one behind and
+  paid two round trips for it. The thread now appears when there is something to store.
+- **Memory starts faster and keeps a custom ontology.** Each session start re-applied the
+  default ontology, which replaced any the user set in the memory panel, and re-created the
+  context template, both before the greeting. The ontology is now applied once per version
+  (recorded on the user's Zep metadata) and the template once per worker. The user's name is
+  kept on their Zep record, so it is known at once next time and Zep ties it to their node.
+- **The whole turn is heard.** A turn whose words say it has not finished is held, and the
+  pieces are answered and remembered as one. A quick answer is spoken as the worker wrote it.
+
 ### Fixed
 
+- **No shell on a server other users share.** On LiveKit Cloud a code task ran Claude
+  Code with Bash in the agent's own container, as the agent's system user, so a script
+  written into the task folder could read the agent's environment from `/proc` -- the
+  Supabase service key and every other deployment secret -- and other users' folders.
+  The voice agent's cloud runs and the cloud work thread now edit files without a
+  shell; the user's own PC keeps it.
+- **The kwami learns the user's name in their language.** Name detection only knew English
+  ("my name is"), so a user who said "me llamo Daniel" was never greeted by name and every
+  message was stored as from "User". It now reads the user's own Zep node first (Zep
+  summarises it in English, name first) and knows self-introductions in Spanish, Portuguese,
+  Italian and French. Recall shows the user's node as "The user", not its Zep id.
+- **No more shared memory for sessions without a kwami.** A config that named no kwami
+  fell back to the Zep user `kwami_default`, one graph every such session wrote into and
+  recalled from. Those sessions now run without memory. The live e2e suite deletes the
+  Zep users it creates.
+- **A browser vendor with no credit no longer ends the browsing.** A key says
+  nothing about the balance behind it: a 402 from Browser Use left the panel dead
+  with the raw httpx message, URL included, in front of the model. Launching now
+  tries every configured vendor, names the real cause when none can, and leaves
+  one with no credit or a rejected key alone for 15 minutes.
+- **Search survives Tavily failing.** `web_search` and `deep_research` move to
+  SerpAPI when there is a key for it. Research no longer says it found nothing
+  while the service is down, nor bills the angles that failed.
+- **SerpAPI's key stays out of the logs.** httpx writes the full URL in its error
+  message, and that key travels in the query string.
+- **"Cloud" can be Claude.** Speech recognition writes the name that way; the voice
+  opened Google Cloud for a request about Claude on the PC. It also no longer says
+  a site is already signed in until the page shows it.
+- **The calendar tools are the last client tools to be trimmed** when the list
+  goes over the provider's limit.
 - **Voice, speed and language changes are no longer lost.** `change_voice`,
   `change_speaking_speed` and `change_language` retuned the live TTS/STT and
   never wrote back to `kwami_config.voice`, so `get_current_voice_settings`

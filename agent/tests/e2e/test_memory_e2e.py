@@ -40,7 +40,15 @@ async def memory(zep_key: str) -> Any:
     if instance is None:
         pytest.skip("Zep memory could not be initialized")
     yield instance
-    await instance.close()
+    # "Torn down" has to include Zep: closing the client alone left every run's
+    # e2e_* user, thread and graph in the project (the live project held dozens
+    # of them), mixed in with real users' memory.
+    client = instance._client
+    try:
+        if client is not None:
+            await client.user.delete(config.user_id)
+    finally:
+        await instance.close()
 
 
 async def test_memory_initializes_against_real_zep(memory: Any) -> None:

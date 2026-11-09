@@ -114,9 +114,15 @@ greeting if one was already delivered.
 
 Partial update. `updateType` selects the branch.
 
+Among the listening settings, `enhancements.thinkingSound` (boolean, off by
+default) plays a soft keyboard clip while the agent is `thinking`, on a second
+audio track named `background_audio` that is only published the first time it
+plays. Clients must treat that track as background, not as the agent's voice
+(SDK: kwami-labs/kwami#152).
+
 | `updateType` | Effect |
 | --- | --- |
-| `voice` | Dispatches on the live pipeline. A pipeline switch rebuilds; on `realtime`, voice and temperature go over the open socket and provider/model rebuild; otherwise TTS/STT options, with a rebuild on a provider change or a speed change the provider cannot apply live |
+| `voice` | Listening settings (`enhancements`, `vad`) are applied to the session first, on either pipeline and without a rebuild; a payload of only those stops there. Then dispatches on the live pipeline. A pipeline switch rebuilds; on `realtime`, voice and temperature go over the open socket and provider/model rebuild; otherwise TTS/STT options, with a rebuild on a provider change or a speed change the provider cannot apply live |
 | `pipeline` | Switches between `standard` and `realtime`, carrying any realtime fields in the same payload |
 | `llm` | Recreates the agent. On the `realtime` pipeline this retargets the **realtime** model rather than building a standard pipeline underneath the session |
 | `soul` / `persona` | Rebuilds instructions in place, preserves cached memory context |
@@ -148,8 +154,18 @@ For `tools`, `config` is the tool-definition list itself (not wrapped).
 client tool. OpenAI rejects a request carrying more than 128 tools outright, so
 the combined list is trimmed to fit rather than sent over: built-ins are kept in
 preference to client tools, and anything dropped is logged at `error` with its
-name. A warning fires from 85% of the limit. Today the total is 93 — 40
-built-in and 53 from `kwami-app`.
+name. A warning fires from 85% of the limit. Only the built-ins the session
+actually offers count: those withheld for a missing credential, a locked voice
+or searches given to the brain leave their place to client tools. `kwami-app`
+registers about a hundred client tools against 47 built-ins, so the trim is
+routine; it reports the outcome in [`tool_inventory`](#tool_inventory).
+
+**Definitions that are refused.** A client tool is skipped, with a warning, when
+its name is not one every provider accepts (`[A-Za-z_][A-Za-z0-9_-]{0,63}`) or
+its `parameters` are not an object schema with a schema per property. Either
+would make the provider reject every request of the session, not just lose one
+tool. The SDK's shorthand -- a bare map of property name to schema -- is accepted
+and wrapped as `{"type": "object", "properties": ..., "required": []}`.
 
 ### `tool_result`
 
@@ -244,6 +260,77 @@ sequenceDiagram
 Pending futures survive agent swaps. `SessionState.update_agent` moves
 unresolved calls onto the new `ClientToolManager`.
 
+#### Over LiveKit RPC
+
+An app that registers the RPC method `kwami.client_tool` and sets the
+participant attribute `kwami.client_tools` to `rpc` gets tool calls as RPCs
+instead, addressed to it alone:
+
+```json
+{ "toolCallId": "550e8400-...", "name": "set_ui_control", "arguments": { "domain": "theme" } }
+```
+
+Here `arguments` is an **object**. The RPC's return value is the result; an
+error the handler throws (an RPC application error) reaches the model as
+`Error from client: <message>`, and the same 30-second deadline applies. If the
+RPC is refused for reasons that are not the tool's (`UNSUPPORTED_METHOD`,
+`UNSUPPORTED_SERVER`, `UNSUPPORTED_VERSION`, `REQUEST_PAYLOAD_TOO_LARGE`), the
+call is retried over the data channel above. An app without the attribute never
+sees an RPC.
+
+### `metrics`
+
+How long one reply kept the user waiting, per stage, in milliseconds. Sent
+once per assistant reply by `runtime/turn_metrics.py`; the SDK passes it to
+`VoiceSession.updateLatency`, which feeds the app's Metrics panel.
+
+```json
+{
+  "type": "metrics",
+  "metrics": { "stt": 210, "endOfTurn": 800, "llm": 457, "tts": 250, "overall": 1500 }
+}
+```
+
+| Field | Framework timing | Measured on |
+| --- | --- | --- |
+| `stt` | `transcription_delay` | the user's message |
+| `endOfTurn` | `end_of_turn_delay` | the user's message |
+| `llm` | `llm_node_ttft` | the reply |
+| `tts` | `tts_node_ttfb` | the reply |
+| `overall` | `e2e_latency` (end of speech to first audio) | the reply |
+
+A stage that did not run is left out rather than sent as `0`: a realtime voice
+has no TTS of ours, and the greeting has no user turn behind it. The user's
+half belongs to the first reply after it only.
+
+### `tool_inventory`
+
+What the model is offered, sent after the agent enters the room, after every
+`tools` update and whenever the search tools are re-gated. The app's Tools
+panel shows it; client tools in `dropped` exist in the app but not for the model.
+
+```json
+{
+  "type": "tool_inventory",
+  "limit": 128,
+  "total": 128,
+  "builtin": ["change_ai_model", "web_search", "..."],
+  "client": 96,
+  "dropped": ["read_emails", "send_email"]
+}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `limit` | The ceiling the list was trimmed to |
+| `total` | Tools offered, built-in and client |
+| `builtin` | Names of the agent's own tools that are on, sorted |
+| `client` | How many of the client's tools made it |
+| `dropped` | Client tools left out, in the order the client registered them |
+
+Names only: the client already has the definitions, and the payload has to fit
+the 14 KB packet budget.
+
 ### Search and browser payloads
 
 Built-in tools also publish structured events so the UI can render cards and a
@@ -251,6 +338,12 @@ live browser iframe. Typical `type` values include search-result batches and
 browser session metadata (live view URL). Exact UI schemas live in the
 TypeScript SDK; the agent treats them as JSON objects and trims them to fit
 the 14 KB packet budget.
+
+An app that registers the text-stream topic `kwami.message` and sets the
+participant attribute `kwami.messages` to `stream` gets any payload over that
+budget **whole** instead, as a text stream on that topic addressed to it alone,
+with the same JSON as the data packet would carry. If the stream cannot be
+sent, or no participant advertises it, the payload is trimmed as above.
 
 ## Telephony bootstrap
 

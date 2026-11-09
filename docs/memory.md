@@ -29,8 +29,41 @@ flowchart LR
     Buf --> Ex
     Ex --> Zep["Zep thread + graph"]
     Zep --> Ctx["get_context / get_user_name"]
-    Ctx --> Prompt["system prompt addition ≤ 2200 chars"]
+    Ctx --> Prompt["system prompt addition, sized by the retrieval preset"]
 ```
+
+## Retrieval presets
+
+The panel's preset (`maxContextMessages`, sent as 4 / 10 / 16) picks a budget
+in `memory/context.py`:
+
+| Preset | Memory section | Facts / entities from the template | Last-conversation messages |
+| --- | --- | --- | --- |
+| lean | 1,500 chars | 10 / 5 | 4 |
+| balanced | 3,000 chars | 20 / 10 | 10 |
+| rich | 6,000 chars | 40 / 20 | 16 |
+
+`minFactRelevance` is applied to the facts of the fallback path (the
+cross-encoder's `relevance`). Context templates are shared, one per budget
+(`kwami-context-v2-e{edges}-n{entities}`), rather than one per user.
+
+## Continuity between sessions
+
+Every session is a new Zep thread, empty when the greeting is prepared, and
+Zep's context for an empty thread has nothing to be relevant to. So:
+
+- `load_last_conversation` finds the most recent earlier thread with anything
+  in it (empty reconnect threads are skipped, up to 4) and reads its last
+  `maxContextMessages` messages.
+- Until this session has an exchange of its own, `get_context` asks Zep for
+  context relative to *that* thread, and the prompt gets a short "How your last
+  conversation ended" section (at most a third of the budget, most recent lines
+  kept). The greeting sees a returning user.
+- After the first exchange, and every 3rd after it, the memory block is read
+  again for the current thread. On the standard pipeline the instructions are
+  updated when the block changed. Realtime and hybrid models are left alone:
+  updating their instructions mid-session resends the whole prompt as a turn
+  on the Gemini API, so they recall through `recall_memories`.
 
 ## Identity
 
@@ -102,6 +135,11 @@ erDiagram
     User ||--o{ Goal : HAS_GOAL
     User ||--o{ Product : USES
     User ||--o{ Preference : PREFERS
+    User ||--o{ Task : HAS_TASK
+    User ||--o{ Asset : HOLDS
+    Person ||--o{ Organization : WORKS_AT
+    Person ||--o{ Location : LIVES_IN
+    Person ||--o{ Project : WORKING_ON
 
     Person {
         string relationship
@@ -118,10 +156,25 @@ erDiagram
     Procedure {
         string detail
     }
+    Task {
+        string due
+        string status
+    }
+    Asset {
+        string symbol
+        string position
+    }
 ```
 
-`configure_ontology` is a project-level replace. That is one reason the client
-must not be rebuilt on every config message.
+`set_ontology` replaces the user's ontology, so it is applied once per
+version: the agent stamps `kwami_ontology: "<version>"` on the user's Zep
+metadata after applying the defaults, skips stamped users, and never touches a
+user marked `"custom"` (an ontology set from the memory panel). Bump
+`ONTOLOGY_VERSION` in `memory/manager.py` when the default types change.
+
+The user's name is kept on their Zep record (`first_name`) once learned, so Zep
+names the user's own node after it and the next session reads it without a
+graph search.
 
 ## Agent tools
 

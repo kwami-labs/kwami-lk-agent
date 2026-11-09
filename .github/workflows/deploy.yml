@@ -1,0 +1,51 @@
+name: Deploy
+
+# Continuous delivery of the agent to LiveKit Cloud: every push (or merge) to
+# `main` that touches the agent runs `lk agent deploy` against the agent
+# registered in agent/livekit.toml.
+#
+# Runtime secrets (provider keys, KWAMI_API_KEY, ...) live on LiveKit Cloud and
+# persist across deploys; this job only needs the project credentials below.
+#
+# Repository secrets required: LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/**"
+      - ".github/workflows/deploy.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deploys at once, and never cancel one midway: a half-finished
+# deploy is worse than a queued one.
+concurrency:
+  group: deploy-livekit-cloud
+  cancel-in-progress: false
+
+env:
+  LK_VERSION: "2.13.1"
+
+jobs:
+  deploy:
+    name: Deploy to LiveKit Cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install LiveKit CLI
+        run: |
+          curl -fsSL "https://github.com/livekit/livekit-cli/releases/download/v${LK_VERSION}/lk_${LK_VERSION}_linux_amd64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin lk
+          lk --version
+
+      - name: Deploy agent
+        working-directory: agent
+        env:
+          LIVEKIT_URL: ${{ secrets.LIVEKIT_URL }}
+          LIVEKIT_API_KEY: ${{ secrets.LIVEKIT_API_KEY }}
+          LIVEKIT_API_SECRET: ${{ secrets.LIVEKIT_API_SECRET }}
+        run: lk agent deploy

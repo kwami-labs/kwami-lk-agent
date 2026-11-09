@@ -13,6 +13,7 @@ import pytest
 from src.utils.validation import (
     CAMEL_TO_SNAKE_MAP,
     normalize_config_keys,
+    normalize_parameters,
     validate_tool_definition,
 )
 
@@ -125,3 +126,65 @@ def test_non_dict_values_survive_normalization() -> None:
 def test_every_documented_alias_translates(camel: str, snake: str) -> None:
     """The map is what the frontend's wire format relies on; pin each entry."""
     assert normalize_config_keys({camel: "value"}) == {snake: "value"}
+
+
+# -- names and schemas the providers would refuse -------------------------------
+# Each of these reached the model provider as part of the tool list, and the
+# provider rejected the whole request: every turn of the session, not one tool.
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["mi herramienta", "búsqueda", "1st_tool", "a" * 65, "tool.with.dots", ""],
+)
+def test_a_name_some_provider_refuses_is_rejected(name: str) -> None:
+    assert validate_tool_definition({"name": name}) is False
+
+
+@pytest.mark.parametrize("name", ["set_theme", "deepwiki__read_wiki", "_private", "a-b", "a" * 64])
+def test_a_name_every_provider_accepts_passes(name: str) -> None:
+    assert validate_tool_definition({"name": name}) is True
+
+
+def test_parameters_typed_by_hand_are_rejected() -> None:
+    """{"city": "string"}, wrapped by the SDK into properties of strings."""
+    shorthand = {"type": "object", "properties": {"city": "string"}, "required": []}
+    assert validate_tool_definition({"name": "get_weather", "parameters": shorthand}) is False
+
+
+def test_parameters_that_are_not_an_object_schema_are_rejected() -> None:
+    assert validate_tool_definition({"name": "t", "parameters": {"type": "string"}}) is False
+    assert validate_tool_definition({"name": "t", "parameters": {"city": "string"}}) is False
+    assert (
+        validate_tool_definition({"name": "t", "parameters": {"type": "object", "properties": []}})
+        is False
+    )
+
+
+def test_a_proper_object_schema_passes() -> None:
+    params = {
+        "type": "object",
+        "properties": {"city": {"type": "string"}, "days": {"type": "integer"}},
+        "required": ["city"],
+    }
+    assert validate_tool_definition({"name": "get_weather", "parameters": params}) is True
+
+
+def test_the_sdk_shorthand_is_accepted_and_normalised() -> None:
+    """A bare map of property schemas, which the SDK wraps before sending."""
+    shorthand = {"control": {"type": "string"}, "value": {}}
+
+    assert validate_tool_definition({"name": "set_panel_control", "parameters": shorthand})
+    assert normalize_parameters(shorthand) == {
+        "type": "object",
+        "properties": shorthand,
+        "required": [],
+    }
+
+
+def test_normalising_leaves_a_full_schema_and_fills_an_empty_one() -> None:
+    full = {"type": "object", "properties": {"a": {"type": "string"}}, "required": ["a"]}
+
+    assert normalize_parameters(full) is full
+    assert normalize_parameters(None) == {"type": "object", "properties": {}, "required": []}
+    assert normalize_parameters({}) == {"type": "object", "properties": {}, "required": []}

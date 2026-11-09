@@ -100,3 +100,14 @@ def test_both_reference_each_other() -> None:
     """A reader who opens one should learn the other exists."""
     assert "infra/container/Dockerfile" in _read(AGENT_DOCKERFILE)
     assert "agent/Dockerfile" in _read(CONTAINER_DOCKERFILE)
+
+
+@pytest.mark.parametrize("path", DOCKERFILES, ids=lambda p: p.parent.name)
+def test_the_runtime_stage_ships_the_builtin_browser(path: Path) -> None:
+    """Without it kwami.io has no browser whenever the vendors have no balance."""
+    _, _, runtime = _read(path).partition("AS runtime")
+
+    assert "chromium" in runtime
+    # Only a Recommends of chromium, and it does not start without a sandbox.
+    assert "chromium-sandbox" in runtime
+    assert "ENV KWAMI_HEADLESS_CHROMIUM=/usr/bin/chromium" in runtime

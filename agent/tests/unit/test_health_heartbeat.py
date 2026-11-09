@@ -311,3 +311,59 @@ def test_registration_outside_an_event_loop_is_survivable(beat_file, caplog) -> 
     assert main._heartbeat_task is None
     assert "no heartbeat started" in caplog.text
     assert json.loads(beat_file.read_text())["state"] == "registered"
+
+
+async def test_the_cloud_work_thread_starts_once_when_the_deployment_runs_one(
+    beat_file, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """It lives in the worker's process: a job would end with its call."""
+    import asyncio
+
+    import src.main as main
+
+    started: list[str] = []
+
+    class Thread:
+        runner_id = "cloud-test"
+
+        async def run_forever(self, stop: asyncio.Event) -> None:
+            started.append(self.runner_id)
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(main, "cloud_worker", Thread)
+    main._heartbeat_task = None
+    main._cloud_task = None
+    try:
+        main._on_worker_registered()
+        main._on_worker_registered()
+        await asyncio.sleep(0)
+        assert started == ["cloud-test"]
+    finally:
+        for task in (main._heartbeat_task, main._cloud_task):
+            if task is not None:
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await task
+        main._heartbeat_task = None
+        main._cloud_task = None
+
+
+async def test_no_cloud_work_thread_unless_asked(
+    beat_file, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    import src.main as main
+
+    monkeypatch.setattr(main, "cloud_worker", lambda: None)
+    main._heartbeat_task = None
+    main._cloud_task = None
+    try:
+        main._on_worker_registered()
+        assert main._cloud_task is None
+    finally:
+        if main._heartbeat_task is not None:
+            main._heartbeat_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await main._heartbeat_task
+            main._heartbeat_task = None

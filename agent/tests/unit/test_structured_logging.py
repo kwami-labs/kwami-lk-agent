@@ -161,6 +161,34 @@ def test_records_from_another_library_are_correlated_too(records) -> None:
     assert records.records[-1].room == "room-1"
 
 
+def test_an_explicit_extra_overrides_a_bound_field(records) -> None:
+    """The SDK passes `extra={"room": ...}`; with `room` bound that raised
+    KeyError and killed the call -- the session-close-on-disconnect among them."""
+    configure_logging(force_json=False)
+
+    with session_context(room="room-1", kwami_id="kwami_1"):
+        logging.getLogger("livekit.agents").info(
+            "closing agent session", extra={"room": "room-2", "participant": "u1"}
+        )
+
+    record = records.records[-1]
+    assert record.room == "room-2"
+    assert record.kwami_id == "kwami_1"
+    assert record.participant == "u1"
+
+
+def test_reinstalling_the_factory_patches_make_record_once() -> None:
+    """Something else may replace the record factory; installing ours again
+    must not wrap `Logger.makeRecord` a second time."""
+    from src.utils.logging import install_record_factory
+
+    install_record_factory()
+    patched = logging.Logger.makeRecord
+    logging.setLogRecordFactory(logging.LogRecord)
+    install_record_factory()
+    assert logging.Logger.makeRecord is patched
+
+
 # -- JSON output ----------------------------------------------------------------
 
 

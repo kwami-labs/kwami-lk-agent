@@ -162,3 +162,34 @@ def test_google_credentials_resolve_under_either_documented_name(env_setting) ->
     from src.constants import EnvVars
 
     assert any(settings.has_provider_key(name) for name in EnvVars.GOOGLE)
+
+
+def test_the_dispatch_name_defaults_and_can_be_overridden(monkeypatch) -> None:
+    """A local test worker takes another name so it never answers real calls."""
+    from src.settings import DEFAULT_AGENT_NAME, Settings
+
+    monkeypatch.delenv("KWAMI_AGENT_NAME", raising=False)
+    assert Settings.from_env().agent_name == DEFAULT_AGENT_NAME == "kwami-agent"
+    monkeypatch.setenv("KWAMI_AGENT_NAME", " kwami-agent-lab ")
+    assert Settings.from_env().agent_name == "kwami-agent-lab"
+
+
+def test_the_cloud_work_thread_is_off_and_names_nobody_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("KWAMI_CLOUD_WORKER", "KWAMI_CLOUD_OWNERS", "KWAMI_CLOUD_REPO_OWNER"):
+        monkeypatch.delenv(name, raising=False)
+    settings = Settings.from_env()
+    assert settings.cloud_worker is False
+    assert settings.cloud_owners == ()
+    assert settings.cloud_repo_owner == "kwami-labs"
+
+
+def test_the_cloud_work_thread_settings_are_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KWAMI_CLOUD_WORKER", "1")
+    monkeypatch.setenv("KWAMI_CLOUD_OWNERS", " a , ,b ")
+    monkeypatch.setenv("KWAMI_CLOUD_REPO_OWNER", " someone ")
+    settings = Settings.from_env()
+    assert settings.cloud_worker is True
+    assert settings.cloud_owners == ("a", "b")
+    assert settings.cloud_repo_owner == "someone"

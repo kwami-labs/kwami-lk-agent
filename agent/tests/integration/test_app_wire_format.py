@@ -48,6 +48,7 @@ def create_agent_fn(captured: dict):
         from src.agent import KwamiAgent
 
         captured["config"] = config
+        captured["memory"] = memory
         captured["skip_greeting"] = skip_greeting
         return KwamiAgent(config=config)
 
@@ -134,15 +135,16 @@ async def test_an_unknown_pipeline_type_keeps_the_default(captured, create_agent
     assert captured["config"].voice.pipeline_type == "standard"
 
 
-async def test_hybrid_degrades_to_standard(captured, create_agent_fn) -> None:
-    """`hybrid` is in the SDK's union and has no implementation here.
+async def test_hybrid_reaches_the_config(captured, create_agent_fn) -> None:
+    """`hybrid` is the SDK's Live + TTS: the realtime model thinks, the TTS speaks.
 
-    Resolving it to standard is a decision; leaving it unrecognised would have
-    been the same outcome reached by accident.
+    It used to resolve to standard because nothing built it; the pipeline
+    builder now does, and corrects it to realtime for a Live model that only
+    answers in audio (tests/unit/test_hybrid_pipeline.py).
     """
     await _connect(_app_config_message("hybrid"), create_agent_fn)
 
-    assert captured["config"].voice.pipeline_type == "standard"
+    assert captured["config"].voice.pipeline_type == "hybrid"
 
 
 async def test_a_config_with_no_pipeline_field_keeps_the_default(captured, create_agent_fn):
@@ -192,9 +194,9 @@ async def test_a_memory_block_without_an_enabled_flag_tunes_the_live_client(
 
     Two branches meet here and both are easy to get wrong. `enabled` absent must
     leave the setting alone rather than reading as False, and a config that
-    names no kwami must not overwrite the user id of the memory it is about to
-    reuse -- doing so scatters one conversation across several Zep threads, so
-    recall finds nothing.
+    restates no kwami must still reach the memory of the kwami the session is
+    already for (its participant identity) -- a fresh client scatters one
+    conversation across several Zep threads, so recall finds nothing.
     """
     from src.agent import KwamiAgent
 
@@ -212,12 +214,13 @@ async def test_a_memory_block_without_an_enabled_flag_tunes_the_live_client(
 
         def __init__(self) -> None:
             self.config = KwamiConfig().memory
-            self.config.user_id = ""
+            self.config.user_id = "kwami_user_kwami"
 
         def set_usage_tracker(self, tracker: Any) -> None: ...
 
     memory = LiveMemory()
     state = SessionState(current_agent=KwamiAgent(config=KwamiConfig(), memory=memory))
+    state.user_identity = "kwami_user_kwami"
 
     await handle_full_config(
         FakeSession(),
@@ -230,3 +233,29 @@ async def test_a_memory_block_without_an_enabled_flag_tunes_the_live_client(
     assert captured["config"].memory.enabled is True, "an absent `enabled` read as False"
     assert captured["config"].memory.max_context_messages == 20
     assert memory.config.max_context_messages == 20, "the knob never reached the live client"
+
+
+async def test_a_config_with_no_kwami_at_all_gets_no_memory(
+    env_setting, create_agent_fn, captured, monkeypatch
+) -> None:
+    """No id used to mean the shared Zep user "kwami_default": every such session
+    wrote into, and recalled from, one graph. Now it means no memory."""
+    from src.handlers import config_handler
+
+    env_setting("ZEP_API_KEY", "zep-test-key")
+    created = []
+
+    async def create_memory(**kwargs):
+        created.append(kwargs)
+        return None
+
+    monkeypatch.setattr(config_handler, "create_memory", create_memory)
+    await handle_full_config(
+        FakeSession(),
+        SessionState(),
+        {"voice": {"type": "stt-llm-tts"}},
+        vad=None,
+        create_agent_fn=create_agent_fn,
+    )
+    assert created == []
+    assert captured["memory"] is None
