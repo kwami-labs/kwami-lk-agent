@@ -20,7 +20,7 @@ flowchart TB
     R -.-> E
 ```
 
-`pyproject.toml` sets `addopts = "-m 'not live'"`. `make test-e2e` passes
+`pyproject.toml` sets `addopts = "--strict-markers --strict-config -ra -m 'not live'"`. `make test-e2e` passes
 `-m live`. An empty live selection exits 5; the Makefile and the e2e workflow
 treat that as a warning, not a failure.
 
@@ -148,8 +148,9 @@ COVERAGE_FILE=/tmp/mine.coverage make test-cov
 
 | Workflow | When | Jobs |
 | --- | --- | --- |
-| `.github/workflows/test.yml` | PR and push to `dev` / `stg` / `main` | Ruff, mypy, pytest+coverage on 3.11 and 3.13, Docker build |
+| `.github/workflows/test.yml` | PR and push to `dev` / `stg` / `main` | Ruff, mypy, pytest+coverage on 3.11 and 3.13, Docker build, Worker types + tests |
+| `.github/workflows/security.yml` | Same events, weekly Monday 04:00 UTC | pip-audit, pnpm audit, gitleaks, CodeQL |
 | `.github/workflows/e2e.yml` | Nightly 03:00 UTC, `main`, manual | Live suite with GitHub `e2e` environment secrets |
 
-Offline CI sets `UV_FROZEN=1` and does not inject provider keys, so a test
+`release.yml` re-runs the same gate on a `v*` tag. Offline CI sets `UV_FROZEN=1` and does not inject provider keys, so a test
 that accidentally authenticates fails loudly.
