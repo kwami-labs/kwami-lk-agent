@@ -28,7 +28,7 @@ You do **not** need provider keys for the offline suite. Do not commit `.env`.
 - Branch from `dev` unless a maintainer says otherwise.
 - Keep the PR focused. One problem per PR.
 - Fill in the pull-request template.
-- CI must be green: Ruff, mypy, tests on Python 3.11 and 3.13, Docker build.
+- CI must be green: Ruff, mypy, tests on Python 3.11 and 3.13 (coverage floor 100), Docker build, Worker types and tests.
 
 ### Commit messages
 
@@ -37,7 +37,7 @@ You do **not** need provider keys for the offline suite. Do not commit `.env`.
 ```
 feat(memory): reuse Zep client across config updates
 fix(browser): reject javascript: URLs
-test: raise the coverage floor to 43
+test: cover the realtime voice update path
 docs: add architecture diagrams
 ```
 

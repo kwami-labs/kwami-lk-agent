@@ -298,7 +298,12 @@ async def handle_full_config(
         # The first "config" message arrives right after the default agent starts,
         # killing its greeting before it completes. The reconfigured agent must
         # greet in that case.
-        skip_greeting = state.greeting_delivered
+        #
+        # `"greeting": false` declines it outright: the default greeting is generic
+        # ("Hey there! I'm {name}..."), wrong for a character whose premise is that
+        # it volunteers nothing and whose caller wrote its own system prompt.
+        declined = message.get("greeting") is False
+        skip_greeting = state.greeting_delivered or declined
         # Listening settings the session already runs with survive a full
         # config that does not restate them; the ones it does state win.
         previous = state.current_agent
@@ -318,7 +323,10 @@ async def handle_full_config(
         apply_to_session(session, None, new_config.voice, listening_changed)
 
         # Mark that we've handled the first config (greeting will be delivered by new agent)
-        if not skip_greeting:
+        if declined:
+            # Nothing in this session will greet; a later config must not either.
+            state.greeting_delivered = True
+        elif not skip_greeting:
             state.greeting_delivered = True
             deps = getattr(session, "userdata", None)
             if deps is not None and hasattr(deps, "greeting_owed"):

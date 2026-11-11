@@ -48,7 +48,8 @@ kwami-lk-agent/
 │   │   ├── handlers/           # config, config_update, tool_result
 │   │   ├── memory/             # Zep Cloud: manager, context, search, ontology
 │   │   ├── tools/              # Built-in tools and client-side tool bridge
-│   │   ├── browser/            # Browser Use Cloud session, CDP, URL safety
+│   │   ├── browser/            # Browserbase / Browser Use / local Chrome sessions, CDP, URL safety
+│   │   ├── brain/              # Jarvis: bridge, work thread, cloud worker
 │   │   ├── usage/              # Credit reporting
 │   │   ├── health.py           # Heartbeat the container probe reads
 │   │   └── utils/              # Logging, provider parsing, room helpers
@@ -80,12 +81,14 @@ in place.
 
 | Command                 | Description                                            |
 | ----------------------- | ------------------------------------------------------ |
-| `make install`          | Install agent dependencies (including dev tools)        |
+| `make install`          | Install agent (uv) and `infra/` (pnpm) dependencies     |
 | `make dev`              | Run agent locally for testing                           |
+| `make create`           | Register the agent with LiveKit Cloud (first time)      |
 | `make deploy`           | Deploy agent to LiveKit Cloud                           |
 | `make deploy-cf`        | Deploy on Cloudflare Workers + Containers               |
 | `make deploy-cf-staging`| Deploy the Cloudflare staging environment               |
-| `make test`             | Run the offline suite (unit + contract + integration)   |
+| `make test`             | Run the offline suite (everything under `tests/` except `live`) |
+| `make test-unit` / `test-contract` / `test-integration` | One layer                |
 | `make test-cov`         | Offline suite with a coverage report                    |
 | `make test-e2e`         | End-to-end tests against real providers (needs keys)    |
 | `make lint` / `format`  | Run / apply the linter                                  |
@@ -228,6 +231,7 @@ CARTESIA_API_KEY=your-cartesia-key
 # Credits / runtime config (required for billing and telephony)
 KWAMI_API_URL=http://localhost:8080
 KWAMI_API_KEY=your-kwami-api-key
+# KWAMI_RUNTIME_API_URL=   # optional: where telephony fetches runtime config, if not KWAMI_API_URL
 
 # Optional -- each one enables its tools; without it they are not registered
 ZEP_API_KEY=            # persistent memory (remember_fact, recall_memories)
@@ -254,14 +258,14 @@ the session.
 | Guide | Topic |
 | --- | --- |
 | [Architecture](./docs/architecture.md) | Hexagonal layout, session lifecycle, voice pipelines |
-| [Protocol](./docs/protocol.md) | Data-channel messages (`config`, tools, search, browser) |
+| [Protocol](./docs/protocol.md) | Data-channel messages (`config`, tools, `transcript`, search, browser) |
 | [Configuration](./docs/configuration.md) | Environment variables and `KwamiConfig` |
 | [Memory](./docs/memory.md) | Zep threads, graph, ontology |
 | [Security](./docs/security.md) | Threat model, browser SSRF, prompt injection |
 | [Billing](./docs/billing.md) | Usage tracking and credit reporting |
 | [Development](./docs/development.md) | Local setup and conventions |
 | [Testing](./docs/testing.md) | Unit / contract / integration / live e2e |
-| [Deployment](./docs/deployment.md) | Docker and LiveKit Cloud |
+| [Deployment](./docs/deployment.md) | Docker, LiveKit Cloud, Cloudflare, CI, releases |
 
 ## Related Repositories
 

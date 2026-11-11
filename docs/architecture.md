@@ -25,7 +25,7 @@ flowchart LR
     subgraph Platform
         API["kwami-lk-api<br/>runtime config + credits"]
         Zep["Zep Cloud<br/>memory + graph"]
-        Browse["Browser Use Cloud"]
+        Browse["Cloud browser<br/>Browserbase, Browser Use"]
         Search["Tavily / SerpApi"]
     end
 
@@ -59,7 +59,7 @@ so those classes of failure are visible in CI.
 | `runtime/` | Job lifecycle, data-channel dispatch, pipeline construction | Orchestration |
 | `factories/` | STT / LLM / TTS / VAD / realtime construction | Provider SDKs |
 | `handlers/` | `config`, `config_update`, `tool_result` | Yes |
-| `memory/`, `browser/`, `usage/`, `tools/` | Feature modules behind ports | Yes |
+| `memory/`, `browser/`, `usage/`, `tools/`, `brain/` | Feature modules behind ports | Yes |
 
 Dependency arrows point inward. Adapters do not import ports as base classes;
 they satisfy them structurally. `runtime.pipeline` is **not** re-exported from
@@ -298,10 +298,11 @@ the frontend and executed over the data channel (see [Protocol](./protocol.md)).
 | `AgentToolsMixin` — identity / voice | `get_kwami_info`, `get_current_time`, `change_voice`, `change_speaking_speed`, `change_language`, `get_current_voice_settings` |
 | `AgentToolsMixin` — memory | `remember_fact`, `recall_memories`, `get_memory_status` |
 | `AgentToolsMixin` — search | `web_search`, `product_search`, `dismiss_search_result` |
-| `AgentToolsMixin` — browser | `navigate_to`, `go_back_in_browser`, `go_forward_in_browser`, `close_navigation`, `click_in_navigation`, `type_in_navigation`, `press_key_in_navigation`, `scroll_navigation`, `run_js_in_navigation`, `read_navigation_page` |
+| `AgentToolsMixin` — browser | `navigate_to`, `go_back_in_browser`, `go_forward_in_browser`, `close_navigation`, `click_in_navigation`, `type_in_navigation`, `press_key_in_navigation`, `scroll_navigation`, `run_js_in_navigation`, `read_navigation_page`, `request_site_access`, `list_site_access` |
 | `PipelineControlMixin` | `change_ai_model`, `switch_pipeline_mode`, `change_realtime_voice`, `list_available_models`, `list_available_voices`, `list_model_providers`, `get_pipeline_status` |
 | `KnowledgeToolsMixin` | `deep_research`, `get_market_quote` |
 | `MediaToolsMixin` | `play_media`, `control_playback`, `set_playback_volume`, `get_now_playing` |
+| `BrainToolsMixin` | `delegate_task`, `check_tasks`, `cancel_task`, `brain_status`, `connect_claude_account`, `sites_to_connect`, `merge_own_pull_request` |
 | `TradingToolsMixin` | `prepare_trade`, `open_trade_ticket`, `submit_trade`, `cancel_prepared_trade`, `get_prepared_trade` |
 
 `PipelineControlMixin` reaches the session runtime through `AgentDeps.reconfigure`,
@@ -338,6 +339,7 @@ agent/src/
 ├── session.py              # SessionState: swaps, ownership, billing
 ├── settings.py             # Frozen env → Settings
 ├── runtime_bootstrap.py    # Telephony kwami_id + runtime config fetch
+├── health.py, telemetry.py # Container heartbeat, OpenTelemetry tracing
 ├── constants.py            # Provider / voice catalogues, timeouts
 ├── domain/                 # Pure: config, parsing, prompt, capabilities, models, usage, errors
 ├── ports/                  # Protocols: memory, search, browser, publisher, billing, HTTP
@@ -347,7 +349,8 @@ agent/src/
 ├── handlers/               # config, config_update, realtime/pipeline switching, tool_result
 ├── memory/                 # Zep manager, context, search, ontology
 ├── tools/                  # Built-in mixins, ClientToolManager, provider tool budget
-├── browser/                # Browserbase / Browser Use Cloud, CDP, URL safety
+├── browser/                # Browserbase / Browser Use / local / headless Chrome, CDP, URL safety
+├── brain/                  # Jarvis: bridge, work thread, cloud worker ([brain-worker.md](./brain-worker.md))
 ├── usage/                  # Credits API reporter
 └── utils/                  # Logging, room, provider, validation
 ```

@@ -110,6 +110,11 @@ as `standard`, so a typo cannot quietly hand the user the wrong pipeline.
 The first `config` of a session **does** greet. Later full configs skip the
 greeting if one was already delivered.
 
+**`greeting`** (optional boolean). `false` declines the greeting for the whole
+session: the default greeting is generic ("Hey there! I'm {name}..."), wrong for
+a character whose caller wrote its own system prompt and who volunteers nothing.
+Any other value, or omitting it, keeps the behaviour above.
+
 ### `config_update`
 
 Partial update. `updateType` selects the branch.
@@ -128,6 +133,7 @@ plays. Clients must treat that track as background, not as the agent's voice
 | `soul` / `persona` | Rebuilds instructions in place, preserves cached memory context |
 | `memory` | Updates retrieval knobs on the live Zep client |
 | `tools` | Re-registers client tools **alongside** the built-ins, capped (see below) |
+| `brain` | Configures the brain bridge (`parse_brain`); ignored when the session has no bridge |
 
 Voice, speed and temperature on the realtime pipeline are pushed with
 `RealtimeModel.update_options` rather than by rebuilding, because a rebuild
@@ -212,6 +218,23 @@ User closed the live browser panel. Closes the session-owned
 { "type": "browser_close_request" }
 ```
 
+### `text`
+
+A typed message (the SDK's `sendText`). Whatever is being said is interrupted,
+then the text (trimmed, capped at 4 000 characters) is answered as if spoken.
+
+```json
+{ "type": "text", "text": "What's on my calendar?" }
+```
+
+### `interrupt`
+
+The app's Interrupt button: stops the agent's current speech. No other fields.
+
+```json
+{ "type": "interrupt" }
+```
+
 ### `search_similar`
 
 Runs `web_search` with `search_for_products=True` for
@@ -278,6 +301,23 @@ RPC is refused for reasons that are not the tool's (`UNSUPPORTED_METHOD`,
 call is retried over the data channel above. An app without the attribute never
 sees an RPC.
 
+### `transcript`
+
+One finished turn's text, sent from `conversation_item_added` so the browser can
+render the transcript (and, in a game, check a guess against a phrase there: the
+worker never decides who won). `lk.transcription` carries interim fragments
+without a trusted role, so this is the explicit frame. Only non-empty user and
+assistant turns are sent.
+
+```json
+{ "type": "transcript", "role": "player", "text": "Is it a banana?" }
+```
+
+| `role` | Turn |
+| --- | --- |
+| `player` | The user's |
+| `kwami` | The agent's |
+
 ### `metrics`
 
 How long one reply kept the user waiting, per stage, in milliseconds. Sent
@@ -334,8 +374,10 @@ the 14 KB packet budget.
 ### Search and browser payloads
 
 Built-in tools also publish structured events so the UI can render cards and a
-live browser iframe. Typical `type` values include search-result batches and
-browser session metadata (live view URL). Exact UI schemas live in the
+live browser iframe. Typical `type` values include `search_results`, `remove_result`,
+`browser_session` (live view URL), `brain_status`, `voice_fallback` (the voice
+engine was swapped after a failure) and `config_request` (no `config` arrived,
+so the app is asked to resend it). Exact UI schemas live in the
 TypeScript SDK; the agent treats them as JSON objects and trims them to fit
 the 14 KB packet budget.
 
@@ -352,9 +394,11 @@ Phone sessions have no frontend to send `config`. The worker resolves
 attributes, then fetches:
 
 ```
-GET {KWAMI_API_URL}/internal/kwamis/{kwami_id}/runtime
+GET {KWAMI_RUNTIME_API_URL or KWAMI_API_URL}/internal/kwamis/{kwami_id}/runtime
 Header: X-Kwami-API-Key: {KWAMI_API_KEY}
 ```
+
+`KWAMI_RUNTIME_API_URL` is optional; unset, the fetch goes to `KWAMI_API_URL`.
 
 The JSON body is the same shape as a `config` message and is applied through
 `handle_full_config`.

@@ -15,7 +15,7 @@ This repo uses **uv**, not pnpm/npm. `agent/uv.lock` is the source of truth.
 ```bash
 git-crypt unlock ~/.config/git-crypt/kwami.io/kwami-lk-agent.key
 
-make install    # cd agent && uv sync --extra dev
+make install    # cd agent && uv sync --extra dev (+ pnpm install in infra/)
 make dev        # cd agent && uv run python -m src.main dev
 ```
 
@@ -30,7 +30,7 @@ Join a room from the playground or SDK; the worker logs
 
 | Command | What it does |
 | --- | --- |
-| `make install` | `uv sync --extra dev` |
+| `make install` | `uv sync --extra dev` in `agent/`, then `pnpm install` in `infra/` |
 | `make dev` | Local worker (`python -m src.main dev`) |
 | `make test` | Offline suite (unit + contract + integration + runtime) |
 | `make test-unit` / `test-contract` / `test-integration` | One layer |
@@ -39,9 +39,10 @@ Join a room from the playground or SDK; the worker logs
 | `make lint` | Ruff check + format check |
 | `make format` | Ruff format + fix |
 | `make typecheck` | mypy on `src` |
-| `make check` | lint + typecheck + test (what CI quality+test approximate) |
+| `make check` | lint + typecheck + test (what CI's quality and test jobs run) |
 | `make create` | `lk agent create .` (first deploy only) |
 | `make deploy` | `lk agent deploy` |
+| `make deploy-cf` / `deploy-cf-staging` | Cloudflare Workers + Containers deploy (`infra/`, pnpm) |
 | `make clean` | caches, `.venv`, coverage artifacts |
 
 Working directory for uv/pytest is always `agent/`. The Python package name is
@@ -63,11 +64,12 @@ Working directory for uv/pytest is always `agent/`. The Python package name is
 - **No import cycle through `runtime`.** Import `create_agent_from_config`
   from `runtime.pipeline`, not from `runtime`.
 
-Ruff: line length 100, py311 target, rules `E F I N W UP`. `E501` is ignored.
+Ruff: line length 100, py311 target; rule set (`E F I N W UP ASYNC B DTZ G PERF RUF S SIM TRY`) and
+its ignores are in `pyproject.toml`.
 `src/main.py` is allowed `E402` so `load_dotenv` runs before LiveKit imports.
 
-mypy starts permissive (`ignore_missing_imports`). Modules still on
-`ignore_errors` are listed in `pyproject.toml` and that list only shrinks.
+mypy checks every module under `src/` (`ignore_missing_imports` is on; there is
+no exemption list). The next ratchet is `strict = true`.
 
 ## Optional provider extras
 
@@ -82,9 +84,9 @@ Without the extra, the corresponding factory falls back to OpenAI.
 
 1. `make dev` and watch the worker log for `Settings resolved:` (keys redacted).
 2. Confirm the frontend sent `config` (`Received data message: config`).
-3. Greeting should happen after memory's 6s budget, not after a Zep timeout.
+3. The greeting waits at most memory's 6s budget, not a Zep timeout (unless the config sent `"greeting": false`).
 4. On hang, check whether a client tool is waiting 30s for `tool_result`.
-5. On missing billing, check `user_identity` and `KWAMI_API_*`.
+5. On missing billing, check `user_identity` and `KWAMI_API_*` (or `SUPABASE_*` when writing direct).
 
 ## Related docs
 

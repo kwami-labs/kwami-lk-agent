@@ -93,7 +93,7 @@ Configure the same variables as `.env.sample` in the Cloud agent secrets UI
   `PROVIDER_KEYS_SECRET`, to use the model keys users connect from the app
 - `KWAMI_API_URL` — **not** `localhost`. Use the public API origin.
 - `KWAMI_API_KEY` — must match the API
-- Optional: `ZEP_API_KEY`, `TAVILY_API_KEY`, `SERPAPI_KEY`, `BROWSER_USE_API_KEY`
+- Optional: `ZEP_API_KEY`, `TAVILY_API_KEY`, `SERPAPI_KEY`, `BROWSERBASE_API_KEY` + `BROWSERBASE_PROJECT_ID` (default browser vendor), `BROWSER_USE_API_KEY`
 
 Leave `KWAMI_ALLOW_BROWSER_JS` unset unless you accept the
 [prompt-injection risk](./security.md).
@@ -131,7 +131,8 @@ SIP participants do not send a frontend `config`. The worker:
 2. Starts `GET /internal/kwamis/{id}/runtime` **before** `session.start()`
 3. Applies the JSON as a full config after the room is up
 
-If the fetch fails, the placeholder agent stays on the call. Set
+The fetch goes to `KWAMI_RUNTIME_API_URL` when that is set, otherwise to
+`KWAMI_API_URL`. If it fails, the placeholder agent stays on the call. Set
 `KWAMI_API_TIMEOUT` as low as you can tolerate; callers hear the default
 persona until it returns.
 
@@ -221,7 +222,7 @@ this reason, so it cannot be "fixed" by adding it back.
 ### Configuration and secrets
 
 Non-secret values live in `wrangler.jsonc` under `vars` (`ENVIRONMENT`,
-`LIVEKIT_URL`, `KWAMI_API_URL`, `KWAMI_API_TIMEOUT`, `KWAMI_ALLOW_BROWSER_JS`).
+`LIVEKIT_URL`, `KWAMI_API_URL`, `KWAMI_API_TIMEOUT`, `KWAMI_ALLOW_BROWSER_JS`, and the browser, logging, tracing and cloud-worker settings; see the file).
 Provider credentials are Worker secrets, forwarded into the container by
 `containerEnvFromWorker()` in `infra/src/env.ts`:
 
