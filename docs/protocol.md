@@ -375,7 +375,10 @@ the 14 KB packet budget.
 
 Built-in tools also publish structured events so the UI can render cards and a
 live browser iframe. Typical `type` values include `search_results`, `remove_result`,
-`browser_session` (live view URL), `brain_status`, `voice_fallback` (the voice
+`browser_session` (live view URL), `brain_status` (each task lists in `briefed`
+the models whose prompt carried the user's instructions), `brain_instructions`
+(`{target: "brain" | <model id>, instructions}`: the user changed them by voice
+and the app saves it like a typed change), `voice_fallback` (the voice
 engine was swapped after a failure) and `config_request` (no `config` arrived,
 so the app is asked to resend it). Exact UI schemas live in the
 TypeScript SDK; the agent treats them as JSON objects and trims them to fit
