@@ -198,6 +198,14 @@ async def test_a_later_config_does_not_greet_again(captured, create_agent_fn) ->
     assert captured["skip_greeting"] is True
 
 
+async def test_a_declined_greeting_never_comes_later_either(captured, create_agent_fn) -> None:
+    """`"greeting": false` skips this greeting and marks it delivered for the session."""
+    state = await run_config({"greeting": False}, create_agent_fn)
+
+    assert captured["skip_greeting"] is True
+    assert state.greeting_delivered is True
+
+
 # =============================================================================
 # Memory
 # =============================================================================
