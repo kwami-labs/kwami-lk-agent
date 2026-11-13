@@ -559,7 +559,7 @@ async def test_a_director_that_failed_gives_no_plan(
 async def test_a_claude_director_on_the_key_uses_structured_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def plan(key: str, model: str, task: str, system: str = "") -> Any:
+    async def plan(key: str, model: str, task: str, system: str = "", **_: Any) -> Any:
         return SimpleNamespace(cost_usd=0.2, steps=[])
 
     monkeypatch.setattr(bridge_module, "plan_task", plan)
@@ -1321,7 +1321,7 @@ async def test_a_claude_director_on_the_key_reads_the_users_instructions(
 ) -> None:
     seen: list[str] = []
 
-    async def plan(key: str, model: str, task: str, system: str = "") -> Any:
+    async def plan(key: str, model: str, task: str, system: str = "", **_: Any) -> Any:
         seen.append(system)
         return SimpleNamespace(cost_usd=0.0, steps=[])
 
@@ -1343,7 +1343,7 @@ async def test_a_director_without_instructions_gets_the_plain_planner(
 ) -> None:
     seen: list[str] = []
 
-    async def plan(key: str, model: str, task: str, system: str = "") -> Any:
+    async def plan(key: str, model: str, task: str, system: str = "", **_: Any) -> Any:
         seen.append(system)
         return SimpleNamespace(cost_usd=0.0, steps=[])
 
@@ -1353,7 +1353,8 @@ async def test_a_director_without_instructions_gets_the_plain_planner(
 
     await bridge._plan(OPUS, "tarea", task)
 
-    assert seen == [bridge_module.PLANNER_SYSTEM]
+    assert seen[0].startswith(bridge_module.PLANNER_SYSTEM)
+    assert "The user's instructions" not in seen[0]
     assert task.briefed == []
 
 
@@ -1388,3 +1389,43 @@ def test_the_task_status_lists_the_briefed_models() -> None:
     task = BrainTask("t1", "T", "tarea", "analysis", "normal")
     task.briefed.append("Opus")
     assert task.public()["briefed"] == ["Opus"]
+
+
+async def test_the_director_sees_the_team_and_may_name_a_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def plan(key: str, model: str, task: str, system: str = "", **kwargs: Any) -> Any:
+        seen.append({"system": system, **kwargs})
+        return SimpleNamespace(cost_usd=0.0, steps=[])
+
+    monkeypatch.setattr(bridge_module, "plan_task", plan)
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    ids = [m.id for m in bridge._team()]
+    assert len(ids) >= 2  # the default roster has several Claude models on one key
+
+    await bridge._plan(OPUS, "tarea")
+
+    assert seen[0]["team"] == ids
+    assert "Your team." in seen[0]["system"]
+
+
+async def test_a_step_runs_on_the_model_the_director_named(tmp_path: Path) -> None:
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    asked: list[str] = []
+
+    async def fake_ask(model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        asked.append(model.id)
+        return BrainAnswer("hecho", model.id, model.model)
+
+    bridge._ask = fake_ask  # type: ignore[method-assign]
+    team = [m.id for m in bridge._team()]
+    chosen = team[-1]
+    task = BrainTask("t1", "T", "tarea", "analysis", "normal")
+    step = bridge_module.PlanStep("a", "parte", "simple", False, model=chosen)
+
+    answer, model = await bridge._run_step(task, step, {})
+
+    assert answer.ok and model is not None and model.id == chosen
+    assert asked == [chosen]

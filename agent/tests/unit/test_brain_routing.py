@@ -23,7 +23,16 @@ from src.brain.config import (
     parse_brain,
     resolve_executor_folder,
 )
-from src.brain.planner import PLAN_SCHEMA, PlanStep, final_step, parse_plan, plan_task, waves
+from src.brain.planner import (
+    PlanStep,
+    TeamMember,
+    final_step,
+    parse_plan,
+    plan_schema,
+    plan_task,
+    team_sheet,
+    waves,
+)
 from src.brain.router import (
     council_members,
     find_model,
@@ -283,7 +292,7 @@ async def test_the_planner_asks_for_structured_output(planner) -> None:
     plan = await plan_task("k", "claude-sonnet-5-5", "¿Compro oro?")
 
     call = planner.calls[0]
-    assert call["output_config"]["format"] == {"type": "json_schema", "schema": PLAN_SCHEMA}
+    assert call["output_config"]["format"] == {"type": "json_schema", "schema": plan_schema()}
     assert plan is not None and plan.split
     assert [s.id for s in plan.steps] == ["a", "b"]
     assert plan.cost_usd > 0
@@ -309,3 +318,72 @@ def test_an_opened_folder_can_be_where_a_task_starts(tmp_path, monkeypatch) -> N
     monkeypatch.setenv("KWAMI_EXECUTOR_SHUT", str(tmp_path / "shut"))
     assert resolve_executor_folder(str(tmp_path / "web")) == (tmp_path / "web").resolve()
     assert resolve_executor_folder(str(tmp_path / "shut" / "a")) == EXECUTOR_ROOT.resolve()
+
+
+# -- the director hands each step to a member of the team ---------------------------
+
+
+TEAM = [
+    TeamMember("haiku", "Haiku", ("fast",)),
+    TeamMember("gemini", "Gemini", ("search", "standard"), "Cita   siempre\nla fuente."),
+]
+
+
+def test_the_team_sheet_lists_roles_and_the_users_instructions() -> None:
+    sheet = team_sheet(TEAM)
+    assert "`haiku` (Haiku): roles fast." in sheet
+    assert "`gemini` (Gemini): roles search, standard." in sheet
+    assert "The user's instructions for it: Cita siempre la fuente." in sheet
+
+
+def test_one_model_is_no_team() -> None:
+    assert team_sheet(TEAM[:1]) == ""
+
+
+def test_long_instructions_are_cut_for_the_director() -> None:
+    sheet = team_sheet([TEAM[0], TeamMember("x", "X", ("expert",), "a" * 1000)])
+    assert "a" * 300 in sheet and "a" * 301 not in sheet
+
+
+def test_the_schema_limits_the_model_to_the_team() -> None:
+    step = plan_schema(["haiku", "gemini"])["properties"]["steps"]["items"]
+    assert step["properties"]["model"]["enum"] == ["", "haiku", "gemini"]
+    assert "model" in step["required"]
+    # The shared constant is left alone.
+    assert "model" not in plan_schema()["properties"]["steps"]["items"]["required"][:-1]
+
+
+def test_a_step_keeps_a_team_model_and_drops_an_unknown_one() -> None:
+    steps = parse_plan(
+        '{"split": true, "steps": ['
+        '{"id": "a", "goal": "busca", "difficulty": "simple", "web": true, "after": [],'
+        ' "model": "gemini"},'
+        '{"id": "b", "goal": "decide", "difficulty": "hard", "web": false, "after": ["a"],'
+        ' "model": "gpt-9"}]}',
+        ["haiku", "gemini"],
+    )
+    assert [s.model for s in steps] == ["gemini", ""]
+
+
+def test_an_indivisible_plan_keeps_the_directors_choice() -> None:
+    steps = parse_plan(
+        '{"split": false, "steps": [{"id": "a", "goal": "todo", "difficulty": "hard",'
+        ' "web": false, "after": [], "model": "haiku"}]}',
+        ["haiku"],
+    )
+    assert steps[0].model == "haiku"
+
+
+async def test_the_planner_sends_the_team_schema(planner) -> None:
+    planner.reply = _planned(
+        "end_turn",
+        '{"split": true, "steps": [{"id": "a", "goal": "dato", "difficulty": "simple",'
+        ' "web": true, "after": [], "model": "gemini"}, {"id": "b", "goal": "decide",'
+        ' "difficulty": "hard", "web": false, "after": ["a"], "model": ""}]}',
+    )
+    plan = await plan_task("k", "m", "t", system="S", team=["gemini"])
+
+    call = planner.calls[0]
+    assert call["system"] == "S"
+    assert call["output_config"]["format"]["schema"] == plan_schema(["gemini"])
+    assert plan is not None and [s.model for s in plan.steps] == ["gemini", ""]
