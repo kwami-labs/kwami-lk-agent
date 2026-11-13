@@ -145,8 +145,14 @@ def plan_from_text(text: str) -> Plan:
         return Plan(steps=[])
 
 
-async def plan_task(api_key: str, model: str, task: str) -> Plan | None:
-    """Ask the planner. None when planning fails: the caller runs the task whole."""
+async def plan_task(
+    api_key: str, model: str, task: str, system: str = PLANNER_SYSTEM
+) -> Plan | None:
+    """Ask the planner. None when planning fails: the caller runs the task whole.
+
+    `system` is PLANNER_SYSTEM plus whatever the bridge adds: the user's
+    instructions for the brain and for the director.
+    """
     import anthropic
 
     client = anthropic.AsyncAnthropic(api_key=api_key, timeout=120.0)
@@ -154,7 +160,7 @@ async def plan_task(api_key: str, model: str, task: str) -> Plan | None:
         response = await client.messages.create(
             model=model,
             max_tokens=4000,
-            system=PLANNER_SYSTEM,
+            system=system,
             messages=[{"role": "user", "content": task}],
             output_config={
                 "effort": "low",

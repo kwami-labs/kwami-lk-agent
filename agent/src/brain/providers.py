@@ -76,6 +76,8 @@ class BrainAnswer:
     rate_limited: bool = False
     #: Answered on the Claude account of the user's PC, not on an API key.
     via_account: bool = False
+    #: The prompt carried the user's instructions (set by the bridge, not the provider).
+    briefed: bool = False
 
 
 @dataclass
