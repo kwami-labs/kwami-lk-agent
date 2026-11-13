@@ -194,6 +194,8 @@ class BrainTask:
     job_id: str = ""
     thread_id: str = ""
     progress: str = ""
+    #: Models whose prompt carried the user's instructions (the brain's or their own).
+    briefed: list[str] = field(default_factory=list)
     handle: asyncio.Task | None = field(default=None, repr=False)
 
     def public(self, full: bool = False) -> dict[str, Any]:
@@ -210,6 +212,7 @@ class BrainTask:
             "steps": self.steps,
             "onPc": bool(self.job_id),
             "progress": self.progress,
+            "briefed": self.briefed,
             "startedAt": self.started_at,
             "finishedAt": self.finished_at,
         }
@@ -734,7 +737,19 @@ class Bridge:
         await self.jobs.request_cancel(job.id)
         return None
 
+    def _note_brief(self, brain_task: BrainTask | None, model: BrainModel, briefed: bool) -> None:
+        """Record that the user's instructions went out with this model's prompt."""
+        label = model.label or model.model
+        if briefed and brain_task is not None and label not in brain_task.briefed:
+            brain_task.briefed.append(label)
+
     async def _ask(self, model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        answer = await self._ask_model(model, request)
+        # Only an answer counts: a call that never reached the model carried nothing.
+        answer.briefed = answer.ok and bool(self._brief(model))
+        return answer
+
+    async def _ask_model(self, model: BrainModel, request: BrainRequest) -> BrainAnswer:
         brief = self._brief(model)
         if brief:
             request = replace(request, system=f"{request.system}\n\n{brief}")
@@ -775,11 +790,18 @@ class Bridge:
         self.ledger.add_spend(model.id, answer.cost_usd)
         return answer
 
-    async def _plan(self, director: BrainModel, task: str) -> Plan | None:
+    async def _plan(
+        self, director: BrainModel, task: str, brain_task: BrainTask | None = None
+    ) -> Plan | None:
         """Ask the director how to split the work. None when it could not say."""
         api_key = self._keys.get("ANTHROPIC_API_KEY", "")
         if director.provider == "anthropic" and api_key and not self._on_account(director):
-            plan = await plan_task(api_key, director.model, task)
+            # The structured-output call does not go through _ask, so the user's
+            # instructions for the brain and for the director are added here.
+            brief = self._brief(director)
+            self._note_brief(brain_task, director, bool(brief))
+            system = f"{PLANNER_SYSTEM}\n\n{brief}" if brief else PLANNER_SYSTEM
+            plan = await plan_task(api_key, director.model, task, system=system)
             if plan is not None:
                 self.ledger.add_spend(director.id, plan.cost_usd)
             return plan
@@ -793,6 +815,7 @@ class Bridge:
                 native_search=False,
             ),
         )
+        self._note_brief(brain_task, director, getattr(answer, "briefed", False))
         if not answer.ok:
             return None
         plan = plan_from_text(answer.text)
@@ -867,6 +890,7 @@ class Bridge:
             tried.add(model.id)
             self._note_model(brain_task, model.label or model.model)
             answer = await self._ask(model, request)
+            self._note_brief(brain_task, model, getattr(answer, "briefed", False))
             brain_task.cost_usd += answer.cost_usd
             if answer.ok:
                 return answer, model
@@ -1004,6 +1028,7 @@ class Bridge:
         if not thread_id and brain_task.follow_up == "last":
             thread_id = await self.jobs.last_thread(self.kwami_id)
         brief = self._brief(model)
+        self._note_brief(brain_task, model, bool(brief))
         job = BrainJob(
             user_id=self.user_id,
             kwami_id=self.kwami_id,
@@ -1096,7 +1121,7 @@ class Bridge:
         if director is None:
             return await self._single(brain_task, prefer)
 
-        plan = await self._plan(director, brain_task.task)
+        plan = await self._plan(director, brain_task.task, brain_task)
         if plan is not None:
             brain_task.cost_usd += plan.cost_usd
         if plan is None or not plan.steps:
@@ -1193,6 +1218,8 @@ class Bridge:
         brain_task.models = [m.label or m.model for m in members]
         request = self._request(brain_task.task, "hard")
         answers = await asyncio.gather(*(self._ask(m, request) for m in members))
+        for member, member_answer in zip(members, answers, strict=True):
+            self._note_brief(brain_task, member, getattr(member_answer, "briefed", False))
         brain_task.cost_usd += sum(a.cost_usd for a in answers)
         good = [a for a in answers if a.ok]
         if len(good) < 2:
@@ -1212,6 +1239,7 @@ class Bridge:
                 native_search=False,
             ),
         )
+        self._note_brief(brain_task, chair, getattr(synthesis, "briefed", False))
         brain_task.cost_usd += synthesis.cost_usd
         if not synthesis.ok:
             return good[0]

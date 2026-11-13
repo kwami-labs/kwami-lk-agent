@@ -543,7 +543,7 @@ def _split_bridge(tmp_path: Path, monkeypatch, plan: Plan | None, **kw: Any) -> 
     bridge = _bridge(tmp_path, **kw)
     bridge.config.split = True
 
-    async def fake_plan(api_key: str, model: str, task: str) -> Plan | None:
+    async def fake_plan(api_key: str, model: str, task: str, system: str = "") -> Plan | None:
         return plan
 
     monkeypatch.setattr(bridge_module, "plan_task", fake_plan)

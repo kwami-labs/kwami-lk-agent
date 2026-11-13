@@ -473,7 +473,7 @@ async def test_a_task_on_x_goes_to_grok_whole_and_with_its_search(
         seen.append(request)
         return BrainAnswer("En X dicen", model_id, model)
 
-    async def no_plan(*args: Any) -> Any:
+    async def no_plan(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("a task on X is not split")
 
     monkeypatch.setattr(bridge_module, "run_xai", xai)
@@ -559,7 +559,7 @@ async def test_a_director_that_failed_gives_no_plan(
 async def test_a_claude_director_on_the_key_uses_structured_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def plan(key: str, model: str, task: str) -> Any:
+    async def plan(key: str, model: str, task: str, system: str = "") -> Any:
         return SimpleNamespace(cost_usd=0.2, steps=[])
 
     monkeypatch.setattr(bridge_module, "plan_task", plan)
@@ -1305,3 +1305,86 @@ async def test_a_login_check_cancelled_leaves_no_process_behind(
     with pytest.raises(asyncio.CancelledError):
         await running
     assert process.killed
+
+
+# -- the user's instructions reach every model, the director included ---------------
+
+
+def _briefed(model: BrainModel, instructions: str) -> BrainModel:
+    return BrainModel(
+        model.id, model.provider, model.model, model.role, model.label, instructions=instructions
+    )
+
+
+async def test_a_claude_director_on_the_key_reads_the_users_instructions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def plan(key: str, model: str, task: str, system: str = "") -> Any:
+        seen.append(system)
+        return SimpleNamespace(cost_usd=0.0, steps=[])
+
+    monkeypatch.setattr(bridge_module, "plan_task", plan)
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    bridge.config.instructions = "Responde siempre en euros."
+    director = _briefed(OPUS, "Reparte lo barato a Haiku.")
+    task = BrainTask("t1", "T", "tarea", "analysis", "normal")
+
+    await bridge._plan(director, "tarea", task)
+
+    assert "Responde siempre en euros." in seen[0]
+    assert "Reparte lo barato a Haiku." in seen[0]
+    assert task.briefed == ["Opus"]
+
+
+async def test_a_director_without_instructions_gets_the_plain_planner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: list[str] = []
+
+    async def plan(key: str, model: str, task: str, system: str = "") -> Any:
+        seen.append(system)
+        return SimpleNamespace(cost_usd=0.0, steps=[])
+
+    monkeypatch.setattr(bridge_module, "plan_task", plan)
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    task = BrainTask("t1", "T", "tarea", "analysis", "normal")
+
+    await bridge._plan(OPUS, "tarea", task)
+
+    assert seen == [bridge_module.PLANNER_SYSTEM]
+    assert task.briefed == []
+
+
+async def test_a_model_with_instructions_is_reported_as_briefed(
+    tmp_path: Path, api: list[BrainRequest]
+) -> None:
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    model = _briefed(OPUS, "Cita siempre la fuente.")
+
+    answer = await bridge._ask(model, BrainRequest("T", "S", native_search=False))
+
+    assert answer.briefed is True
+    assert "Cita siempre la fuente." in api[0].system
+
+
+async def test_a_model_without_instructions_is_not_briefed(
+    tmp_path: Path, api: list[BrainRequest]
+) -> None:
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    answer = await bridge._ask(OPUS, BrainRequest("T", "S", native_search=False))
+    assert answer.briefed is False
+
+
+async def test_a_failed_call_does_not_count_as_briefed(tmp_path: Path) -> None:
+    bridge = _bridge(tmp_path, {})  # no key and no account: the call never leaves
+    answer = await bridge._ask(_briefed(OPUS, "Algo."), BrainRequest("T", "S", native_search=False))
+    assert answer.ok is False
+    assert answer.briefed is False
+
+
+def test_the_task_status_lists_the_briefed_models() -> None:
+    task = BrainTask("t1", "T", "tarea", "analysis", "normal")
+    task.briefed.append("Opus")
+    assert task.public()["briefed"] == ["Opus"]
