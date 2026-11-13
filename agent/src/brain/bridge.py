@@ -49,9 +49,11 @@ from .planner import (
     PLANNER_SYSTEM,
     Plan,
     PlanStep,
+    TeamMember,
     final_step,
     plan_from_text,
     plan_task,
+    team_sheet,
     waves,
 )
 from .providers import (
@@ -793,15 +795,21 @@ class Bridge:
     async def _plan(
         self, director: BrainModel, task: str, brain_task: BrainTask | None = None
     ) -> Plan | None:
-        """Ask the director how to split the work. None when it could not say."""
+        """Ask the director how to split the work, and whom to give each part.
+
+        None when it could not say.
+        """
         api_key = self._keys.get("ANTHROPIC_API_KEY", "")
+        team = self._team()
+        ids = [member.id for member in team]
+        planner = PLANNER_SYSTEM + team_sheet(team)
         if director.provider == "anthropic" and api_key and not self._on_account(director):
             # The structured-output call does not go through _ask, so the user's
             # instructions for the brain and for the director are added here.
             brief = self._brief(director)
             self._note_brief(brain_task, director, bool(brief))
-            system = f"{PLANNER_SYSTEM}\n\n{brief}" if brief else PLANNER_SYSTEM
-            plan = await plan_task(api_key, director.model, task, system=system)
+            system = f"{planner}\n\n{brief}" if brief else planner
+            plan = await plan_task(api_key, director.model, task, system=system, team=ids)
             if plan is not None:
                 self.ledger.add_spend(director.id, plan.cost_usd)
             return plan
@@ -810,7 +818,7 @@ class Bridge:
             director,
             BrainRequest(
                 task=task,
-                system=PLANNER_SYSTEM + PLAN_FORMAT,
+                system=planner + PLAN_FORMAT,
                 difficulty="simple",
                 native_search=False,
             ),
@@ -818,9 +826,22 @@ class Bridge:
         self._note_brief(brain_task, director, getattr(answer, "briefed", False))
         if not answer.ok:
             return None
-        plan = plan_from_text(answer.text)
+        plan = plan_from_text(answer.text, ids)
         plan.cost_usd = answer.cost_usd
         return plan
+
+    def _team(self) -> list[TeamMember]:
+        """The models the director may hand a step to: usable, and not the code executor."""
+        return [
+            TeamMember(
+                model.id,
+                model.label or model.model,
+                tuple(model.roles or [model.role]),
+                model.instructions,
+            )
+            for model in usable(self.config, self._keys)
+            if model.provider != "local"
+        ]
 
     def _note_model(self, brain_task: BrainTask, label: str) -> None:
         if label not in brain_task.models:
@@ -1135,7 +1156,8 @@ class Bridge:
                 brain_task.kind = "research"
             elif brain_task.kind == "research":
                 brain_task.kind = "analysis"
-            return await self._single(brain_task, "")
+            # The director may also have named who should do it.
+            return await self._single(brain_task, step.model)
 
         # When the last step already builds on every other one, it answers the
         # user itself. Measured 2026-10-09: a separate combine call repeated the
@@ -1211,7 +1233,9 @@ class Bridge:
         if not step.web:
             request.tavily_key = ""
         kind = "research" if step.web else "analysis"
-        return await self._ask_role(brain_task, kind, step.difficulty, request)
+        # The director's choice for this step goes first; the router covers a
+        # model it cannot use (no web for a web step) and the fallback.
+        return await self._ask_role(brain_task, kind, step.difficulty, request, step.model)
 
     async def _council(self, brain_task: BrainTask) -> BrainAnswer:
         members = council_members(self.config, self._keys)
