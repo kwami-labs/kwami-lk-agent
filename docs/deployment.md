@@ -222,7 +222,7 @@ this reason, so it cannot be "fixed" by adding it back.
 ### Configuration and secrets
 
 Non-secret values live in `wrangler.jsonc` under `vars` (`ENVIRONMENT`,
-`LIVEKIT_URL`, `KWAMI_API_URL`, `KWAMI_API_TIMEOUT`, `KWAMI_ALLOW_BROWSER_JS`, and the browser, logging, tracing and cloud-worker settings; see the file).
+`LIVEKIT_URL`, `KWAMI_API_URL`, `KWAMI_RUNTIME_API_URL`, `KWAMI_API_TIMEOUT`, `KWAMI_ALLOW_BROWSER_JS`, and the browser, logging, tracing and cloud-worker settings; see the file).
 Provider credentials are Worker secrets, forwarded into the container by
 `containerEnvFromWorker()` in `infra/src/env.ts`:
 
