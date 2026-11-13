@@ -34,6 +34,12 @@ describe("containerEnvFromWorker", () => {
     expect(out.KWAMI_API_URL).toBe("https://api.example.com");
   });
 
+  it("forwards the optional runtime-config URL, empty when unset", () => {
+    expect(containerEnvFromWorker(baseEnv).KWAMI_RUNTIME_API_URL).toBe("");
+    const env = { ...baseEnv, KWAMI_RUNTIME_API_URL: "https://rt.example.com" } as unknown as Env;
+    expect(containerEnvFromWorker(env).KWAMI_RUNTIME_API_URL).toBe("https://rt.example.com");
+  });
+
   it("forwards the browser provider, so the agent does not pick its own", () => {
     // Without this the agent falls back to DEFAULT_BROWSER_PROVIDER and can
     // disagree with which credential was actually configured.
