@@ -15,8 +15,11 @@ also corrects a voice model that guessed the difficulty wrong.
 
 from __future__ import annotations
 
+import copy
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..utils.logging import get_logger
 from .ledger import token_cost
@@ -38,7 +41,7 @@ Rules: at most 5 steps. Each goal is a self-contained instruction. `web` is true
 the step needs current information from the internet. `after` lists the ids of steps
 whose results this step needs. Do not add a final "combine" step: that is done for you."""
 
-PLAN_SCHEMA = {
+PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "split": {"type": "boolean"},
@@ -66,9 +69,55 @@ PLAN_SCHEMA = {
 #: For a director that has no structured output to hold it to the schema.
 PLAN_FORMAT = (
     "\n\nReply with JSON only, no markdown fence: an object with `split` (boolean) and "
-    "`steps`, each step having `id`, `goal`, `difficulty`, `web` (boolean) and `after` "
-    "(list of ids)."
+    "`steps`, each step having `id`, `goal`, `difficulty`, `web` (boolean), `after` "
+    '(list of ids) and `model` (an id from your team, or "").'
 )
+
+#: How much of a model's instructions the director reads when choosing for a step.
+TEAM_BRIEF_CHARS = 300
+
+
+@dataclass(frozen=True)
+class TeamMember:
+    """What the director knows about a model it can hand a step to."""
+
+    id: str
+    label: str
+    roles: tuple[str, ...]
+    instructions: str = ""
+
+
+def team_sheet(team: Sequence[TeamMember]) -> str:
+    """The director's view of the team, so it can give each step to the right model.
+
+    The user writes instructions per model ("Gemini: always cite the source",
+    "Opus: only decisions about money"). The router alone picks by role and
+    difficulty and cannot read them; the director can, and names a model per
+    step. Empty when there is nobody to choose between.
+    """
+    if len(team) < 2:
+        return ""
+    lines = [
+        "\n\nYour team. For each step set `model` to the id of the member that suits it "
+        'best -- their roles and what the user asked of them -- or "" to let the router '
+        "choose by difficulty:"
+    ]
+    for member in team:
+        line = f"- `{member.id}` ({member.label}): roles {', '.join(member.roles)}."
+        brief = " ".join(member.instructions.split())[:TEAM_BRIEF_CHARS]
+        if brief:
+            line += f" The user's instructions for it: {brief}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def plan_schema(team: Sequence[str] = ()) -> dict[str, Any]:
+    """PLAN_SCHEMA with `model` limited to the team's ids ("" = the router's choice)."""
+    schema = copy.deepcopy(PLAN_SCHEMA)
+    step = schema["properties"]["steps"]["items"]
+    step["properties"]["model"] = {"type": "string", "enum": ["", *team]}
+    step["required"] = [*step["required"], "model"]
+    return schema
 
 
 @dataclass
@@ -78,6 +127,8 @@ class PlanStep:
     difficulty: str
     web: bool
     after: list[str] = field(default_factory=list)
+    #: The model the director chose for this step; empty for the router's choice.
+    model: str = ""
 
 
 @dataclass
@@ -90,8 +141,8 @@ class Plan:
         return len(self.steps) > 1
 
 
-def parse_plan(raw: str) -> list[PlanStep]:
-    """Validate the planner's JSON: unknown dependencies and cycles are dropped."""
+def parse_plan(raw: str, team: Sequence[str] = ()) -> list[PlanStep]:
+    """Validate the planner's JSON: unknown dependencies, cycles and models are dropped."""
     data = json.loads(raw)
     steps: list[PlanStep] = []
     seen: set[str] = set()
@@ -109,6 +160,8 @@ def parse_plan(raw: str) -> list[PlanStep]:
                 web=bool(item.get("web")),
                 # Only earlier steps: that rules out cycles and forward references.
                 after=[a for a in (item.get("after") or []) if a in seen],
+                # Only a member of the team: a made-up id would fall to the router anyway.
+                model=item.get("model") if item.get("model") in team else "",
             )
         )
         seen.add(step_id)
@@ -116,7 +169,9 @@ def parse_plan(raw: str) -> list[PlanStep]:
         # One coherent piece: keep the hardest difficulty the planner saw.
         order = {"simple": 0, "normal": 1, "hard": 2}
         hardest = max(steps, key=lambda s: order[s.difficulty])
-        return [PlanStep("s1", "", hardest.difficulty, any(s.web for s in steps))]
+        return [
+            PlanStep("s1", "", hardest.difficulty, any(s.web for s in steps), model=hardest.model)
+        ]
     return steps
 
 
@@ -135,23 +190,28 @@ def waves(steps: list[PlanStep]) -> list[list[PlanStep]]:
     return out
 
 
-def plan_from_text(text: str) -> Plan:
+def plan_from_text(text: str, team: Sequence[str] = ()) -> Plan:
     """A plan out of a model's plain answer. No steps when it cannot be read."""
     start, end = text.find("{"), text.rfind("}")
     try:
-        return Plan(steps=parse_plan(text[start : end + 1]) if start != -1 else [])
+        return Plan(steps=parse_plan(text[start : end + 1], team) if start != -1 else [])
     except (ValueError, AttributeError, TypeError):
         logger.warning("The director returned an unreadable plan")
         return Plan(steps=[])
 
 
 async def plan_task(
-    api_key: str, model: str, task: str, system: str = PLANNER_SYSTEM
+    api_key: str,
+    model: str,
+    task: str,
+    system: str = PLANNER_SYSTEM,
+    team: Sequence[str] = (),
 ) -> Plan | None:
     """Ask the planner. None when planning fails: the caller runs the task whole.
 
-    `system` is PLANNER_SYSTEM plus whatever the bridge adds: the user's
-    instructions for the brain and for the director.
+    `system` is PLANNER_SYSTEM plus whatever the bridge adds: the team sheet and
+    the user's instructions for the brain and for the director. `team` holds the
+    ids a step may name.
     """
     import anthropic
 
@@ -164,7 +224,7 @@ async def plan_task(
             messages=[{"role": "user", "content": task}],
             output_config={
                 "effort": "low",
-                "format": {"type": "json_schema", "schema": PLAN_SCHEMA},
+                "format": {"type": "json_schema", "schema": plan_schema(team)},
             },
         )
     except anthropic.APIError as e:
@@ -178,7 +238,7 @@ async def plan_task(
         return Plan(steps=[], cost_usd=cost)
     text = "".join(b.text for b in response.content if b.type == "text")
     try:
-        steps = parse_plan(text)
+        steps = parse_plan(text, team)
     except (ValueError, AttributeError, TypeError):
         logger.warning("Planner returned an unreadable plan")
         return Plan(steps=[], cost_usd=cost)

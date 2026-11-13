@@ -319,7 +319,7 @@ async def test_split_tasks_send_each_part_to_its_model(tmp_path: Path, monkeypat
         cost_usd=0.001,
     )
 
-    async def fake_plan(api_key: str, model: str, task: str, system: str = "") -> Plan:
+    async def fake_plan(api_key: str, model: str, task: str, system: str = "", **_: object) -> Plan:
         return plan
 
     monkeypatch.setattr("src.brain.bridge.plan_task", fake_plan)
@@ -353,7 +353,7 @@ async def test_an_indivisible_task_moves_to_the_planned_difficulty(
     bridge = _bridge(tmp_path, {})
     bridge.config.split = True
 
-    async def fake_plan(api_key: str, model: str, task: str, system: str = "") -> Plan:
+    async def fake_plan(api_key: str, model: str, task: str, system: str = "", **_: object) -> Plan:
         return Plan(steps=[PlanStep("s1", "", "hard", False)])
 
     monkeypatch.setattr("src.brain.bridge.plan_task", fake_plan)

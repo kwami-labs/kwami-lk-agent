@@ -34,6 +34,7 @@ from ..utils.logging import get_logger
 from .browser_tool import SIGN_IN_TOOL
 from .config import (
     HARD_MONTHLY_CAP_USD,
+    MAX_INSTRUCTIONS_CHARS,
     BrainConfig,
     BrainModel,
     budget_notice,
@@ -49,9 +50,11 @@ from .planner import (
     PLANNER_SYSTEM,
     Plan,
     PlanStep,
+    TeamMember,
     final_step,
     plan_from_text,
     plan_task,
+    team_sheet,
     waves,
 )
 from .providers import (
@@ -120,6 +123,11 @@ ORDER_TIMEOUT_SECONDS = 120.0
 CONTEXT_TURNS = 8
 CONTEXT_TURN_CHARS = 240
 CONTEXT_MEMORY_CHARS = 1200
+
+#: How a spoken request changes instructions (`Bridge.set_instructions`).
+INSTRUCTION_MODES = ("replace", "append", "clear")
+#: Words that mean the instructions for every model, not one of them.
+BRAIN_TARGETS = ("brain", "all", "everyone", "cerebro", "todos", "todo")
 #: A quick answer is spoken as the worker wrote it. Measured 2026-11-02, the voice model
 #: took 2 to 3 s more to say it again in its own words, and could only make it worse.
 QUICK_ANSWER_SECONDS = 25.0
@@ -465,6 +473,65 @@ class Bridge:
             "tasks": [t.public() for t in list(self.tasks.values())[-10:]],
         }
 
+    def instructions(self) -> dict[str, Any]:
+        """What the user has told the brain and each model, as it stands now."""
+        return {
+            "brain": self.config.instructions,
+            "models": {
+                (m.label or m.model): m.instructions for m in self.config.models if m.instructions
+            },
+        }
+
+    async def set_instructions(self, target: str, text: str, mode: str = "replace") -> str:
+        """Change the brain's or one model's instructions, by the user's spoken request.
+
+        Applied at once to this session and sent to the app as
+        `brain_instructions`, which saves it in the Models panel like a typed
+        change. Returns what to tell the user.
+        """
+        if mode not in INSTRUCTION_MODES:
+            return f"Unknown mode {mode!r}: use replace, append or clear."
+        wanted = target.strip()
+        model: BrainModel | None = None
+        if wanted.lower() not in BRAIN_TARGETS:
+            model = find_model(self.config.models, wanted)
+            if model is None:
+                names = ", ".join(m.label or m.model for m in self.config.models)
+                return f"No model called {target!r}. The models are: {names}."
+        current = model.instructions if model is not None else self.config.instructions
+        addition = text.strip()
+        if mode == "clear":
+            updated = ""
+        elif mode == "append" and current:
+            updated = f"{current}\n{addition}"
+        else:
+            updated = addition
+        if mode != "clear" and not addition:
+            return "Say what the instructions should be."
+        cut = len(updated) > MAX_INSTRUCTIONS_CHARS
+        updated = updated[:MAX_INSTRUCTIONS_CHARS]
+        if model is not None:
+            model.instructions = updated
+        else:
+            self.config.instructions = updated
+        who = model.label or model.model if model is not None else "the whole brain"
+        logger.info("Instructions for %s changed by voice (%s)", who, mode)
+        if self.publisher is not None:
+            try:
+                await self.publisher.publish(
+                    {
+                        "type": "brain_instructions",
+                        "target": model.id if model is not None else "brain",
+                        "instructions": updated,
+                    }
+                )
+            except Exception:
+                logger.debug("Could not send the new instructions to the app", exc_info=True)
+        if not updated:
+            return f"Instructions for {who} cleared."
+        limit = f" (cut to the {MAX_INSTRUCTIONS_CHARS}-character limit)" if cut else ""
+        return f"Instructions for {who} saved{limit}: {updated}"
+
     async def publish_status(self) -> None:
         if self.publisher is None:
             return
@@ -793,15 +860,21 @@ class Bridge:
     async def _plan(
         self, director: BrainModel, task: str, brain_task: BrainTask | None = None
     ) -> Plan | None:
-        """Ask the director how to split the work. None when it could not say."""
+        """Ask the director how to split the work, and whom to give each part.
+
+        None when it could not say.
+        """
         api_key = self._keys.get("ANTHROPIC_API_KEY", "")
+        team = self._team()
+        ids = [member.id for member in team]
+        planner = PLANNER_SYSTEM + team_sheet(team)
         if director.provider == "anthropic" and api_key and not self._on_account(director):
             # The structured-output call does not go through _ask, so the user's
             # instructions for the brain and for the director are added here.
             brief = self._brief(director)
             self._note_brief(brain_task, director, bool(brief))
-            system = f"{PLANNER_SYSTEM}\n\n{brief}" if brief else PLANNER_SYSTEM
-            plan = await plan_task(api_key, director.model, task, system=system)
+            system = f"{planner}\n\n{brief}" if brief else planner
+            plan = await plan_task(api_key, director.model, task, system=system, team=ids)
             if plan is not None:
                 self.ledger.add_spend(director.id, plan.cost_usd)
             return plan
@@ -810,7 +883,7 @@ class Bridge:
             director,
             BrainRequest(
                 task=task,
-                system=PLANNER_SYSTEM + PLAN_FORMAT,
+                system=planner + PLAN_FORMAT,
                 difficulty="simple",
                 native_search=False,
             ),
@@ -818,9 +891,22 @@ class Bridge:
         self._note_brief(brain_task, director, getattr(answer, "briefed", False))
         if not answer.ok:
             return None
-        plan = plan_from_text(answer.text)
+        plan = plan_from_text(answer.text, ids)
         plan.cost_usd = answer.cost_usd
         return plan
+
+    def _team(self) -> list[TeamMember]:
+        """The models the director may hand a step to: usable, and not the code executor."""
+        return [
+            TeamMember(
+                model.id,
+                model.label or model.model,
+                tuple(model.roles or [model.role]),
+                model.instructions,
+            )
+            for model in usable(self.config, self._keys)
+            if model.provider != "local"
+        ]
 
     def _note_model(self, brain_task: BrainTask, label: str) -> None:
         if label not in brain_task.models:
@@ -1135,7 +1221,8 @@ class Bridge:
                 brain_task.kind = "research"
             elif brain_task.kind == "research":
                 brain_task.kind = "analysis"
-            return await self._single(brain_task, "")
+            # The director may also have named who should do it.
+            return await self._single(brain_task, step.model)
 
         # When the last step already builds on every other one, it answers the
         # user itself. Measured 2026-10-09: a separate combine call repeated the
@@ -1211,7 +1298,9 @@ class Bridge:
         if not step.web:
             request.tavily_key = ""
         kind = "research" if step.web else "analysis"
-        return await self._ask_role(brain_task, kind, step.difficulty, request)
+        # The director's choice for this step goes first; the router covers a
+        # model it cannot use (no web for a web step) and the fallback.
+        return await self._ask_role(brain_task, kind, step.difficulty, request, step.model)
 
     async def _council(self, brain_task: BrainTask) -> BrainAnswer:
         members = council_members(self.config, self._keys)
