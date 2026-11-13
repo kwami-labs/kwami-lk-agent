@@ -33,6 +33,7 @@ class FakeBridge:
     started: list[dict[str, Any]] = field(default_factory=list)
     tasks: dict[str, FakeTask] = field(default_factory=dict)
     config: Any = field(default_factory=default_brain)
+    edits: list[tuple[str, str, str]] = field(default_factory=list)
 
     def start(self, **kwargs: Any) -> FakeTask | str:
         self.started.append(kwargs)
@@ -48,6 +49,13 @@ class FakeBridge:
 
     def status(self) -> dict[str, Any]:
         return {"type": "brain_status", "spentUsd": 1.5}
+
+    def instructions(self) -> dict[str, Any]:
+        return {"brain": "en euros", "models": {}}
+
+    async def set_instructions(self, target: str, text: str, mode: str = "replace") -> str:
+        self.edits.append((target, text, mode))
+        return f"saved {target}"
 
 
 @pytest.fixture
@@ -125,7 +133,24 @@ async def test_brain_status_adds_the_roster(agent: KwamiAgent, bridge: FakeBridg
     assert "type" not in status
     assert status["spentUsd"] == 1.5
     assert {m["id"] for m in status["roster"]} == {m.id for m in bridge.config.models}
+    assert status["instructions"] == {"brain": "en euros", "models": {}}
     assert status["note"]
+
+
+async def test_brain_status_changes_instructions_when_asked(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    status = await agent.brain_status(_ctx(bridge), "Gemini", "cita la fuente", "append")
+    assert status["changed"] == "saved Gemini"
+    assert bridge.edits == [("Gemini", "cita la fuente", "append")]
+
+
+async def test_brain_status_only_reads_without_a_target(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    status = await agent.brain_status(_ctx(bridge), "  ", "ignored")
+    assert "changed" not in status
+    assert bridge.edits == []
 
 
 async def test_on_a_text_llm_the_tool_asks_for_no_second_reply(

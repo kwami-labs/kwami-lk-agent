@@ -34,6 +34,7 @@ from ..utils.logging import get_logger
 from .browser_tool import SIGN_IN_TOOL
 from .config import (
     HARD_MONTHLY_CAP_USD,
+    MAX_INSTRUCTIONS_CHARS,
     BrainConfig,
     BrainModel,
     budget_notice,
@@ -122,6 +123,11 @@ ORDER_TIMEOUT_SECONDS = 120.0
 CONTEXT_TURNS = 8
 CONTEXT_TURN_CHARS = 240
 CONTEXT_MEMORY_CHARS = 1200
+
+#: How a spoken request changes instructions (`Bridge.set_instructions`).
+INSTRUCTION_MODES = ("replace", "append", "clear")
+#: Words that mean the instructions for every model, not one of them.
+BRAIN_TARGETS = ("brain", "all", "everyone", "cerebro", "todos", "todo")
 #: A quick answer is spoken as the worker wrote it. Measured 2026-11-02, the voice model
 #: took 2 to 3 s more to say it again in its own words, and could only make it worse.
 QUICK_ANSWER_SECONDS = 25.0
@@ -466,6 +472,65 @@ class Bridge:
             "spend": {**spend, "budgetUsd": self.config.monthly_budget_usd},
             "tasks": [t.public() for t in list(self.tasks.values())[-10:]],
         }
+
+    def instructions(self) -> dict[str, Any]:
+        """What the user has told the brain and each model, as it stands now."""
+        return {
+            "brain": self.config.instructions,
+            "models": {
+                (m.label or m.model): m.instructions for m in self.config.models if m.instructions
+            },
+        }
+
+    async def set_instructions(self, target: str, text: str, mode: str = "replace") -> str:
+        """Change the brain's or one model's instructions, by the user's spoken request.
+
+        Applied at once to this session and sent to the app as
+        `brain_instructions`, which saves it in the Models panel like a typed
+        change. Returns what to tell the user.
+        """
+        if mode not in INSTRUCTION_MODES:
+            return f"Unknown mode {mode!r}: use replace, append or clear."
+        wanted = target.strip()
+        model: BrainModel | None = None
+        if wanted.lower() not in BRAIN_TARGETS:
+            model = find_model(self.config.models, wanted)
+            if model is None:
+                names = ", ".join(m.label or m.model for m in self.config.models)
+                return f"No model called {target!r}. The models are: {names}."
+        current = model.instructions if model is not None else self.config.instructions
+        addition = text.strip()
+        if mode == "clear":
+            updated = ""
+        elif mode == "append" and current:
+            updated = f"{current}\n{addition}"
+        else:
+            updated = addition
+        if mode != "clear" and not addition:
+            return "Say what the instructions should be."
+        cut = len(updated) > MAX_INSTRUCTIONS_CHARS
+        updated = updated[:MAX_INSTRUCTIONS_CHARS]
+        if model is not None:
+            model.instructions = updated
+        else:
+            self.config.instructions = updated
+        who = model.label or model.model if model is not None else "the whole brain"
+        logger.info("Instructions for %s changed by voice (%s)", who, mode)
+        if self.publisher is not None:
+            try:
+                await self.publisher.publish(
+                    {
+                        "type": "brain_instructions",
+                        "target": model.id if model is not None else "brain",
+                        "instructions": updated,
+                    }
+                )
+            except Exception:
+                logger.debug("Could not send the new instructions to the app", exc_info=True)
+        if not updated:
+            return f"Instructions for {who} cleared."
+        limit = f" (cut to the {MAX_INSTRUCTIONS_CHARS}-character limit)" if cut else ""
+        return f"Instructions for {who} saved{limit}: {updated}"
 
     async def publish_status(self) -> None:
         if self.publisher is None:

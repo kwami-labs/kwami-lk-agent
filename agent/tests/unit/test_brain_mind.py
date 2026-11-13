@@ -1429,3 +1429,109 @@ async def test_a_step_runs_on_the_model_the_director_named(tmp_path: Path) -> No
 
     assert answer.ok and model is not None and model.id == chosen
     assert asked == [chosen]
+
+
+# -- the user changes the instructions by voice --------------------------------------
+
+
+class _Recorder:
+    def __init__(self, fail: bool = False) -> None:
+        self.sent: list[dict[str, Any]] = []
+        self.fail = fail
+
+    async def publish(self, payload: dict[str, Any], *, topic: str | None = None) -> bool:
+        if self.fail:
+            raise RuntimeError("room gone")
+        self.sent.append(payload)
+        return True
+
+
+def _voice_bridge(tmp_path: Path, fail: bool = False) -> tuple[Bridge, _Recorder]:
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    recorder = _Recorder(fail)
+    bridge.publisher = recorder  # type: ignore[assignment]
+    return bridge, recorder
+
+
+async def test_a_model_gets_new_instructions_by_voice(tmp_path: Path) -> None:
+    bridge, recorder = _voice_bridge(tmp_path)
+    opus = next(m for m in bridge.config.models if m.id == "claude-opus")
+
+    said = await bridge.set_instructions("Opus", "  Solo decisiones de dinero.  ")
+
+    assert opus.instructions == "Solo decisiones de dinero."
+    assert "saved" in said and "Solo decisiones de dinero." in said
+    assert recorder.sent == [
+        {
+            "type": "brain_instructions",
+            "target": "claude-opus",
+            "instructions": "Solo decisiones de dinero.",
+        }
+    ]
+    assert bridge.instructions()["models"][opus.label] == "Solo decisiones de dinero."
+
+
+async def test_appending_keeps_what_was_there(tmp_path: Path) -> None:
+    bridge, _ = _voice_bridge(tmp_path)
+    bridge.config.instructions = "En euros."
+
+    await bridge.set_instructions("todos", "Con fuentes.", "append")
+
+    assert bridge.config.instructions == "En euros.\nCon fuentes."
+    assert bridge.instructions()["brain"] == "En euros.\nCon fuentes."
+
+
+async def test_appending_to_nothing_is_the_new_text(tmp_path: Path) -> None:
+    bridge, _ = _voice_bridge(tmp_path)
+    await bridge.set_instructions("brain", "Breve.", "append")
+    assert bridge.config.instructions == "Breve."
+
+
+async def test_clearing_empties_them(tmp_path: Path) -> None:
+    bridge, recorder = _voice_bridge(tmp_path)
+    bridge.config.instructions = "Algo."
+
+    said = await bridge.set_instructions("brain", "", "clear")
+
+    assert bridge.config.instructions == ""
+    assert "cleared" in said
+    assert recorder.sent[0] == {"type": "brain_instructions", "target": "brain", "instructions": ""}
+
+
+async def test_long_instructions_are_cut_and_said_so(tmp_path: Path) -> None:
+    bridge, _ = _voice_bridge(tmp_path)
+    said = await bridge.set_instructions("brain", "a" * 2500)
+    assert len(bridge.config.instructions) == 2000
+    assert "cut to the 2000-character limit" in said
+
+
+@pytest.mark.parametrize(
+    ("target", "text", "mode", "reply"),
+    [
+        ("Opus", "x", "rewrite", "Unknown mode"),
+        ("GPT-9", "x", "replace", "No model called"),
+        ("Opus", "   ", "replace", "Say what the instructions should be."),
+    ],
+)
+async def test_a_request_that_cannot_be_applied_changes_nothing(
+    tmp_path: Path, target: str, text: str, mode: str, reply: str
+) -> None:
+    bridge, recorder = _voice_bridge(tmp_path)
+    said = await bridge.set_instructions(target, text, mode)
+    assert reply in said
+    assert recorder.sent == []
+    assert all(not m.instructions for m in bridge.config.models)
+
+
+async def test_a_lost_room_still_applies_the_change(tmp_path: Path) -> None:
+    bridge, _ = _voice_bridge(tmp_path, fail=True)
+    said = await bridge.set_instructions("brain", "Breve.")
+    assert bridge.config.instructions == "Breve."
+    assert "saved" in said
+
+
+async def test_without_a_publisher_the_change_still_applies(tmp_path: Path) -> None:
+    bridge = _bridge(tmp_path, {"ANTHROPIC_API_KEY": "a"})
+    bridge.publisher = None
+    await bridge.set_instructions("brain", "Breve.")
+    assert bridge.config.instructions == "Breve."
