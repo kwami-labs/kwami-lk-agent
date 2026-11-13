@@ -37,6 +37,7 @@ from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
 from .runtime.thinking_sound import ThinkingSound
+from .runtime.transcript_relay import TranscriptRelay
 from .runtime.turn_metrics import TurnMetricsRelay
 from .runtime.turn_taking import noise_cancellation_selector, session_turn_handling
 from .runtime_bootstrap import fetch_runtime_config, resolve_kwami_id
@@ -259,27 +260,9 @@ async def _run_session(ctx: JobContext) -> None:
     turn_metrics = TurnMetricsRelay(LiveKitRoomPublisher(ctx.room))
     session.on("conversation_item_added", turn_metrics.on_conversation_item_added)
 
-    # Relay each turn's text to the browser. The worker owns the microphone on
-    # this path, so only it knows what was said; the studio renders the transcript
-    # and checks a live guess against the phrase there (the worker must never
-    # decide who won). `lk.transcription` carries interim fragments without a
-    # trusted role, so this sends the explicit frame the Kwami client parses.
-    transcript_publisher = LiveKitRoomPublisher(ctx.room)
-    transcript_tasks: set[asyncio.Task] = set()
-
-    @session.on("conversation_item_added")
-    def on_transcript_item(event) -> None:
-        item = getattr(event, "item", None)
-        text = (getattr(item, "text_content", None) or "").strip()
-        if not text or item.role not in ("user", "assistant"):
-            return
-        task = asyncio.create_task(
-            transcript_publisher.publish(
-                {"type": "transcript", "role": "player" if item.role == "user" else "kwami", "text": text}
-            )
-        )
-        transcript_tasks.add(task)
-        task.add_done_callback(transcript_tasks.discard)
+    # Each turn's text to the browser as a `transcript` frame (runtime/transcript_relay.py).
+    transcript = TranscriptRelay(LiveKitRoomPublisher(ctx.room))
+    session.on("conversation_item_added", transcript.on_conversation_item_added)
 
     # Routing lives in runtime.dispatch so each branch is reachable from a test.
     router = DataMessageRouter(
