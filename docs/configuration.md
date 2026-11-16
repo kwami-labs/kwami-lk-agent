@@ -35,6 +35,7 @@ variable `Settings` reads. Plaintext `.env.*` overrides stay gitignored.
 | `KWAMI_API_URL` | kwami-lk-api base URL (default `http://localhost:8080`) |
 | `KWAMI_API_KEY` | Shared secret (`X-Kwami-API-Key` / `X-API-Key`) |
 | `KWAMI_API_TIMEOUT` | Runtime-config fetch timeout (default 30s, floor 1s) |
+| `KWAMI_RUNTIME_API_URL` | Optional. Base URL the telephony runtime-config fetch (`/internal/kwamis/{id}/runtime`) goes to, when that is not `KWAMI_API_URL`. Unset: `KWAMI_API_URL` is used. Usage reporting and the browser context store always use `KWAMI_API_URL` |
 
 ### Optional features
 
@@ -43,7 +44,10 @@ variable `Settings` reads. Plaintext `.env.*` overrides stay gitignored.
 | `ZEP_API_KEY` | Persistent memory |
 | `TAVILY_API_KEY` | `web_search` |
 | `SERPAPI_KEY` | `product_search` (Google Shopping cards) |
-| `BROWSER_USE_API_KEY` | Cloud browsing |
+| `KWAMI_BROWSER_PROVIDER` | Browser vendor: `browserbase` (default), `browser_use` or `local` |
+| `BROWSERBASE_API_KEY` / `BROWSERBASE_PROJECT_ID` | Cloud browsing, default vendor |
+| `BROWSER_USE_API_KEY` | Cloud browsing, alternative vendor |
+| `KWAMI_HEADLESS_CHROMIUM` / `KWAMI_HEADLESS_ALLOW_NO_SANDBOX` | Built-in Chromium path, and running it without its sandbox (see [Security](./security.md)) |
 | `KWAMI_ALLOW_BROWSER_JS` | Allow `run_js_in_navigation` (default off) |
 | `MISTRAL_API_KEY` | Mistral via OpenAI-compatible endpoint |
 | `ELEVEN_API_KEY` | ElevenLabs TTS (STT can use LiveKit Inference without it) |
@@ -55,6 +59,21 @@ variable `Settings` reads. Plaintext `.env.*` overrides stay gitignored.
 | `CEREBRAS_API_KEY` | Cerebras |
 | `XAI_API_KEY` | xAI Grok |
 
+Platform, storage, logging and the brain (all on `Settings`):
+
+| Variable | Purpose |
+| --- | --- |
+| `SUPABASE_URL` / `SUPABASE_SECRET_KEY` | The user's own Supabase, written directly when there is no Kwami API (also the brain's job queue) |
+| `KWAMI_STORAGE` | `auto` (default), `supabase` or `api`: where what outlives a session is kept |
+| `KWAMI_LOG_FORMAT` | `json` for one JSON object per log line |
+| `ENVIRONMENT` | Deployment name, for logs and traces |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` / `_HEADERS`, `OTEL_SERVICE_NAME` | Tracing; off while the endpoint is empty |
+| `KWAMI_AGENT_NAME` | Dispatch name (default `kwami-agent`); see [Deployment](./deployment.md) |
+| `KWAMI_PROVIDER_KEYS_SECRET` | Opens the model keys users connected from the app |
+| `KWAMI_EXECUTOR_MODE` | Brain executor: `auto` (default), `local` or `cloud` |
+| `KWAMI_SELF_REPO_OWNER`, `KWAMI_GOOGLE_WORK_TOKEN` | Brain self-improvement owner, Google token ([Brain work thread](./brain-worker.md)) |
+| `KWAMI_CLOUD_WORKER`, `KWAMI_CLOUD_OWNERS`, `KWAMI_CLOUD_REPO_OWNER` | The brain's cloud work thread ([Deployment](./deployment.md)) |
+
 Optional extras in `pyproject.toml`: `anthropic`, `google`, `elevenlabs`.
 When a plugin is missing the factory logs a warning and falls back to OpenAI.
 
@@ -62,7 +81,10 @@ When a plugin is missing the factory logs a warning and falls back to OpenAI.
 
 ## Session config (`KwamiConfig`)
 
-Built from a `config` message in `handlers/config_handler.py`. Wire parsing
+Built from a `config` message in `handlers/config_handler.py`. A top-level
+`"greeting": false` on that message declines the greeting outright (the default
+one is generic, wrong for a character that volunteers nothing); no later config
+greets either. It is a message flag, not a `KwamiConfig` field. Wire parsing
 lives in `domain/parsing.py` so a `null` section or a string-typed number
 cannot crash the handler.
 
@@ -212,7 +234,7 @@ offering a tool that cannot work.
 
 ## Where the environment is defined
 
-`Settings.ENV_VAR_NAMES` (`src/settings.py`) is the single inventory of every
+`ENV_VAR_NAMES` (`src/settings.py`) is the single inventory of every
 variable the agent reads. Three things derive from it rather than restating it,
 because all three had silently drifted:
 

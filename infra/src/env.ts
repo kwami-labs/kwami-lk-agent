@@ -65,6 +65,8 @@ export function containerEnvFromWorker(env: Env): Record<string, string> {
     ENVIRONMENT: env.ENVIRONMENT,
     LIVEKIT_URL: env.LIVEKIT_URL,
     KWAMI_API_URL: env.KWAMI_API_URL,
+    // Optional: the telephony runtime-config fetch, when it is not KWAMI_API_URL.
+    KWAMI_RUNTIME_API_URL: (env as Env & { KWAMI_RUNTIME_API_URL?: string }).KWAMI_RUNTIME_API_URL ?? "",
     KWAMI_API_TIMEOUT: env.KWAMI_API_TIMEOUT,
     KWAMI_ALLOW_BROWSER_JS: env.KWAMI_ALLOW_BROWSER_JS,
     KWAMI_HEADLESS_ALLOW_NO_SANDBOX: env.KWAMI_HEADLESS_ALLOW_NO_SANDBOX,

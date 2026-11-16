@@ -43,7 +43,7 @@ flowchart TB
 | Model → browser | URLs, click targets, JS | URL allow-list + DNS check; JS off by default |
 | Page → model | Extracted text | Truncate to 4 000 chars; treat as hostile |
 | Client tool → model | `tool_result` | Truncate to 4 000 chars |
-| Memory → prompt | Zep context block | Truncate to 2 200 chars |
+| Memory → prompt | Zep context block | Capped by retrieval preset: 1 500 / 3 000 / 6 000 chars |
 | Worker → credits API | Usage summary | Shared secret header; 5s shutdown budget |
 | Worker → runtime API | Telephony config | Shared secret; failure stays on placeholder |
 | Process → logs | Settings | Keys redacted to `set` / `MISSING` |
@@ -137,7 +137,7 @@ flowchart TD
     Host -->|no| DNS["getaddrinfo off event loop"]
     DNS --> Priv{"resolves private / loopback<br/>/ link-local / metadata?"}
     Priv -->|yes| Reject
-    Priv -->|no| Open["Browser Use Cloud"]
+    Priv -->|no| Open["Cloud browser"]
 ```
 
 ## Prompt injection
@@ -146,7 +146,7 @@ Assume every retrieved string can contain instructions:
 
 | Source | Cap | Notes |
 | --- | --- | --- |
-| Zep memory context | 2 200 chars in the system prompt | Greeting still runs if Zep is slow |
+| Zep memory context | 1 500 / 3 000 / 6 000 chars (retrieval preset) in the system prompt | Greeting still runs if Zep is slow |
 | Browser page text / JS result | 4 000 chars | JS disabled by default |
 | Client `tool_result` | 4 000 chars | Both success and error paths |
 | Search snippets | Publisher trim stages | Images kept longer than prose |

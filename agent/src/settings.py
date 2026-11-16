@@ -79,6 +79,7 @@ DEFAULT_AGENT_NAME = "kwami-agent"
 ENV_VAR_NAMES: tuple[str, ...] = (
     "KWAMI_API_URL",
     "KWAMI_API_KEY",
+    "KWAMI_RUNTIME_API_URL",
     "KWAMI_API_TIMEOUT",
     "KWAMI_LOG_FORMAT",
     "ENVIRONMENT",
@@ -143,6 +144,8 @@ class Settings:
     # Kwami platform API (runtime config + credit reporting)
     kwami_api_url: str = DEFAULT_KWAMI_API_URL
     kwami_api_key: str = ""
+    #: Where a live session's persona comes from, when that is not the usage API.
+    kwami_runtime_api_url: str = ""
     kwami_api_timeout: float = DEFAULT_KWAMI_API_TIMEOUT
     #: Whether KWAMI_API_URL was given at all. `kwami_api_url` always holds a
     #: value (the localhost default), so this is what tells "talk to the API on
@@ -237,6 +240,7 @@ class Settings:
         return cls(
             kwami_api_url=_env_str("KWAMI_API_URL", DEFAULT_KWAMI_API_URL).rstrip("/"),
             kwami_api_key=_env_str("KWAMI_API_KEY"),
+            kwami_runtime_api_url=_env_str("KWAMI_RUNTIME_API_URL").rstrip("/"),
             kwami_api_timeout=_env_float("KWAMI_API_TIMEOUT", DEFAULT_KWAMI_API_TIMEOUT),
             kwami_api_url_set=bool(_env_str("KWAMI_API_URL")),
             supabase_url=_env_str("SUPABASE_URL").rstrip("/"),

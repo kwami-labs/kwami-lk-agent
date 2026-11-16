@@ -172,7 +172,8 @@ async def fetch_runtime_config(kwami_id: str) -> dict[str, Any] | None:
         logger.warning("get_settings().kwami_api_key not set; telephony bootstrap is disabled")
         return None
 
-    url = f"{get_settings().kwami_api_url.rstrip('/')}/internal/kwamis/{kwami_id}/runtime"
+    base = get_settings().kwami_runtime_api_url or get_settings().kwami_api_url
+    url = f"{base.rstrip('/')}/internal/kwamis/{kwami_id}/runtime"
     timeout = _api_timeout_seconds()
     try:
         client = shared_client()
