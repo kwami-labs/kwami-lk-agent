@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Protocol, runtime_checkable
 
 
@@ -46,7 +47,14 @@ class MemoryPort(Protocol):
     async def buffer_user_message(self, content: str, name: str | None = None) -> None: ...
 
     async def add_exchange(
-        self, assistant_content: str, assistant_name: str | None = None
+        self,
+        assistant_content: str,
+        assistant_name: str | None = None,
+        tools: Sequence[str] = (),
+    ) -> None: ...
+
+    async def add_work_done(
+        self, title: str, result: str, finished_at: str = "", language: str = ""
     ) -> None: ...
 
     async def search(self, query: str, limit: int = 5) -> list[dict]: ...

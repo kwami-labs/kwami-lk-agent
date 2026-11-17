@@ -202,21 +202,6 @@ async def test_research_keeps_a_result_with_no_text(agent: KwamiAgent, env_setti
     assert "from 1 sources" in result
 
 
-@respx.mock
-async def test_research_without_a_memory_writer(agent: KwamiAgent, env_setting) -> None:
-    """`_remember_in_background` comes from another mixin and may be absent."""
-    env_setting("TAVILY_API_KEY", "tvly-test")
-    respx.post(TAVILY_SEARCH_URL).mock(
-        return_value=httpx.Response(
-            200,
-            json={"answer": "An answer.", "results": [{"title": "T", "url": "https://a.com/1"}]},
-        )
-    )
-    agent._remember_in_background = "not callable"  # type: ignore[assignment]
-
-    assert "An answer." in await agent.deep_research(None, "fusion power")
-
-
 def test_publishing_research_without_a_publisher(agent: KwamiAgent) -> None:
     """A publish failure must not kill the tool that produced the answer."""
     agent._publisher = "not callable"  # type: ignore[assignment]

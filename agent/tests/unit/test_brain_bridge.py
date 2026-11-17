@@ -714,6 +714,45 @@ async def test_a_result_that_cannot_be_spoken_is_kept_for_later(tmp_path: Path) 
     assert [(p.title, p.summary) for p in owed] == [("Oro", "Sube.")]
 
 
+class _JournalMemory:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.work: list[tuple[Any, ...]] = []
+
+    async def add_work_done(self, *args: Any, **kwargs: Any) -> None:
+        if self.fail:
+            raise RuntimeError("zep down")
+        self.work.append((*args, kwargs))
+
+
+async def test_finished_work_told_in_the_call_is_journaled(tmp_path: Path) -> None:
+    """The result is said in the voice's words, which memory does not learn from."""
+    bridge = _bridge(tmp_path)
+    memory = _JournalMemory()
+    bridge.attach(FakeSession(SimpleNamespace(_memory=memory)), FakePublisher())
+    task = _done()
+    task.finished_at = "2026-11-16T10:00:00+00:00"
+
+    await bridge._deliver(task)
+
+    assert memory.work == [
+        ("Oro", "Sube.\n\nDetalle: mucho", task.finished_at, {"language": bridge.language})
+    ]
+
+
+async def test_failed_work_and_a_failing_journal_are_not_journaled(tmp_path: Path) -> None:
+    bridge = _bridge(tmp_path)
+    memory = _JournalMemory()
+    bridge.attach(FakeSession(SimpleNamespace(_memory=memory)), FakePublisher())
+    await bridge._deliver(_done(status="failed"))
+    assert memory.work == []
+
+    broken = _JournalMemory(fail=True)
+    bridge.attach(FakeSession(SimpleNamespace(_memory=broken)), FakePublisher())
+    await bridge._deliver(_done())  # must not raise
+    assert broken.work == []
+
+
 def test_nothing_is_kept_without_a_kwami(tmp_path: Path) -> None:
     bridge = _bridge(tmp_path)
     bridge.kwami_id = ""
