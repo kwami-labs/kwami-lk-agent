@@ -267,9 +267,6 @@ class KnowledgeToolsMixin:
             return f"I searched but found nothing usable on {topic}."
 
         self._publish_research(context, topic, sources)
-        remember = getattr(self, "_remember_in_background", None)
-        if callable(remember):
-            remember([f"User asked for research on: {topic}"])
 
         briefing = "\n\n".join(sections)[:MAX_BRIEFING_CHARS]
         return (

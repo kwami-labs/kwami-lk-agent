@@ -89,9 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept on their Zep record, so it is known at once next time and Zep ties it to their node.
 - **The whole turn is heard.** A turn whose words say it has not finished is held, and the
   pieces are answered and remembered as one. A quick answer is spoken as the worker wrote it.
+- **The memory graph keeps what lasts, not noise and errands.** Every turn still goes to
+  the thread, but a turn the agent did not understand, or an order it carried out with a
+  tool ("open", "search", "send"), is no longer extracted into the graph, unless the user
+  said something lasting in it ("from now on", "I prefer", "my sister…"). Searches, shopping
+  and research are no longer written as "User searched for" facts. Each finished piece of
+  work leaves one line in the graph, credited to the kwami, and the user's name is put on
+  their Zep record when they say it, so their node stops being named after the id. Measured
+  with `scripts/memory_lab`: junk facts and nodes from 7 and 6 to 0, questions answered
+  from 7/8 to 8/8.
 
 ### Fixed
 
+- **Typed chat is remembered.** Text sent from the app skipped the hook that stores the
+  user's words, so nothing typed reached memory; it is now buffered like speech.
 - **No shell on a server other users share.** On LiveKit Cloud a code task ran Claude
   Code with Bash in the agent's own container, as the agent's system user, so a script
   written into the task folder could read the agent's environment from `/proc` -- the

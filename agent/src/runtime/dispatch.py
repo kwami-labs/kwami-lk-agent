@@ -152,13 +152,17 @@ class DataMessageRouter:
         and nothing routed it: every typed message was decoded, matched no
         handler and dropped at debug level, so the chat box never reached the
         agent. Whatever is being said is cut off first, as a spoken
-        interruption would be.
+        interruption would be. The turn is handed to memory too: answering it
+        skips the hook a spoken turn is remembered through.
         """
         text = message.get("text")
         if not isinstance(text, str) or not text.strip():
             return
         text = text.strip()[:MAX_TYPED_CHARS]
         self._interrupt_quietly()
+        remember = getattr(getattr(self.state, "current_agent", None), "remember_typed_turn", None)
+        if callable(remember):
+            remember(text)
         try:
             self.session.generate_reply(user_input=text)
         except Exception:

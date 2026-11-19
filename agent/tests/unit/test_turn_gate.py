@@ -235,7 +235,8 @@ class TestTheAgent:
         assert agent.turn_open
 
     async def test_only_the_standard_pipeline_listens_for_them(self, monkeypatch):
-        for pipeline, events in ((None, 3), (REALTIME_PIPELINE, 1)):
+        # Every pipeline: conversation_item_added and function_tools_executed.
+        for pipeline, events in ((None, 4), (REALTIME_PIPELINE, 2)):
             agent = _agent(pipeline)
             session = MagicMock()
             agent._register_session_listeners = KwamiAgent._register_session_listeners.__get__(

@@ -90,6 +90,8 @@ class FakeMemory:
         self._get_context_error = get_context_error
         self.buffered: list[tuple[str, str | None]] = []
         self.exchanges: list[dict[str, Any]] = []
+        self.tools: list[list[str]] = []
+        self.work: list[tuple[str, str, str, str]] = []
         self.set_names: list[str] = []
 
     async def get_user_name(self) -> str | None:
@@ -107,8 +109,16 @@ class FakeMemory:
     async def buffer_user_message(self, content: str, name: str | None = None) -> None:
         self.buffered.append((content, name))
 
-    async def add_exchange(self, *, assistant_content: str, assistant_name: str) -> None:
+    async def add_exchange(
+        self, *, assistant_content: str, assistant_name: str, tools: list[str]
+    ) -> None:
         self.exchanges.append({"content": assistant_content, "name": assistant_name})
+        self.tools.append(tools)
+
+    async def add_work_done(
+        self, title: str, result: str, finished_at: str = "", language: str = ""
+    ) -> None:
+        self.work.append((title, result, finished_at, language))
 
 
 class Unreadable:
@@ -771,6 +781,76 @@ async def test_a_failed_persist_is_warned_not_raised(caplog) -> None:
     assert "Failed to add exchange to memory" in caplog.text
 
 
+class SpeechSession(FakeSession):
+    """A session whose speech being committed already started some tools."""
+
+    def __init__(self, started: list[str] | None = None) -> None:
+        super().__init__()
+        calls = [SimpleNamespace(type="function_call", name=n) for n in started or []]
+        self.current_speech = SimpleNamespace(
+            chat_items=[SimpleNamespace(type="message", role="assistant"), *calls]
+        )
+
+
+async def test_the_tools_a_reply_ran_reach_memory_with_it() -> None:
+    """An errand is kept out of the graph: memory has to know the turn ran tools."""
+    memory = FakeMemory()
+    agent = agent_with(memory=memory)
+    agent._fake_session = SpeechSession(started=["navigate_to"])
+    agent._register_session_listeners()
+
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="Abre Fox News"))
+    (on_tools,) = agent._fake_session.handlers["function_tools_executed"]
+    on_tools(SimpleNamespace(function_calls=[SimpleNamespace(name="play_media")]))
+    on_tools(SimpleNamespace(function_calls=None))
+    agent._on_conversation_item_added(
+        SimpleNamespace(item=SimpleNamespace(role="assistant", text_content="Abierto, señor."))
+    )
+    await asyncio.gather(*agent._background_tasks)
+
+    assert memory.tools == [["play_media", "navigate_to"]]
+
+
+async def test_a_new_turn_forgets_the_last_turns_tools() -> None:
+    memory = FakeMemory()
+    agent = agent_with(memory=memory)
+    agent._on_tools_executed(SimpleNamespace(function_calls=[SimpleNamespace(name="")]))
+    agent._on_tools_executed(SimpleNamespace(function_calls=[SimpleNamespace(name="web_search")]))
+
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="¿Y tú qué opinas?"))
+    await agent._persist_assistant_turn("Que sí.")
+
+    assert agent._turn_tools == []
+    assert memory.tools == [[]]
+
+
+def test_without_a_session_no_speech_tools_are_known() -> None:
+    assert agent_with()._tools_of_current_speech() == []
+
+
+async def test_a_name_the_user_gives_goes_to_memory() -> None:
+    memory = FakeMemory()
+    agent = agent_with(config=KwamiConfig(soul=KwamiSoulConfig(name="Jarvis")), memory=memory)
+
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="Hola, soy Bruno"))
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="Me llamo Bruno"))
+    await agent.on_user_turn_completed(None, SimpleNamespace(text_content="Soy Jarvis"))
+
+    assert memory.set_names == ["Bruno"]
+    assert memory.buffered[0] == ("Hola, soy Bruno", "Bruno")
+
+
+async def test_a_typed_turn_is_buffered_for_memory() -> None:
+    """Typed text skips on_user_turn_completed, so it never reached memory."""
+    memory = FakeMemory()
+    agent = agent_with(memory=memory)
+
+    agent.remember_typed_turn("Estoy montando un equipo")
+    await asyncio.gather(*agent._background_tasks)
+
+    assert memory.buffered == [("Estoy montando un equipo", None)]
+
+
 def test_a_null_content_attribute_is_skipped() -> None:
     """`content=None` must fall through to `text`, not be read as absent."""
     agent = KwamiAgent()
@@ -929,6 +1009,31 @@ async def test_the_bridge_learns_who_it_works_for_and_owed_results_are_greeted()
     greeting = agent._fake_session.replies[0]["instructions"]
     assert "Oro: Sube un 2 %" in greeting
     assert "." * 401 not in greeting
+
+
+async def test_owed_results_are_journaled_when_the_greeting_tells_them() -> None:
+    from src.brain.ledger import PendingResult
+
+    memory = FakeMemory()
+    bridge = FakeBridge([PendingResult("t1", "Oro", "Sube un 2 %", "2026-11-16T09:00:00")])
+    agent = agent_with(config=_chartered(), memory=memory)
+    agent._fake_session = SessionWithDeps(SimpleNamespace(bridge=bridge))
+
+    assert await agent._take_brain_results() == ["Oro: Sube un 2 %"]
+    await asyncio.gather(*agent._background_tasks)
+
+    assert memory.work == [("Oro", "Sube un 2 %", "2026-11-16T09:00:00", "es-ES")]
+
+
+async def test_owed_results_are_not_journaled_without_a_memory() -> None:
+    from src.brain.ledger import PendingResult
+
+    bridge = FakeBridge([PendingResult("t1", "Oro", "Sube", "")])
+    agent = agent_with(config=_chartered(), memory=FakeMemory(initialized=False))
+    agent._fake_session = SessionWithDeps(SimpleNamespace(bridge=bridge))
+
+    assert await agent._take_brain_results() == ["Oro: Sube"]
+    assert agent._background_tasks == set()
 
 
 async def test_a_charter_that_asks_for_no_greeting_is_obeyed(caplog) -> None:

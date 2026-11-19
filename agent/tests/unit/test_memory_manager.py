@@ -505,6 +505,95 @@ async def test_an_exchange_ignores_assistant_roles_for_graph_building(monkeypatc
     assert memory._client.thread.added[0]["ignore_roles"] == ["assistant"]
 
 
+@pytest.mark.parametrize(
+    ("user", "reply", "tools"),
+    [
+        ("Abre Fox News.", "Abierto, señor.", ["navigate_to"]),
+        ("No, ese coche no vas a probar", "No he entendido la frase, señor.", []),
+    ],
+)
+async def test_an_errand_or_noise_stays_in_the_thread_but_out_of_the_graph(
+    monkeypatch, user: str, reply: str, tools: list[str]
+) -> None:
+    monkeypatch.setattr(
+        "src.memory.manager.get_zep_imports", lambda: (None, ZepMessageDouble, None)
+    )
+    memory = ready_memory()
+
+    await memory.buffer_user_message(user)
+    await memory.add_exchange(reply, tools=tools)
+
+    added = memory._client.thread.added[0]
+    assert [m.content for m in added["messages"]] == [user, reply]
+    assert added["ignore_roles"] == ["user", "assistant"]
+
+
+async def test_an_errand_stating_a_preference_is_still_learned(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "src.memory.manager.get_zep_imports", lambda: (None, ZepMessageDouble, None)
+    )
+    memory = ready_memory()
+
+    await memory.buffer_user_message("A partir de ahora pon las noticias en inglés.")
+    await memory.add_exchange("Hecho, señor.", tools=["navigate_to"])
+
+    assert memory._client.thread.added[0]["ignore_roles"] == ["assistant"]
+
+
+async def test_finished_work_is_one_line_in_the_graph(messaging_memory) -> None:
+    added: list[dict] = []
+
+    async def graph_add(**kwargs: Any) -> None:
+        added.append(kwargs)
+
+    messaging_memory._client.graph.add = graph_add
+    messaging_memory.set_user_name("Ada")
+
+    await messaging_memory.add_work_done(
+        "Informe solar", "La solar da el 17 %.", "2026-11-16T10:00:00+00:00", language="es"
+    )
+
+    assert added == [
+        {
+            "user_id": "kwami_kwami-1",
+            "type": "text",
+            "data": "Kwami hizo un trabajo para Ada el 2026-11-16: Informe solar. "
+            "Resultado: La solar da el 17 %.",
+            "source_description": "Work journal of Kwami",
+        }
+    ]
+    assert messaging_memory._client.thread.added == []
+
+
+async def test_finished_work_without_a_date_is_dated_today(messaging_memory) -> None:
+    added: list[dict] = []
+
+    async def graph_add(**kwargs: Any) -> None:
+        added.append(kwargs)
+
+    messaging_memory._client.graph.add = graph_add
+
+    await messaging_memory.add_work_done("Report", "Done.")
+
+    assert added[0]["data"].startswith("Kwami did a piece of work for the user on 20")
+
+
+async def test_journaling_never_raises_and_skips_what_it_cannot_write(
+    messaging_memory, caplog
+) -> None:
+    async def graph_add(**kwargs: Any) -> None:
+        raise RuntimeError("zep down")
+
+    messaging_memory._client.graph.add = graph_add
+    with caplog.at_level(logging.WARNING):
+        await messaging_memory.add_work_done("Report", "Done.")
+    assert "Could not add finished work" in caplog.text
+
+    await messaging_memory.add_work_done("   ", "Done.")  # no title: nothing to write
+    messaging_memory._client = None
+    await messaging_memory.add_work_done("Report", "Done.")
+
+
 async def test_an_exchange_is_billed(monkeypatch) -> None:
     monkeypatch.setattr(
         "src.memory.manager.get_zep_imports", lambda: (None, ZepMessageDouble, None)

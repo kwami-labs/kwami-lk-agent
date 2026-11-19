@@ -20,9 +20,43 @@ Assistant text is sent with the user turn so Zep has context for extraction,
 but `ignore_roles=["assistant"]` keeps the assistant from becoming a graph
 entity.
 
+### What reaches the graph
+
+Every turn stays in the thread, but only lasting knowledge is extracted.
+`memory/gate.py` decides per exchange; a turn it rejects is sent with
+`ignore_roles=["user", "assistant"]`, which keeps it in history without
+extraction.
+
+| Turn | Graph |
+| --- | --- |
+| The assistant says it did not understand (noise, half sentences) | No |
+| The assistant acted through a tool that is not passive (open, search, send…) | No, unless the user said something lasting in it ("from now on", "I prefer", "my sister…") |
+| Anything else: who the user is, people, projects, routines, decisions | Yes |
+
+Passive tools (`recall_memories`, `get_memory_status`, `get_current_time`,
+`get_kwami_info`, `read_user_profile`, `remember_about_user`) do not make a
+turn an errand. The tools of a turn come from `function_tools_executed` and the
+function calls already on the current speech.
+
+Two more writes:
+
+- **Typed chat.** Text sent from the app goes through `generate_reply(user_input=…)`,
+  which skips `on_user_turn_completed`, so `dispatch` hands it to
+  `remember_typed_turn` and it is buffered like speech.
+- **Work journal.** Each finished piece of work leaves one line through
+  `add_work_done` (`graph.add`, type `text`), with the assistant as the one who
+  did it: "Jarvis did a piece of work for Ana on 2026-11-16: … Result: …"
+  (Spanish when the kwami speaks Spanish; the result is capped at 300
+  characters). It is written once, when the result is delivered: in a call
+  (`brain/bridge.py`, done work only) or at the next greeting (owed results).
+
+Searches, shopping and research are not written as facts: they are errands.
+
 ```mermaid
 flowchart LR
     User["User utterance"] --> Hook["on_user_turn_completed"]
+    Typed["Typed chat"] --> Hook2["remember_typed_turn"]
+    Hook2 --> Buf
     Hook --> Buf["buffer_user_message"]
     Asst["Assistant turn"] --> Ev["conversation_item_added"]
     Ev --> Ex["add_exchange"]
@@ -174,7 +208,16 @@ user marked `"custom"` (an ontology set from the memory panel). Bump
 
 The user's name is kept on their Zep record (`first_name`) once learned, so Zep
 names the user's own node after it and the next session reads it without a
-graph search.
+graph search. The app does not send the name, so it is learned when the user
+says it ("me llamo Ana", "soy Ana", "my name is Ana", capitalised):
+`gate.stated_name` reads it and `set_user_name` updates the record, which also
+renames a node Zep already created.
+
+To measure what conversations leave in the graph without voice, run
+`scripts/memory_lab/run.py` (see its docstring): it writes the fixtures in
+`scripts/memory_lab/fixtures/` to two throwaway Zep users, one the old way and
+one through `KwamiMemory`, counts junk facts and nodes, asks questions, and
+deletes the users.
 
 ## Agent tools
 
