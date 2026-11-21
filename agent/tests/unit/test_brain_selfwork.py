@@ -564,3 +564,20 @@ def test_team_members_are_waited_for(tmp_path: Path, tool: str) -> None:
     assert "wait" in str(check_tool_call(tmp_path, tool, background))
     assert check_tool_call(tmp_path, tool, {"subagent_type": "reviewer"}) is None
     assert check_tool_call(tmp_path, "Bash", {"command": "ls", "run_in_background": True}) is None
+
+
+def test_the_branch_comes_first_and_the_runs_words_are_detail() -> None:
+    """2026-11-16: #115 was opened, and the run's earlier "no number yet" read as doubt."""
+    from src.brain.selfwork import RUN_REPORT, self_work_report
+
+    said = self_work_report("PR abierto listo para revisar, sin fusionar: u.", "Aún sin número.")
+    assert said.startswith("PR abierto") and f"{RUN_REPORT}\nAún sin número." in said
+    assert self_work_report("No hay commits nuevos.", "  ") == "No hay commits nuevos."
+
+
+def test_the_brief_keeps_the_run_off_the_publishing() -> None:
+    from src.brain import cloud
+    from src.brain.selfwork import SELF_TASK
+
+    for brief in (SELF_TASK, cloud.CLOUD_SELF_TASK):
+        assert "Say nothing about pushing" in brief

@@ -103,6 +103,8 @@ def _bridge(
     )
     bridge.config = config or default_brain()
     bridge.config.split = False
+    # The plan made up front; the orchestrator has its own tests.
+    bridge.config.orchestrate = False
     bridge.config.delivery = "interrupt"
     bridge.kwami_id = "k1"
     answers = answers or {}
@@ -169,7 +171,7 @@ async def test_configure_publishes_and_regates_the_voice(tmp_path: Path) -> None
         "openai": True,
         "local": True,
     }
-    assert status["account"] == {"pcOnline": False, "loggedIn": False}
+    assert status["account"] == {"pcOnline": False, "loggedIn": False, "usable": False}
     assert status["apiKeys"]["anthropic"] is True and status["apiKeys"]["xai"] is False
     assert "realtime" in status["voiceProviders"]
 
@@ -342,7 +344,8 @@ async def test_a_running_task_can_be_cancelled_once(tmp_path: Path) -> None:
 
 
 async def test_a_crash_inside_a_task_is_a_failed_task(tmp_path: Path) -> None:
-    bridge = _bridge(tmp_path, {"claude-sonnet": RuntimeError("boom")})  # type: ignore[dict-item]
+    # A normal question is Opus's (router.py).
+    bridge = _bridge(tmp_path, {"claude-opus": RuntimeError("boom")})  # type: ignore[dict-item]
     session = FakeSession()
     bridge.attach(session, FakePublisher())
     task = _run(bridge)
@@ -442,20 +445,21 @@ async def test_a_failed_gemini_search_is_redone_on_tavily(tmp_path: Path) -> Non
     task = _run(bridge, kind="research", difficulty="simple")
     await _finish(bridge)
     assert task.status == "done"
-    assert task.models == ["Gemini 3.5 Flash", "Claude Sonnet 5.5 + Tavily"]
-    assert task.result == "respuesta de claude-sonnet"
+    # A lookup's writer is the cheapest Claude: Haiku.
+    assert task.models == ["Gemini 3.5 Flash", "Claude Haiku 5.5 + Tavily"]
+    assert task.result == "respuesta de claude-haiku"
 
 
 async def test_when_tavily_fails_too_the_normal_fallback_goes_on(tmp_path: Path) -> None:
     bridge = _bridge(
         tmp_path,
-        {"gemini-flash": _failed("gemini-flash"), "claude-sonnet": _failed("claude-sonnet")},
+        {"gemini-flash": _failed("gemini-flash"), "claude-haiku": _failed("claude-haiku")},
     )
     bridge._tavily_key = "tv"
     task = _run(bridge, kind="research", difficulty="simple")
     await _finish(bridge)
-    assert task.models == ["Gemini 3.5 Flash", "Claude Sonnet 5.5 + Tavily", "Claude Haiku 5.5"]
-    assert task.result == "respuesta de claude-haiku"
+    assert task.models == ["Gemini 3.5 Flash", "Claude Haiku 5.5 + Tavily", "Claude Sonnet 5.5"]
+    assert task.result == "respuesta de claude-sonnet"
     assert task.cost_usd == pytest.approx(0.012)
 
 
@@ -484,16 +488,16 @@ async def test_a_model_out_of_quota_is_not_tried_again_for_a_while(tmp_path: Pat
     second = _run(bridge, kind="research", difficulty="simple")
     await _finish(bridge)
 
-    assert first.models == ["Gemini 3.5 Flash", "Claude Sonnet 5.5 + Tavily"]
+    assert first.models == ["Gemini 3.5 Flash", "Claude Haiku 5.5 + Tavily"]
     # Straight to the cheap rescue, Gemini left alone.
-    assert second.models == ["Claude Sonnet 5.5 + Tavily"]
+    assert second.models == ["Claude Haiku 5.5 + Tavily"]
     assert second.status == "done"
 
 
 async def test_a_failed_rescue_while_gemini_rests_is_not_asked_again(tmp_path: Path) -> None:
     bridge = _bridge(
         tmp_path,
-        {"gemini-flash": _out_of_quota("gemini-flash"), "claude-sonnet": _failed("claude-sonnet")},
+        {"gemini-flash": _out_of_quota("gemini-flash"), "claude-haiku": _failed("claude-haiku")},
     )
     bridge._tavily_key = "tv"
     _run(bridge, kind="research", difficulty="simple")
@@ -502,9 +506,9 @@ async def test_a_failed_rescue_while_gemini_rests_is_not_asked_again(tmp_path: P
     await _finish(bridge)
 
     # The writer that just failed on Tavily is skipped; the fallback goes on.
-    assert task.models == ["Claude Sonnet 5.5 + Tavily", "Claude Haiku 5.5"]
+    assert task.models == ["Claude Haiku 5.5 + Tavily", "Claude Sonnet 5.5"]
     assert task.status == "done"
-    assert task.result == "respuesta de claude-haiku"
+    assert task.result == "respuesta de claude-sonnet"
 
 
 async def test_a_resting_model_is_skipped_for_tasks_without_a_search(tmp_path: Path) -> None:
@@ -564,7 +568,8 @@ async def test_a_failed_plan_runs_the_task_whole(tmp_path: Path, monkeypatch) ->
     bridge = _split_bridge(tmp_path, monkeypatch, None)
     task = _run(bridge, kind="analysis")
     await _finish(bridge)
-    assert task.models == ["Claude Sonnet 5.5"]
+    # A normal analysis, run whole, is Opus's.
+    assert task.models == ["Claude Opus 5.5"]
 
 
 @pytest.mark.parametrize(
@@ -572,7 +577,6 @@ async def test_a_failed_plan_runs_the_task_whole(tmp_path: Path, monkeypatch) ->
     [
         ("analysis", True, "research", "Gemini 3.5 Flash"),
         ("research", False, "analysis", "Claude Haiku 5.5"),
-        ("writing", False, "writing", "Claude Haiku 5.5"),
     ],
 )
 async def test_an_indivisible_plan_corrects_the_kind(
@@ -610,21 +614,37 @@ async def test_independent_parts_are_combined_by_one_more_call(tmp_path: Path, m
     await _finish(bridge)
 
     # s2 was told what s1 found; the combine call saw every part, failed or not.
-    assert any("What earlier parts found" in t and "respuesta de claude-sonnet" in t for t in seen)
+    assert any("What earlier parts found" in t and "respuesta de claude-opus" in t for t in seen)
     assert "combine them into one answer" in seen[-1]
     assert "(this part failed:" in seen[-1]
     assert [s["ok"] for s in task.steps] == [True, False, True]
-    # Sonnet did s1, s2 and nothing else; Opus combined (the plan has a hard part).
-    assert task.models.count("Claude Sonnet 5.5") == 1
+    # The reasoning parts and the combine are Opus's.
+    by_goal = {step["goal"]: step["model"] for step in task.steps}
+    assert by_goal["dato uno"] == by_goal["dato dos"] == "Claude Opus 5.5"
+    # The live log saw the plan, each part start, and how each one ended.
+    lines = [line["text"] for line in task.activity]
+    assert "plan: 3" in lines and "step: dato uno" in lines
+    assert "step_done: dato uno" in lines and "step_failed: aparte" in lines
     assert task.result == "respuesta de claude-opus"
 
 
 async def test_a_combine_of_normal_parts_stays_normal(tmp_path: Path, monkeypatch) -> None:
     plan = Plan(steps=[PlanStep("a", "x", "simple", False), PlanStep("b", "y", "simple", False)])
     bridge = _split_bridge(tmp_path, monkeypatch, plan)
+    asked: list[BrainRequest] = []
+    inner = bridge._ask
+
+    async def record(model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        asked.append(request)
+        return await inner(model, request)
+
+    bridge._ask = record  # type: ignore[method-assign]
     task = _run(bridge, kind="analysis")
     await _finish(bridge)
-    assert task.result == "respuesta de claude-sonnet"
+    # The chores went to Haiku; the combine runs at normal effort, not hard.
+    assert [step["model"] for step in task.steps] == ["Claude Haiku 5.5", "Claude Haiku 5.5"]
+    assert "combine them into one answer" in asked[-1].task
+    assert asked[-1].difficulty == "normal"
 
 
 # -- the council ----------------------------------------------------------------------------
@@ -855,7 +875,7 @@ async def test_a_failed_rescue_of_a_resting_model_goes_on_with_the_fallback(
         tmp_path,
         {
             "gemini-flash": _out_of_quota("gemini-flash"),
-            "claude-sonnet": _failed("claude-sonnet"),
+            "claude-haiku": _failed("claude-haiku"),
         },
     )
     bridge._tavily_key = "tv"
@@ -864,7 +884,7 @@ async def test_a_failed_rescue_of_a_resting_model_goes_on_with_the_fallback(
     task = _run(bridge, kind="research", difficulty="simple")
     await _finish(bridge)
 
-    assert task.models[0] == "Claude Sonnet 5.5 + Tavily"
+    assert task.models[0] == "Claude Haiku 5.5 + Tavily"
     assert "Gemini 3.5 Flash" not in task.models
     assert task.status == "done"
 
@@ -956,6 +976,7 @@ async def test_code_goes_to_the_pc_when_it_is_there(pc_bridge) -> None:
     assert task.job_id == "j1" and task.public()["onPc"] is True
     assert task.cost_usd == 0.5
     assert jobs.delivered == ["j1"]
+    assert "Bash" in [line["text"] for line in task.activity]
 
 
 async def test_the_pc_records_the_spend_so_the_call_does_not(pc_bridge) -> None:
@@ -1025,7 +1046,7 @@ async def test_a_job_stuck_with_no_pc_is_withdrawn_and_run_here(
 ) -> None:
     monkeypatch.setattr(bridge_module, "JOB_QUEUE_PATIENCE_SECONDS", 0.0)
     bridge, jobs = pc_bridge
-    jobs.script = [_job("queued"), _job("cancelled")]
+    jobs.script = [_job("queued", target="cloud"), _job("cancelled", target="cloud")]
 
     async def gone_after_enqueue(user_id: str) -> bool:
         return not jobs.queued
@@ -1161,7 +1182,17 @@ async def test_own_code_never_falls_back_to_the_cloud(pc_bridge) -> None:
     jobs.online = False
     task = _run(bridge, repo="agent")
     await _finish(bridge)
-    assert task.status == "failed" and "ordenador encendido" in task.result
+    assert task.status == "failed" and jobs.queued == []
+    assert task.result.startswith("Cambiar mi propio código no puede trabajar fuera ahora.")
+    assert "Ni el hilo de trabajo del ordenador ni el de la nube" in task.result
+
+
+async def test_a_job_cancelled_before_it_ran_ran_nowhere(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.script = [_job("cancelled", result="Cancelada.")]
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+    assert task.status == "failed" and task.ran_on == "" and task.paid_by == ""
 
 
 async def test_with_the_pc_off_work_goes_to_the_cloud_the_user_allowed(pc_bridge) -> None:
@@ -1348,11 +1379,15 @@ async def test_an_agent_for_the_cloud_goes_there_even_with_the_pc_on(pc_bridge) 
 
 
 @pytest.mark.parametrize(
-    ("online", "cloud", "target"),
-    [(True, False, "cloud"), (False, True, "pc"), (False, False, "auto")],
+    ("online", "cloud", "target", "why"),
+    [
+        (True, False, "cloud", "en la nube ahora. El hilo de trabajo de la nube no está"),
+        (False, True, "pc", "en el ordenador ahora. El hilo de trabajo del ordenador no"),
+        (False, False, "auto", "Ni el hilo de trabajo del ordenador ni el de la nube"),
+    ],
 )
 async def test_an_agent_with_nowhere_to_work_is_not_stood_in_for(
-    pc_bridge, online: bool, cloud: bool, target: str
+    pc_bridge, online: bool, cloud: bool, target: str, why: str
 ) -> None:
     bridge, jobs = pc_bridge
     jobs.online, jobs.cloud = online, cloud
@@ -1360,7 +1395,8 @@ async def test_an_agent_with_nowhere_to_work_is_not_stood_in_for(
     task = _run(bridge, agent="facturas")
     await _finish(bridge)
     assert jobs.queued == [] and task.status == "failed"
-    assert "Tus agentes trabajan en el ordenador o en la nube" in task.result
+    assert task.result.startswith("Su agente facturas no puede trabajar")
+    assert why in task.result
 
 
 async def test_an_agent_that_does_not_exist_is_said(pc_bridge) -> None:
@@ -1380,3 +1416,322 @@ def test_an_agents_name_and_who_may_ask_are_checked(pc_bridge) -> None:
     bridge.user_id = ""
     out = bridge.start(task="t", title="t", kind="question", difficulty="normal", agent="facturas")
     assert isinstance(out, str) and "not by phone" in out
+
+
+# -- a provider down as a whole -----------------------------------------------------
+
+
+# Writing: Sonnet's work under any routing table, so these pin the failover only.
+def _provider_down(model_id: str) -> BrainAnswer:
+    answer = _failed(model_id)
+    answer.provider_down = True
+    return answer
+
+
+async def test_when_a_provider_is_down_the_fallback_goes_to_another(tmp_path: Path) -> None:
+    """Sonnet down used to fall to Opus, the same outage, and then give up."""
+    bridge = _bridge(tmp_path, {"claude-sonnet": _provider_down("claude-sonnet")})
+    task = _run(bridge, kind="writing", difficulty="normal")
+    await _finish(bridge)
+    assert task.models == ["Claude Sonnet 5.5", "Gemini 3.5 Flash"]
+    assert task.status == "done" and task.result == "respuesta de gemini-flash"
+
+
+async def test_a_downed_provider_is_still_used_when_nothing_else_can(tmp_path: Path) -> None:
+    bridge = _bridge(
+        tmp_path,
+        {"claude-sonnet": _provider_down("claude-sonnet")},
+        keys={"ANTHROPIC_API_KEY": "a"},
+    )
+    task = _run(bridge, kind="writing", difficulty="normal")
+    await _finish(bridge)
+    assert task.models == ["Claude Sonnet 5.5", "Claude Opus 5.5"]
+    assert task.status == "done"
+
+
+async def test_a_task_gets_two_fallbacks_before_it_fails(tmp_path: Path) -> None:
+    bridge = _bridge(
+        tmp_path,
+        {
+            "claude-sonnet": _failed("claude-sonnet"),
+            "claude-opus": _failed("claude-opus"),
+            "claude-haiku": _failed("claude-haiku"),
+        },
+    )
+    task = _run(bridge, kind="writing", difficulty="normal")
+    await _finish(bridge)
+    assert task.models == ["Claude Sonnet 5.5", "Claude Opus 5.5", "Claude Haiku 5.5"]
+    assert task.status == "failed"
+
+
+# -- bounds ----------------------------------------------------------------------------
+
+
+async def test_a_council_member_that_hangs_is_left_behind(tmp_path: Path, monkeypatch) -> None:
+    import src.brain.bridge as bridge_module
+
+    monkeypatch.setattr(bridge_module, "COUNCIL_MEMBER_SECONDS", 0.05)
+    bridge = _bridge(tmp_path)
+    inner = bridge._ask
+
+    async def gemini_hangs(model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        if model.id == "gemini-flash":
+            await asyncio.sleep(60)
+        return await inner(model, request)
+
+    bridge._ask = gemini_hangs  # type: ignore[method-assign]
+    task = _run(bridge, council=True)
+    await asyncio.wait_for(_finish(bridge), 5)
+    # The two that answered still meet; the chair writes it up.
+    assert task.status == "done"
+    assert task.result.startswith("respuesta de")
+
+
+async def test_too_many_running_tasks_are_refused(tmp_path: Path, monkeypatch) -> None:
+    import src.brain.bridge as bridge_module
+
+    bridge = _bridge(tmp_path)
+    gate = asyncio.Event()
+    inner = bridge._ask
+
+    async def slow(model: BrainModel, request: BrainRequest) -> BrainAnswer:
+        await gate.wait()
+        return await inner(model, request)
+
+    bridge._ask = slow  # type: ignore[method-assign]
+    for _ in range(bridge_module.MAX_RUNNING_TASKS):
+        _run(bridge)
+    refused = bridge.start(task="t", title="T", kind="question", difficulty="normal")
+    assert isinstance(refused, str) and "already running" in refused
+    gate.set()
+    await _finish(bridge)
+    assert isinstance(
+        bridge.start(task="t", title="T", kind="question", difficulty="normal"), BrainTask
+    )
+    await _finish(bridge)
+
+
+async def test_writing_is_never_planned(tmp_path: Path, monkeypatch) -> None:
+    """One piece of text for the model that writes: a plan would only add a call."""
+    plan = Plan(steps=[PlanStep("s1", "", "simple", False)], cost_usd=0.002)
+    bridge = _split_bridge(tmp_path, monkeypatch, plan)
+    task = _run(bridge, kind="writing")
+    await _finish(bridge)
+    assert task.models == ["Claude Sonnet 5.5"]
+    assert task.cost_usd == pytest.approx(0.01)  # no planner call
+
+
+# -- the kwami's row, and where work runs (2026-11-16) ---------------------------
+
+OTHER = "33333333-3333-4333-8333-333333333333"
+LONG = f"kwami_{USER}_{KWAMI}"
+
+
+@pytest.mark.parametrize(
+    ("given", "user", "row"),
+    [
+        (KWAMI, None, KWAMI),
+        (LONG, None, KWAMI),
+        (LONG, USER, KWAMI),
+        (LONG, OTHER, None),
+        (f"kwami_{USER}", None, None),
+        ("kwami_x_y", None, None),
+        ("telefono:+34600000000", None, None),
+        ("", None, None),
+        (None, None, None),
+    ],
+)
+def test_the_kwami_row_is_read_from_either_name(given: Any, user: Any, row: Any) -> None:
+    from src.adapters.supabase import kwami_row_id
+
+    assert kwami_row_id(given, user) == row
+
+
+async def test_a_call_named_the_long_way_queues_its_work_on_the_pc(pc_bridge) -> None:
+    """The regression of 2026-11-16: with the memory's long name nothing left the call."""
+    bridge, jobs = pc_bridge
+    bridge.kwami_id, bridge.user_id = "", ""
+    bridge.set_user(USER)
+    bridge.set_context(kwami_id=LONG)
+    jobs.script = [_job("done", result="Hecho", runner_id="DESKTOP-1-abc")]
+
+    task = _run(bridge, kind="code")
+    await _finish(bridge)
+
+    assert bridge.kwami_id == KWAMI
+    assert jobs.queued[0].kwami_id == KWAMI and jobs.queued[0].target == "auto"
+    assert (task.ran_on, task.paid_by, task.via_account) == ("pc", "account", True)
+
+
+async def test_the_user_arriving_after_the_name_still_checks_whose_it_is(pc_bridge) -> None:
+    bridge, _jobs = pc_bridge
+    bridge.kwami_id, bridge.user_id = "", ""
+    bridge.set_context(kwami_id=f"kwami_{OTHER}_{KWAMI}")
+    assert bridge.kwami_id == KWAMI  # nobody to check against yet
+    bridge.set_user(USER)
+    assert bridge.kwami_id == f"kwami_{OTHER}_{KWAMI}"
+    assert await bridge.placement() == (
+        "",
+        "Esta sesión no sabe qué kwami es, así que no puede encargar trabajo fuera.",
+    )
+
+
+async def test_asked_for_the_cloud_it_goes_there_with_the_pc_on(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.cloud = True
+    jobs.script = [_job("done", result="Hecho", cost_usd=0.2, runner_id="cloud-host-1")]
+
+    task = _run(bridge, kind="question", where="cloud")
+    await _finish(bridge)
+
+    assert jobs.queued[0].target == "cloud"
+    assert task.status == "done" and task.public()["where"] == "cloud"
+    assert (task.ran_on, task.paid_by, task.via_account) == ("cloud", "api", False)
+    assert "in the cloud" in bridge._where_it_ran(task)
+    assert "The user asked for the cloud" in bridge._where_it_ran(task)
+
+
+@pytest.mark.parametrize(
+    ("where", "online", "cloud", "allowed", "why"),
+    [
+        ("cloud", True, False, True, "la nube no está en marcha"),
+        ("cloud", True, True, False, "La nube no tiene su permiso"),
+        ("pc", False, True, True, "El hilo de trabajo del ordenador no está en marcha"),
+    ],
+)
+async def test_asked_for_a_place_that_cannot_take_it_fails_and_runs_nowhere_else(
+    pc_bridge, where: str, online: bool, cloud: bool, allowed: bool, why: str
+) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online, jobs.cloud, jobs.allowed = online, cloud, allowed
+
+    task = _run(bridge, kind="code", where=where)
+    await _finish(bridge)
+
+    assert jobs.queued == [] and task.status == "failed" and task.ran_on == ""
+    assert why in task.result
+
+
+async def test_a_worker_that_vanishes_does_not_send_cloud_work_elsewhere(
+    pc_bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(bridge_module, "JOB_QUEUE_PATIENCE_SECONDS", 0.0)
+    bridge, jobs = pc_bridge
+    beats = iter([True, False])
+
+    async def cloud_online() -> bool:
+        return next(beats, False)
+
+    jobs.cloud_online = cloud_online  # type: ignore[method-assign]
+    jobs.script = [_job("queued", target="cloud"), _job("cancelled", target="cloud")]
+
+    task = _run(bridge, kind="code", where="cloud")
+    await _finish(bridge)
+
+    assert task.status == "failed" and "No lo he hecho en otro sitio" in task.result
+    assert jobs.cancelled == ["j1"]
+
+
+async def test_a_queue_that_refuses_a_job_asked_for_somewhere_is_said(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.enqueues = False
+    task = _run(bridge, kind="code", where="pc")
+    await _finish(bridge)
+    assert task.status == "failed" and "cola de trabajo" in task.result
+
+
+async def test_a_place_asked_for_with_no_executor_is_said(pc_bridge) -> None:
+    bridge, _jobs = pc_bridge
+    bridge.config = BrainConfig(models=[m for m in default_brain().models if m.provider != "local"])
+    started = bridge.start(task="t", title="T", kind="question", difficulty="normal", where="pc")
+    assert isinstance(started, BrainTask)
+    await _finish(bridge)
+    assert started.status == "failed" and "ejecutor" in started.result
+
+
+def test_where_must_be_a_place_and_never_by_phone(pc_bridge) -> None:
+    bridge, _jobs = pc_bridge
+    assert "Where it runs" in str(
+        bridge.start(task="t", title="T", kind="code", difficulty="normal", where="mars")
+    )
+    bridge.user_id = ""
+    assert "only be asked from the app" in str(
+        bridge.start(task="t", title="T", kind="code", difficulty="normal", where="cloud")
+    )
+
+
+async def test_work_with_nothing_said_still_runs_here_when_nothing_takes_it(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online = False
+    assert await bridge.placement() == (
+        "",
+        "Ni el hilo de trabajo del ordenador ni el de la nube están en marcha.",
+    )
+    bridge.jobs = None
+    assert (await bridge.placement())[0] == ""
+    bridge.jobs, bridge.user_id = jobs, ""
+    assert "desde la aplicación" in (await bridge.placement())[1]
+
+
+async def test_where_work_runs_tells_the_account_from_the_key(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.cloud = True
+
+    async def account_state(user_id: str) -> tuple[bool, None]:
+        return True, None
+
+    jobs.account_state = account_state  # type: ignore[attr-defined]
+    bridge._keys["ANTHROPIC_API_KEY"] = "k"
+
+    where = await bridge.where_work_runs()
+
+    assert where["pc"]["workThreadOn"] and where["pc"]["claudeAccountSignedIn"]
+    assert where["pc"]["apiKeyFallback"] and "Claude account" in where["pc"]["how"]
+    assert where["cloud"] == {
+        "workThreadOn": True,
+        "allowedByUser": True,
+        "how": bridge_module.HOW_WORK_RUNS["cloud"],
+    }
+    assert where["wouldGoNow"] == "pc" and where["whyNotPcOrCloud"] == ""
+
+    jobs.online = False
+    assert (await bridge.where_work_runs())["wouldGoNow"] == "cloud"
+    bridge.jobs = None
+    nowhere = await bridge.where_work_runs()
+    assert nowhere["wouldGoNow"] == "here" and not nowhere["cloud"]["workThreadOn"]
+
+
+def test_where_it_ran_says_nothing_for_work_that_never_ran() -> None:
+    task = BrainTask("t1", "T", "t", "code", "normal")
+    assert Bridge._where_it_ran(task) == ""
+    task.ran_on, task.paid_by = "here", ""
+    assert Bridge._where_it_ran(task) == (
+        "Where it ran: inside this call (not on the PC's work thread, nor in the cloud)."
+    )
+
+
+async def test_a_failed_task_is_kept_for_an_offer_to_improve(pc_bridge) -> None:
+    bridge, jobs = pc_bridge
+    jobs.online = False
+    _run(bridge, kind="code", where="pc", title="Abrir GitHub")
+    await _finish(bridge)
+    (failure,) = bridge.failures
+    assert failure["what"] == "Abrir GitHub" and "ordenador" in failure["why"]
+    for n in range(20):
+        bridge.note_failure(f"f{n}", "x" * 1000)
+    assert len(bridge.failures) == bridge_module.MAX_FAILURES_KEPT
+    assert len(bridge.failures[-1]["why"]) == bridge_module.FAILURE_CHARS
+
+
+async def test_work_on_the_pc_or_in_the_cloud_knows_the_time(pc_bridge) -> None:
+    """The cloud has no shell to ask the clock (2026-11-16: a file "without the time")."""
+    bridge, jobs = pc_bridge
+    bridge.timezone = "Europe/Madrid"
+    jobs.script = [_job("done", result="Hecho")]
+    _run(bridge, kind="code", where="pc")
+    await _finish(bridge)
+    line = jobs.queued[0].task.split("\n\n")[1]
+    assert line.startswith("Now: ") and "(Europe/Madrid)" in line and line.endswith(" UTC.")
+
+    bridge.timezone = "Nowhere/Atlantis"
+    assert "(Nowhere/Atlantis);" in bridge._now_line()

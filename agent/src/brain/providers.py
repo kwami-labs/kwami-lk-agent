@@ -28,7 +28,7 @@ from typing import Any
 import httpx
 
 from ..utils.logging import get_logger
-from .ledger import search_cost, token_cost
+from .ledger import anthropic_cost, search_cost, token_cost
 
 logger = get_logger("brain.providers")
 
@@ -58,9 +58,32 @@ _DYNAMIC_WEB_TOOLS = (
     "claude-fable",
 )
 #: Models that accept the server-side refusal fallback in its "default" form.
-_FALLBACK_MODELS = ("claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1")
+_FALLBACK_MODELS = ("claude-opus-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-fable-5-2")
 
 EFFORT_BY_DIFFICULTY = {"simple": "low", "normal": "medium", "hard": "high"}
+#: Gemini 3 thinks at its highest level unless told otherwise, also for a lookup.
+THINKING_LEVEL_BY_DIFFICULTY = {"simple": "LOW", "normal": "MEDIUM", "hard": "HIGH"}
+#: OpenAI's reasoning models, which take `reasoning.effort`; the others refuse it.
+_OPENAI_REASONING = ("gpt-5", "o1", "o3", "o4")
+
+
+def gemini_thinking(model: str, difficulty: str) -> Any:
+    """The thinking level for a Gemini 3 model, or None to leave the model's own."""
+    from google.genai import types
+
+    if not model.startswith("gemini-3"):
+        return None
+    level = THINKING_LEVEL_BY_DIFFICULTY.get(difficulty, "MEDIUM")
+    return types.ThinkingConfig(thinking_level=types.ThinkingLevel(level))
+
+
+def openai_reasoning(provider: str, model: str, difficulty: str) -> Any:
+    """The reasoning effort for an OpenAI reasoning model, or omit for the rest."""
+    import openai
+
+    if provider != "openai" or not model.startswith(_OPENAI_REASONING):
+        return openai.omit
+    return {"effort": EFFORT_BY_DIFFICULTY.get(difficulty, "medium")}
 
 
 @dataclass
@@ -76,6 +99,9 @@ class BrainAnswer:
     rate_limited: bool = False
     #: Answered on the Claude account of the user's PC, not on an API key.
     via_account: bool = False
+    #: The provider itself failed -- a bad key, a quota, an outage, no connection --
+    #: so another model of the same provider would most likely fail the same way.
+    provider_down: bool = False
     #: The prompt carried the user's instructions (set by the bridge, not the provider).
     briefed: bool = False
 
@@ -89,8 +115,27 @@ class BrainRequest:
     tavily_key: str = ""
 
 
-def _failure(model_id: str, model: str, message: str) -> BrainAnswer:
-    return BrainAnswer(text=message, model_id=model_id, model=model, ok=False)
+def _failure(
+    model_id: str,
+    model: str,
+    message: str,
+    *,
+    provider_down: bool = False,
+    rate_limited: bool = False,
+) -> BrainAnswer:
+    return BrainAnswer(
+        text=message,
+        model_id=model_id,
+        model=model,
+        ok=False,
+        provider_down=provider_down or rate_limited,
+        rate_limited=rate_limited,
+    )
+
+
+def _server_side(status: int | None) -> bool:
+    """A status that says the provider is unwell, not that the request was wrong."""
+    return status is None or status >= 500 or status in (401, 403, 429)
 
 
 async def _tavily(api_key: str, query: str) -> str:
@@ -165,6 +210,11 @@ async def run_anthropic(
         "max_tokens": 16000,
         "system": request.system,
         "output_config": {"effort": EFFORT_BY_DIFFICULTY.get(request.difficulty, "medium")},
+        # A search round resends the system, the tools and every earlier round. With
+        # the marker on the last block, each round reads what the one before wrote
+        # at a tenth of the price; a prompt shorter than the model's minimum is
+        # simply not cached.
+        "cache_control": {"type": "ephemeral"},
     }
     if tools:
         params["tools"] = tools
@@ -190,9 +240,7 @@ async def run_anthropic(
                 response = await client.messages.create(messages=messages, **params)
 
             usage = response.usage
-            cost += token_cost(
-                "anthropic", model, usage.input_tokens or 0, usage.output_tokens or 0
-            )
+            cost += anthropic_cost(model, usage)
             server = getattr(usage, "server_tool_use", None)
             round_searches = getattr(server, "web_search_requests", 0) or 0 if server else 0
             searches += round_searches
@@ -227,14 +275,25 @@ async def run_anthropic(
                 continue
             break
     except anthropic.AuthenticationError:
-        return _failure(model_id, model, "La clave de Anthropic no es válida.")
+        return _failure(model_id, model, "La clave de Anthropic no es válida.", provider_down=True)
     except anthropic.RateLimitError:
-        return _failure(model_id, model, "Anthropic está limitando las peticiones ahora mismo.")
+        # The SDK has already retried it; one more task now only fails again.
+        return _failure(
+            model_id,
+            model,
+            "Anthropic está limitando las peticiones ahora mismo.",
+            rate_limited=True,
+        )
     except anthropic.APIStatusError as e:
         logger.warning("Anthropic %s failed: %s", model, e)
-        return _failure(model_id, model, f"Anthropic devolvió un error {e.status_code}.")
+        return _failure(
+            model_id,
+            model,
+            f"Anthropic devolvió un error {e.status_code}.",
+            provider_down=_server_side(e.status_code),
+        )
     except anthropic.APIConnectionError:
-        return _failure(model_id, model, "No pude conectar con Anthropic.")
+        return _failure(model_id, model, "No pude conectar con Anthropic.", provider_down=True)
 
     if response is None:
         return _failure(model_id, model, "Sin respuesta.")
@@ -274,16 +333,22 @@ async def run_gemini(api_key: str, model_id: str, model: str, request: BrainRequ
                 system_instruction=request.system,
                 tools=tools,
                 automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                thinking_config=gemini_thinking(model, request.difficulty),
             ),
         )
     except Exception as e:  # google-genai raises one error family for everything
         logger.warning("Gemini %s failed: %s", model, e)
         code = getattr(e, "code", None)
         if code == 429:
-            answer = _failure(model_id, model, "La cuota de Gemini está agotada ahora mismo.")
-            answer.rate_limited = True
-            return answer
-        return _failure(model_id, model, f"Gemini devolvió un error{f' {code}' if code else ''}.")
+            return _failure(
+                model_id, model, "La cuota de Gemini está agotada ahora mismo.", rate_limited=True
+            )
+        return _failure(
+            model_id,
+            model,
+            f"Gemini devolvió un error{f' {code}' if code else ''}.",
+            provider_down=_server_side(code if isinstance(code, int) else None),
+        )
 
     usage = response.usage_metadata
     tokens_in = (getattr(usage, "prompt_token_count", 0) or 0) + (
@@ -314,6 +379,11 @@ async def run_gemini(api_key: str, model_id: str, model: str, request: BrainRequ
         sources=list(dict.fromkeys(sources))[:12],
         ok=bool(text),
     )
+
+
+def _openai_down(error: Any) -> bool:
+    """Whether an OpenAI-style error is the provider's, not the request's."""
+    return _server_side(getattr(error, "status_code", None))
 
 
 async def run_openai(
@@ -347,6 +417,7 @@ async def run_openai(
                 instructions=request.system,
                 input=input_items,
                 tools=tools or openai.omit,
+                reasoning=openai_reasoning(provider, model, request.difficulty),
             )
             usage = response.usage
             if usage is not None:
@@ -372,12 +443,16 @@ async def run_openai(
                     }
                 )
     except openai.AuthenticationError:
-        return _failure(model_id, model, f"La clave de {name} no es válida.")
+        return _failure(model_id, model, f"La clave de {name} no es válida.", provider_down=True)
     except openai.RateLimitError:
-        return _failure(model_id, model, f"{name} está limitando las peticiones ahora mismo.")
+        return _failure(
+            model_id, model, f"{name} está limitando las peticiones ahora mismo.", rate_limited=True
+        )
     except openai.APIError as e:
         logger.warning("%s %s failed: %s", name, model, e)
-        return _failure(model_id, model, f"{name} devolvió un error.")
+        return _failure(
+            model_id, model, f"{name} devolvió un error.", provider_down=_openai_down(e)
+        )
 
     cost += search_cost(provider, searches)
     text = (getattr(response, "output_text", "") or "").strip() if response is not None else ""
@@ -404,42 +479,98 @@ async def run_xai(api_key: str, model_id: str, model: str, request: BrainRequest
     )
 
 
+#: Tavily in the chat-completions format the compatible providers take.
+TAVILY_CHAT_FUNCTION: Any = {
+    "type": "function",
+    "function": {
+        "name": "tavily_search",
+        "description": TAVILY_TOOL["description"],
+        "parameters": TAVILY_TOOL["input_schema"],
+    },
+}
+
+
 async def run_compatible(
     provider: str, api_key: str, model_id: str, model: str, request: BrainRequest
 ) -> BrainAnswer:
-    """A provider that takes OpenAI's chat format: it thinks, with no search of its own."""
+    """A provider that takes OpenAI's chat format: no search of its own, Tavily if given.
+
+    With a Tavily key it gets `tavily_search` as a function, run here, so DeepSeek,
+    Groq, Mistral or OpenRouter can take a piece that needs current facts instead of
+    answering it from memory, sounding just as sure.
+    """
     import openai
 
     name = PROVIDER_NAMES[provider]
     client = openai.AsyncOpenAI(api_key=api_key, base_url=COMPATIBLE_URLS[provider], timeout=600.0)
+    messages: list[Any] = [
+        {"role": "system", "content": request.system},
+        {"role": "user", "content": request.task},
+    ]
+    tools: Any = [TAVILY_CHAT_FUNCTION] if request.tavily_key else openai.omit
+    cost = 0.0
+    searches = 0
+    response: Any = None
     try:
-        response = await client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": request.system},
-                {"role": "user", "content": request.task},
-            ],
-        )
+        for _ in range(MAX_TOOL_ROUNDS):
+            response = await client.chat.completions.create(
+                model=model, messages=messages, tools=tools
+            )
+            usage = response.usage
+            if usage is not None:
+                cost += token_cost(provider, model, usage.prompt_tokens, usage.completion_tokens)
+            message = response.choices[0].message if response.choices else None
+            calls = list(getattr(message, "tool_calls", None) or [])
+            if message is None or not calls or not request.tavily_key:
+                break
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in calls
+                    ],
+                }
+            )
+            for call in calls:
+                try:
+                    query = json.loads(call.function.arguments).get("query", "")
+                except (ValueError, AttributeError):
+                    query = ""
+                searches += 1
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": await _tavily(request.tavily_key, str(query)),
+                    }
+                )
     except openai.AuthenticationError:
-        return _failure(model_id, model, f"La clave de {name} no es válida.")
+        return _failure(model_id, model, f"La clave de {name} no es válida.", provider_down=True)
     except openai.RateLimitError:
-        answer = _failure(model_id, model, f"{name} está limitando las peticiones ahora mismo.")
-        answer.rate_limited = True
-        return answer
+        return _failure(
+            model_id, model, f"{name} está limitando las peticiones ahora mismo.", rate_limited=True
+        )
     except openai.APIError as e:
         logger.warning("%s %s failed: %s", name, model, e)
-        return _failure(model_id, model, f"{name} devolvió un error.")
-    usage = response.usage
-    cost = (
-        token_cost(provider, model, usage.prompt_tokens, usage.completion_tokens)
-        if usage is not None
-        else 0.0
-    )
-    text = (response.choices[0].message.content or "").strip() if response.choices else ""
+        return _failure(
+            model_id, model, f"{name} devolvió un error.", provider_down=_openai_down(e)
+        )
+    choices = getattr(response, "choices", None) or []
+    text = (choices[0].message.content or "").strip() if choices else ""
     return BrainAnswer(
         text=text or "Sin contenido.",
         model_id=model_id,
         model=model,
         cost_usd=cost,
+        searches=searches,
         ok=bool(text),
     )

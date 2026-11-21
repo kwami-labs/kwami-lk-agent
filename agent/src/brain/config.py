@@ -32,6 +32,12 @@ PROVIDERS: frozenset[str] = frozenset(
 )
 ROLES: frozenset[str] = frozenset({"fast", "standard", "expert", "search", "x_search", "code"})
 ACCESS_MODES: tuple[str, ...] = ("auto", "account", "api")
+#: How the whole brain pays, the user's choice in the models panel (`plan.py` has the
+#: table). The default is the user's rule of 2026-11-17: the plan until it runs out.
+Billing = Literal["account_first", "api_first", "account_only", "api_only"]
+BILLING_MODES: tuple[str, ...] = ("account_first", "api_first", "account_only", "api_only")
+#: How one Claude model is reached once the user's billing is applied to it.
+Reach = Literal["account_first", "api_first", "account", "api"]
 
 _THINKING: tuple[Role, ...] = ("fast", "standard", "expert")
 #: What each provider can actually do. A model offered a job its provider has no
@@ -48,6 +54,12 @@ PROVIDER_ROLES: dict[str, tuple[Role, ...]] = {
     "mistral": _THINKING,
     "local": ("code",),
 }
+#: Models the brain never runs, whatever the roster says (the user, 2026-11-13: "que
+#: Fable ni se utilice, es muy caro"). Fable 5.2 costs 8 $ and 40 $ per million tokens,
+#: twice Opus 5.5, and Opus does that work. Matched anywhere in the id, so OpenRouter's
+#: "anthropic/claude-fable-5-2" is refused too.
+BANNED_MODELS: tuple[str, ...] = ("claude-fable", "claude-mythos")
+
 #: Long enough for a real brief, short enough not to swamp every call's prompt.
 MAX_INSTRUCTIONS_CHARS = 2000
 
@@ -116,6 +128,21 @@ class BrainModel:
         return role in self.roles
 
 
+def reach(model: BrainModel, billing: str) -> Reach:
+    """How this Claude model is reached under the user's billing.
+
+    "Only" holds for the whole brain, whatever the model says; in the two "first"
+    ways a model the user set to account or to API keeps that.
+    """
+    if billing == "account_only":
+        return "account"
+    if billing == "api_only":
+        return "api"
+    if model.access in ("account", "api"):
+        return cast(Reach, model.access)
+    return "api_first" if billing == "api_first" else "account_first"
+
+
 Permissions = Literal["full_no_push", "edit_only", "read_only", "think", "think_web"]
 
 
@@ -124,6 +151,8 @@ class ExecutorConfig:
     folder: str = str(EXECUTOR_ROOT)
     #: Whose Chrome this run may use (`browser_tool`). Empty: none.
     browser_user_id: str = ""
+    #: Whose list of sites (Settings > Access) the browser keeps to. Empty: no list.
+    site_user_id: str = ""
     #: full_no_push: edits and runs freely, but never pushes, never touches
     #: `.env` and never leaves the folder. edit_only: edits but runs nothing.
     #: read_only: reads and proposes.
@@ -134,6 +163,8 @@ class ExecutorConfig:
     max_task_usd: float = 2.0
     #: Whose Google accounts the run may use (`google_tool`). Empty: none.
     google_user_id: str = ""
+    #: The run may work in the user's own Chrome (`user_chrome`), when they switched it on.
+    user_chrome: bool = False
     #: The user's agents from the app, joining the team (`team.platform_members`).
     members: dict[str, Any] = field(default_factory=dict)
 
@@ -164,14 +195,20 @@ class BrainConfig:
     #: Split normal and hard tasks into parts, each on the cheapest model that
     #: can do it (brain/planner.py).
     split: bool = True
-    #: The model that plans and hands out the work. Empty: the router's choice.
+    #: The model that plans and hands out the work. Empty: the expert (Opus).
     director: str = ""
+    #: The director holds normal and hard tasks itself and hands pieces to the other
+    #: models as it goes (brain/orchestrator.py), instead of a plan made up front.
+    orchestrate: bool = True
     #: everything: the voice answers only small talk and passes the rest to the
     #: brain, so another model does the thinking. work_only: the voice also answers
     #: what it knows.
     relay: Literal["everything", "work_only"] = "everything"
     #: The user's brief for the whole brain, added to every worker.
     instructions: str = ""
+    #: How the brain pays: the Claude plan on the PC, the API key, which first, or only
+    #: one of them (`plan.py`).
+    billing: Billing = "account_first"
     models: list[BrainModel] = field(default_factory=list)
     executor: ExecutorConfig = field(default_factory=ExecutorConfig)
 
@@ -222,6 +259,8 @@ def _parse_model(raw: Any) -> BrainModel | None:
     if not isinstance(provider, str) or provider not in PROVIDERS:
         return None
     if not isinstance(model, str) or not model.strip():
+        return None
+    if any(banned in model.lower() for banned in BANNED_MODELS):
         return None
     allowed = PROVIDER_ROLES[provider]
     raw_roles = raw.get("roles")
@@ -313,9 +352,11 @@ def parse_brain(data: Any) -> BrainConfig:
     )
     config.on_hangup = _choice(data.get("onHangup"), ("finish", "cancel"), config.on_hangup)
     config.split = data.get("splitTasks", True) is not False
+    config.orchestrate = data.get("orchestrate", True) is not False
     if isinstance(data.get("director"), str):
         config.director = data["director"][:64]
     config.relay = _choice(data.get("relay"), ("everything", "work_only"), config.relay)
+    config.billing = _choice(data.get("billing"), BILLING_MODES, config.billing)
     if isinstance(data.get("instructions"), str):
         config.instructions = data["instructions"].strip()[:MAX_INSTRUCTIONS_CHARS]
 

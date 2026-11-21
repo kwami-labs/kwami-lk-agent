@@ -108,6 +108,10 @@ class KwamiSoulConfig:
     system_prompt: str = ""
     traits: list[str] = field(default_factory=list)
     language: str = "en"
+    #: The language the user asked for in this call (`change_language`). It wins over
+    #: `language` and over whatever the character's own text says, and an update of
+    #: the soul from the app leaves it alone: it is the user's word, said just now.
+    language_override: str = ""
     conversation_style: str = "friendly"
     response_length: Literal["short", "medium", "long"] = "medium"
     emotional_tone: Literal[

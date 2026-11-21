@@ -9,9 +9,12 @@ One job at a time, in Documents\\Jarvis, under the executor's guard. It takes on
 this user's jobs, and only the service role can write them (migration 021), so a
 row reaching this loop came from the user's own agent or clock.
 
-Everything runs on the PC's Claude Code login first, which moves no money, and the
-API key takes over only when the login cannot do it. Without a key there is simply
-no such fallback. Beside the work runs a second, smaller line of jobs that only
+It pays as the user chose in the models panel (`plan.py`): by default everything
+runs on the PC's Claude Code login first, which moves no money, and the API key
+takes over only when the login cannot do it -- the plan ran out, or it is not
+signed in. Once Claude Code says the plan is out, the worker goes straight to the
+key until it resets, and tells the agent and the panel through its heartbeat.
+Without a key there is simply no such fallback. Beside the work runs a second, smaller line of jobs that only
 answer (`mode` think or research): no files, no commands, a few at once, so the
 brain's thinking does not wait behind a long job.
 
@@ -37,16 +40,21 @@ import re
 import uuid
 from collections.abc import Callable, Coroutine
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from ..adapters.supabase import SupabaseClient, as_user_id, get_supabase
+from ..browser.access import SiteAccess
+from ..browser.chrome_bridge import start_hub
+from ..browser.claude_chrome import close_claude_chrome
 from ..envfile import load_env_file
 from ..settings import get_settings
 from ..utils.logging import get_logger, log_to_console
 from .account import account_login, sign_in
-from .browser_tool import SIGN_IN_TOOL
+from .browser_tool import SIGN_IN_TOOL, use_site_access
 from .config import (
+    BILLING_MODES,
     EXECUTOR_ROOT,
     HARD_MONTHLY_CAP_USD,
     ExecutorConfig,
@@ -59,6 +67,7 @@ from .ledger import DATA_DIR, Ledger, PendingResult, SupabaseLedger
 from .local import LOCAL_ID, LocalJobs
 from .orders import MODES as ORDER_MODES
 from .orders import SITE, run_order
+from .plan import out_until, out_words
 from .selfwork import (
     REPOS,
     SELF_TASK,
@@ -67,11 +76,15 @@ from .selfwork import (
     prepare,
     publish,
     run_tests,
+    self_work_report,
     spoken_title,
 )
 from .sites import check_site
 from .sync import Syncer
-from .team import SONNET, member_from, permissions_for, platform_members
+from .team import OPUS, SONNET, member_from, permissions_for, platform_members
+from .user_chrome import FELL_BACK_NOTE, USER_CHROME_RETRY_SECONDS
+from .user_chrome import explain as explain_user_chrome
+from .user_chrome import refused as user_chrome_refused
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import EffortLevel
@@ -92,6 +105,8 @@ WORK_SLOTS = 3
 THINK_MAX_TURNS = 12
 #: How often the worker checks the PC is still signed in to Claude.
 LOGIN_CHECK_SECONDS = 600.0
+#: How long the user's billing, read from their kwami, is trusted.
+BILLING_FRESH_SECONDS = 60.0
 #: How often a running job reports, and looks for a cancellation.
 RUNNING_POLL_SECONDS = 5.0
 #: Once a day per site is enough to keep a session in use and to notice it gone.
@@ -115,6 +130,24 @@ _LOGIN_TROUBLE = re.compile(
     r"|\bcredits?\b|rate.?limit|usage limit|quota|ejecutor local falló",
     re.IGNORECASE,
 )
+#: An API key that cannot do the work: the plan takes over, when the user put the key first.
+_KEY_TROUBLE = re.compile(
+    r"invalid (?:x-)?api.?key|authentication[_ ](?:error|failed)|credit balance|\bbilling\b"
+    r"|insufficient|\bquota\b|rate.?limit|ejecutor local falló",
+    re.IGNORECASE,
+)
+#: Said after a job the API key did because the plan could not.
+PAID_BECAUSE = "{why} Lo he hecho con la clave de API."
+LOGIN_COULD_NOT = "La sesión de Claude de tu ordenador no pudo hacerlo."
+ONLY_PLAN = (
+    "{out} Has elegido pagar solo con la suscripción, así que no lo he hecho con la API; "
+    "pídemelo cuando vuelva."
+)
+NO_KEY_NOW = "{out} No hay clave de API para seguir mientras tanto."
+ONLY_KEY_MISSING = (
+    "No la he hecho: has elegido pagar solo con la API y en este ordenador no hay clave de "
+    "API de Anthropic (ANTHROPIC_API_KEY)."
+)
 
 Runner = Callable[..., Coroutine[Any, Any, ExecutorResult]]
 
@@ -131,6 +164,20 @@ AGENT_GONE = "No la he hecho: ese agente ya no existe o está apagado."
 
 def spoken_summary(result: str) -> str:
     return result.split("Detalle:", 1)[0].strip()[:1200]
+
+
+def lead_on_login(job: BrainJob) -> str:
+    """The model that leads a job run on the PC's Claude login.
+
+    On the API key Sonnet leads and hands the hard thinking to its team, because
+    Opus costs twice as much per token. On the login a token costs nothing, so the
+    roster's default lead -- Sonnet -- gives way to Opus, the stronger planner and
+    reviewer of its own team's work. A model the user chose, or one of their agents,
+    keeps its own. If the login runs out (a usage limit), the API key takes over on
+    the model the job asked for.
+    """
+    model = job.model or SONNET
+    return OPUS if model == SONNET and not job.agent_id else model
 
 
 class Worker:
@@ -160,6 +207,12 @@ class Worker:
         self._new_ledger = new_ledger or (lambda: SupabaseLedger(self._store))
         self._check_login = check_login
         self.claude_login = False
+        #: What Claude Code last said about the login's plan (`plan.py`), for the heartbeat.
+        self.plan: dict[str, Any] | None = None
+        #: How each kwami's owner wants the brain to pay, and when it was read (monotonic).
+        self._billings: dict[str, tuple[float, str]] = {}
+        #: When the user's Chrome last answered for another claude.ai account (monotonic).
+        self._user_chrome_refused_at: float | None = None
         self._login_checked_at: float | None = None
         self._thinking: set[asyncio.Task[None]] = set()
         self._working: set[asyncio.Task[None]] = set()
@@ -181,6 +234,9 @@ class Worker:
         think = asyncio.create_task(self._think_forever(stop), name="brain_worker_think")
         sites = asyncio.create_task(self._check_sites_forever(stop), name="brain_worker_sites")
         sync = asyncio.create_task(self.syncer.run_forever(stop), name="brain_worker_sync")
+        # Where the user's own Chrome meets Jarvis (Kwami's extension), for as long as
+        # this thread runs: the voice reaches it from its own process.
+        hub = await start_hub()
         logger.info("Work thread ready on %s, in %s", self.runner_id, self._folder)
         try:
             while not stop.is_set():
@@ -200,11 +256,17 @@ class Worker:
             sites.cancel()
             sync.cancel()
             await asyncio.gather(beat, think, sites, sync, *self._thinking, return_exceptions=True)
+            if hub is not None:
+                await hub.stop()
+            # Claude in Chrome's server, if a task started it, stops with the thread.
+            await close_claude_chrome()
 
     async def _beat_forever(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             await self._note_login()
-            await self._jobs.beat(self.user_id, self.runner_id, platform.node(), self.claude_login)
+            await self._jobs.beat(
+                self.user_id, self.runner_id, platform.node(), self.claude_login, self.plan
+            )
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(stop.wait(), BEAT_SECONDS)
 
@@ -233,6 +295,30 @@ class Worker:
             self.claude_login = await (self._check_login or account_login)()
             if not self.claude_login:
                 logger.warning("Claude Code is not signed in here: run this with --login")
+
+    def _note_plan(self, result: ExecutorResult) -> None:
+        """Keep what Claude Code said about the plan. Only the login's runs say it."""
+        if result.plan is None:
+            return
+        if result.plan.get("status") == "rejected" and out_until(self.plan) is None:
+            logger.warning("The Claude plan ran out: %s", result.plan)
+        self.plan = result.plan
+
+    def plan_out(self) -> datetime | None:
+        """Until when the plan is out, if it is."""
+        return out_until(self.plan)
+
+    async def billing_of(self, job: BrainJob) -> str:
+        """How the user wants this job paid. The plan first when it cannot be read."""
+        now = asyncio.get_running_loop().time()
+        cached = self._billings.get(job.kwami_id)
+        if cached is not None and now - cached[0] < BILLING_FRESH_SECONDS:
+            return cached[1]
+        read = getattr(self._jobs, "billing", None)
+        billing = await read(job.user_id, job.kwami_id) if read is not None else ""
+        billing = billing if billing in BILLING_MODES else "account_first"
+        self._billings[job.kwami_id] = (now, billing)
+        return billing
 
     async def _next_job(self) -> tuple[BrainJob, float] | None:
         await self._fail_stale()
@@ -345,6 +431,11 @@ class Worker:
             # on an answer nobody will hear.
             await self._jobs.finish(job.id, "cancelled", "Caducada.", 0.0, "")
             return
+        until = self.plan_out()
+        if until is not None:
+            # Said at once, so the call moves to the key (or says so) without a wasted run.
+            await self._jobs.finish(job.id, "failed", out_words(until), 0.0, "")
+            return
         progress: list[str] = []
         running: asyncio.Task[ExecutorResult] = asyncio.create_task(
             self._run(
@@ -369,8 +460,12 @@ class Worker:
         except Exception as e:
             logger.exception("Thinking job %s crashed", job.id)
             result = ExecutorResult(f"La tarea falló: {e}", 0.0, False)
+        self._note_plan(result)
         status = "done" if result.ok else "failed"
-        if not await self._jobs.finish(job.id, status, result.text, 0.0, ""):
+        text = result.text
+        if not result.ok and (until := self.plan_out()) is not None:
+            text = out_words(until)
+        if not await self._jobs.finish(job.id, status, text, 0.0, ""):
             logger.error("Thinking job %s ended %s but could not be recorded", job.id, status)
 
     # -- one job ---------------------------------------------------------------
@@ -399,7 +494,7 @@ class Worker:
         running: asyncio.Task[ExecutorResult] = asyncio.create_task(
             self._self_work(job, resume, left, progress.append)
             if job.repo
-            else self._on_login_first(job, job.task, self._folder, resume, left, progress.append),
+            else self._run_paid(job, job.task, self._folder, resume, left, progress.append),
             name=f"brain_job_{job.id}",
         )
         if await self._watch(job, running, progress):
@@ -439,7 +534,7 @@ class Worker:
         job.permissions = permissions_for(member.tools)
         return ""
 
-    async def _on_login_first(
+    async def _run_paid(
         self,
         job: BrainJob,
         task: str,
@@ -450,18 +545,101 @@ class Worker:
         *,
         google: bool = True,
     ) -> ExecutorResult:
-        """Run on the PC's login, and on the API key only if the login cannot do it.
+        """Run as the user chose to pay (`plan.py`): the PC's plan, the API key, or both.
 
         The cost is what the API run cost, and nothing for the login's. The API key
         never resumes a session: a resumed run reports the whole session, login
         included, and that was never paid. It starts afresh on the same files.
         """
+        billing = await self.billing_of(job)
         effort: EffortLevel | None = "high" if job.difficulty == "hard" else None
-        result = await self._run(
-            "",
-            job.model or SONNET,
-            task,
-            ExecutorConfig(
+        # Their own Chrome, when they switched it on; never for Jarvis's code.
+        chrome = [google and self._user_chrome_ok()]
+
+        async def on_key(why: str = "") -> ExecutorResult:
+            result = await self._run(
+                self._api_key,
+                job.model or SONNET,
+                task,
+                ExecutorConfig(
+                    folder=str(folder),
+                    permissions=cast("Permissions", job.permissions),
+                    max_turns=THREAD_MAX_TURNS,
+                    max_task_usd=min(THREAD_MAX_TASK_USD, left),
+                    members=job.members,
+                    google_user_id=job.user_id if google else "",
+                    # The voice's profile, so what the user signs in to is there for both.
+                    browser_user_id=(job.kwami_id or job.user_id) if google else "",
+                    site_user_id=job.user_id if google else "",
+                    user_chrome=chrome[0],
+                ),
+                effort=effort,
+                on_progress=on_progress,
+            )
+            if not why:
+                return result
+            return replace(result, text=f"{result.text}\n\n{PAID_BECAUSE.format(why=why)}")
+
+        async def on_plan() -> ExecutorResult:
+            result = await self._on_login(
+                job, task, folder, resume, on_progress, chrome, effort, google
+            )
+            self._note_plan(result)
+            return replace(result, cost_usd=0.0)
+
+        if billing in ("api_only", "api_first") and self._api_key:
+            result = await on_key()
+            if (
+                result.ok
+                or billing == "api_only"
+                or not self.claude_login
+                or self.plan_out() is not None
+                or not _KEY_TROUBLE.search(result.text)
+            ):
+                return result
+            logger.info("Job %s: the API key could not do it; the PC's plan", job.id)
+            return await on_plan()
+        if billing == "api_only":
+            return ExecutorResult(ONLY_KEY_MISSING, 0.0, False, session_id=resume)
+
+        until = self.plan_out()
+        if until is not None:
+            out = out_words(until)
+            if billing == "account_only":
+                return ExecutorResult(ONLY_PLAN.format(out=out), 0.0, False, session_id=resume)
+            if not self._api_key:
+                return ExecutorResult(NO_KEY_NOW.format(out=out), 0.0, False, session_id=resume)
+            logger.info("Job %s: the plan is out until %s; the API key", job.id, until)
+            return await on_key(out)
+
+        result = await on_plan()
+        if result.ok or not _LOGIN_TROUBLE.search(result.text):
+            return result
+        until = self.plan_out()
+        out = out_words(until) if until is not None else ""
+        if billing == "account_only":
+            return replace(result, text=ONLY_PLAN.format(out=out).strip()) if out else result
+        if not self._api_key:
+            return replace(result, text=NO_KEY_NOW.format(out=out)) if out else result
+        logger.info("Job %s: the PC's login could not do it; using the API key", job.id)
+        return await on_key(out or LOGIN_COULD_NOT)
+
+    async def _on_login(
+        self,
+        job: BrainJob,
+        task: str,
+        folder: Path,
+        resume: str,
+        on_progress: Callable[[str], None],
+        chrome: list[bool],
+        effort: EffortLevel | None,
+        google: bool,
+    ) -> ExecutorResult:
+        """One run on the PC's login. `chrome[0]` turns off if the user's Chrome refused."""
+        their_chrome = chrome[0]
+
+        def on_login(user_chrome: bool) -> ExecutorConfig:
+            return ExecutorConfig(
                 folder=str(folder),
                 permissions=cast("Permissions", job.permissions),
                 max_turns=THREAD_MAX_TURNS,
@@ -470,30 +648,45 @@ class Worker:
                 google_user_id=job.user_id if google else "",
                 # The voice's profile, so what the user signs in to is there for both.
                 browser_user_id=(job.kwami_id or job.user_id) if google else "",
-            ),
+                site_user_id=job.user_id if google else "",
+                user_chrome=user_chrome,
+            )
+
+        result = await self._run(
+            "",
+            lead_on_login(job),
+            task,
+            on_login(their_chrome),
             resume=resume,
             effort=effort,
             on_progress=on_progress,
         )
-        if result.ok or not self._api_key or not _LOGIN_TROUBLE.search(result.text):
-            return replace(result, cost_usd=0.0)
-        logger.info("Job %s: the PC's login could not do it; using the API key", job.id)
-        return await self._run(
-            self._api_key,
-            job.model or SONNET,
-            task,
-            ExecutorConfig(
-                folder=str(folder),
-                permissions=cast("Permissions", job.permissions),
-                max_turns=THREAD_MAX_TURNS,
-                max_task_usd=min(THREAD_MAX_TASK_USD, left),
-                members=job.members,
-                google_user_id=job.user_id if google else "",
-                # The voice's profile, so what the user signs in to is there for both.
-                browser_user_id=(job.kwami_id or job.user_id) if google else "",
-            ),
-            effort=effort,
-            on_progress=on_progress,
+        if their_chrome and user_chrome_refused(result.text):
+            # The extension is on another claude.ai account (measured 2026-11-16). Not a
+            # failed task: Jarvis's own window does it, and the user is told why.
+            # A refused run stops at its first browser call, and that call closes
+            # everything else (`_Lanes`): nothing was done twice.
+            logger.warning(
+                "Job %s: the user's Chrome is on another account; Jarvis's window", job.id
+            )
+            self._user_chrome_refused_at = asyncio.get_running_loop().time()
+            chrome[0] = False
+            result = await self._run(
+                "",
+                lead_on_login(job),
+                task,
+                on_login(False),
+                effort=effort,
+                on_progress=on_progress,
+            )
+            result = replace(result, text=f"{result.text}\n\n{FELL_BACK_NOTE}")
+        return replace(result, text=explain_user_chrome(result.text))
+
+    def _user_chrome_ok(self) -> bool:
+        """Whether to offer the user's Chrome: not within a while of it refusing."""
+        refused = self._user_chrome_refused_at
+        return refused is None or (
+            asyncio.get_running_loop().time() - refused >= USER_CHROME_RETRY_SECONDS
         )
 
     async def _self_work(
@@ -510,7 +703,7 @@ class Worker:
                 slug=workspace.repo.slug, branch=workspace.branch, task=job.task
             )
             # Code that gets pushed is written with nothing read from anyone's mail.
-            result = await self._on_login_first(
+            result = await self._run_paid(
                 job, task, workspace.path, resume, left, on_progress, google=False
             )
             if not result.ok:
@@ -522,7 +715,9 @@ class Worker:
             logger.warning("Job %s: %s", job.id, e)
             return ExecutorResult(f"No he podido terminar: {e}", 0.0, False, session_id=resume)
         outcome = outcome_text(published, tests)
-        return replace(result, text=f"{outcome}\n\n{result.text}", ok=not published.refused)
+        return replace(
+            result, text=self_work_report(outcome, result.text), ok=not published.refused
+        )
 
     async def _watch(self, job: BrainJob, running: asyncio.Task, progress: list[str]) -> bool:
         """Report until the job ends. True when it was cancelled instead."""
@@ -666,6 +861,8 @@ async def _main(argv: list[str] | None = None) -> int:
     if store is None:
         logger.error("SUPABASE_URL and SUPABASE_SECRET_KEY are needed")
         return 2
+    # The user's list of sites (Settings > Access), for every run's browser.
+    use_site_access(SiteAccess(store))
     # Optional: without one, the PC's login is all there is.
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     await asyncio.to_thread(EXECUTOR_ROOT.mkdir, parents=True, exist_ok=True)

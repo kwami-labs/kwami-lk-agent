@@ -62,6 +62,43 @@ _SIGN_IN_REFUSED = re.compile(r"may not be secure|no sean? segur", re.I)
 FRAME_TOPIC = "browser_frame"
 FRAME_INTERVAL_SECONDS = 1.5
 FRAME_QUALITY = 50
+#: With a screencast, Chrome sends a frame each time the page paints; the panel
+#: gets the latest at most this often.
+FRAME_MIN_SECONDS = 0.5
+#: A window that is hidden (behind others on the user's desktop) paints nothing, so its
+#: screencast falls silent: then a screenshot this often stands in, sent if it changed.
+FRAME_STALE_SECONDS = 2.0
+FRAME_MAX_WIDTH = 1280
+FRAME_MAX_HEIGHT = 1400
+
+
+def pick_element(
+    elements: list[dict[str, Any]], element_id: str = "", description: str = ""
+) -> dict[str, Any] | None:
+    """The visible element a click means: its id from the last read, or the best label match."""
+    if element_id and element_id.startswith("el-"):
+        for el in elements:
+            if el.get("id") == element_id and el.get("visible"):
+                return el
+
+    target = None
+    if description:
+        desc_lower = description.lower().strip()
+        best_score = 0
+        for el in elements:
+            if not el.get("visible"):
+                continue
+            label = (el.get("label") or "").lower()
+            if desc_lower in label:
+                score = 4
+            elif all(w in label for w in desc_lower.split() if len(w) >= 2):
+                score = 2
+            else:
+                score = 0
+            if score > best_score:
+                best_score = score
+                target = el
+    return target
 
 
 class CloudBrowserSession:
@@ -98,6 +135,12 @@ class CloudBrowserSession:
         self._current_url: str = ""
         self._idle_timer: asyncio.Task | None = None
         self._frame_task: asyncio.Task | None = None
+        #: Whether anyone in the app is looking at the frames (`browser_frames`).
+        self._frames_wanted = True
+        self._screencasting = False
+        self._latest_frame = ""
+        self._frame_ready = asyncio.Event()
+        self._background: set[asyncio.Task] = set()
         # Cloud browsers bill per minute, with a US proxy on top. This is the
         # single most expensive resource the agent can hold, and it was the one
         # resource never metered -- pure, invisible margin loss.
@@ -220,10 +263,11 @@ class CloudBrowserSession:
         # Enable Page domain for navigation events
         try:
             await self._cdp.send("Page.enable")
-            if self.runs_locally:
-                # The user's window keeps the size they gave it.
-                await self._cdp.send("Page.bringToFront")
-            else:
+            # The window on the user's PC keeps its size, and its place behind KWAMI: the
+            # app mirrors it, and it comes forward only when the user has to act there
+            # (`bring_to_front`). Bringing it forward here put the same page twice in front
+            # of them (2026-11-17).
+            if not self.runs_locally:
                 await self._cdp.send(
                     "Emulation.setDeviceMetricsOverride",
                     width=1280,
@@ -248,8 +292,10 @@ class CloudBrowserSession:
         # Before the frames: nothing of a page goes out until it has been checked.
         if url:
             await self._verify_landing_url()
-        if self.is_builtin:
-            self._frame_task = asyncio.create_task(self._stream_frames())
+        # The built-in browser has no other view; the window on the user's PC has one,
+        # on their desktop, and the frames mirror it in the app as Jarvis works.
+        if self.is_builtin or self.runs_locally:
+            await self._start_frames()
 
         logger.info(
             "Cloud browser started: vendor=%s, id=%s, profile=%s, url=%s",
@@ -447,33 +493,7 @@ class CloudBrowserSession:
         info = await self._connection.page_info()
         elements = info.get("elements", []) if isinstance(info, dict) else []
 
-        target = None
-
-        # Priority 1: exact element_id match
-        if element_id and element_id.startswith("el-"):
-            for el in elements:
-                if el.get("id") == element_id and el.get("visible"):
-                    target = el
-                    break
-
-        # Priority 2: fuzzy description match
-        if not target and description:
-            desc_lower = description.lower().strip()
-            best_score = 0
-            for el in elements:
-                if not el.get("visible"):
-                    continue
-                label = (el.get("label") or "").lower()
-                if desc_lower in label:
-                    score = 4
-                elif all(w in label for w in desc_lower.split() if len(w) >= 2):
-                    score = 2
-                else:
-                    score = 0
-                if score > best_score:
-                    best_score = score
-                    target = el
-
+        target = pick_element(elements, element_id, description)
         if not target:
             return f"Could not find element to click: {element_id or description}"
 
@@ -657,6 +677,95 @@ class CloudBrowserSession:
         task, self._frame_task = self._frame_task, None
         if task is not None:
             task.cancel()
+        if self._screencasting and self._cdp is not None:
+            self._cdp.off("Page.screencastFrame")
+        self._screencasting = False
+
+    async def _start_frames(self) -> None:
+        """Frames when the page changes (a screencast), or by polling where there is none.
+
+        A screencast costs nothing while the page is still; polling took and encoded a
+        screenshot every 1.5 s to find out it had not changed.
+        """
+        self._stop_frames()
+        if not self._frames_wanted:
+            return
+        try:
+            self._connection.on("Page.screencastFrame", self._on_screencast_frame)
+            await self._connection.send(
+                "Page.startScreencast",
+                format="jpeg",
+                quality=FRAME_QUALITY,
+                maxWidth=FRAME_MAX_WIDTH,
+                maxHeight=FRAME_MAX_HEIGHT,
+            )
+        except Exception as e:
+            logger.debug("No screencast here (%s): polling for frames", e)
+            self._frame_task = asyncio.create_task(self._stream_frames())
+            return
+        self._screencasting = True
+        self._frame_task = asyncio.create_task(self._publish_latest_frames())
+
+    def _on_screencast_frame(self, params: dict[str, Any]) -> None:
+        """Keep the newest frame, and ack it at once: Chrome sends no more until then."""
+        self._latest_frame = str(params.get("data") or "")
+        session_id = params.get("sessionId")
+        if session_id is not None and self._cdp is not None:
+            task = asyncio.create_task(
+                self._cdp.send("Page.screencastFrameAck", sessionId=session_id)
+            )
+            self._background.add(task)
+            task.add_done_callback(self._background.discard)
+        self._frame_ready.set()
+
+    async def _publish_latest_frames(self) -> None:
+        """Send the newest frame, at most every `FRAME_MIN_SECONDS`; the rest are dropped.
+
+        Chrome only sends a frame when the page paints, and a window hidden behind others
+        on the user's desktop does not paint: a still or hidden page would leave the panel
+        waiting. So the first frame (also after the app asked for frames again) is always a
+        screenshot, and while the page is hidden a screenshot every `FRAME_STALE_SECONDS`
+        stands in for the screencast. Nothing is sent twice.
+        """
+        last = ""
+        while self.is_active:
+            if last:
+                with contextlib.suppress(TimeoutError):
+                    async with asyncio.timeout(FRAME_STALE_SECONDS):
+                        await self._frame_ready.wait()
+            self._frame_ready.clear()
+            frame, self._latest_frame = self._latest_frame, ""
+            try:
+                shoot = not frame and (not last or await self._page_hidden())
+                if (frame or shoot) and await self._page_may_be_shown():
+                    if shoot:
+                        frame = await self._connection.screenshot(quality=FRAME_QUALITY)
+                    if frame and frame != last:
+                        await self._publish_frame(base64.b64decode(frame))
+                        last = frame
+            except Exception as e:
+                logger.debug("Could not send a browser frame: %s", e)
+            await asyncio.sleep(FRAME_MIN_SECONDS)
+
+    async def _page_hidden(self) -> bool:
+        """Whether the page is out of sight (its window covered or minimised): it paints nothing."""
+        return await self._connection.evaluate("document.visibilityState") == "hidden"
+
+    async def set_frames_wanted(self, wanted: bool) -> None:
+        """The app says whether anyone is looking: frames only flow while someone is."""
+        if wanted == self._frames_wanted:
+            return
+        self._frames_wanted = wanted
+        if not (self.is_active and (self.is_builtin or self.runs_locally)):
+            return
+        if wanted:
+            await self._start_frames()
+            return
+        screencasting = self._screencasting
+        self._stop_frames()
+        if screencasting:
+            with contextlib.suppress(Exception):
+                await self._connection.send("Page.stopScreencast")
 
     async def _page_may_be_shown(self) -> bool:
         """Whether the page is one we would have opened, leaving it when it is not.
@@ -674,7 +783,9 @@ class CloudBrowserSession:
             await validate_url_async(href, resolve_dns=False)
         except UnsafeURLError as e:
             logger.warning("Not showing a refused page: %s", e)
-            await self._leave_unsafe_page()
+            # The window on the user's PC is theirs: a page they opened stays, unmirrored.
+            if not self.runs_locally:
+                await self._leave_unsafe_page()
             return False
         return True
 

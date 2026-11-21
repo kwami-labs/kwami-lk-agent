@@ -75,8 +75,13 @@ def test_executor_folder_cannot_leave_the_root(tmp_path: Path) -> None:
 def test_difficulty_picks_the_model() -> None:
     config = default_brain()
     assert pick(config, ALL_KEYS, "question", "simple").id == "claude-haiku"
-    assert pick(config, ALL_KEYS, "analysis", "normal").id == "claude-sonnet"
+    # The user's rule (2026-11-13): Opus for most of the work...
+    assert pick(config, ALL_KEYS, "analysis", "normal").id == "claude-opus"
     assert pick(config, ALL_KEYS, "analysis", "hard").id == "claude-opus"
+    # ...Sonnet for writing and reading, whatever the difficulty.
+    for kind in ("writing", "reading"):
+        for difficulty in ("simple", "normal", "hard"):
+            assert pick(config, ALL_KEYS, kind, difficulty).id == "claude-sonnet"
     assert pick(config, ALL_KEYS, "research", "simple").id == "gemini-flash"
     assert pick(config, ALL_KEYS, "code", "normal").id == "claude-code"
 
@@ -84,7 +89,8 @@ def test_difficulty_picks_the_model() -> None:
 def test_a_model_without_its_key_is_skipped() -> None:
     config = default_brain()
     only_anthropic = {"ANTHROPIC_API_KEY": "a"}
-    assert pick(config, only_anthropic, "research", "simple").id == "claude-sonnet"
+    # No Gemini key: a lookup goes to Haiku, which searches too, before Sonnet.
+    assert pick(config, only_anthropic, "research", "simple").id == "claude-haiku"
 
 
 def test_a_named_model_wins_but_never_crosses_into_code() -> None:
@@ -190,6 +196,8 @@ def _bridge(tmp_path: Path, answers: dict[str, BrainAnswer]) -> Bridge:
     bridge = Bridge(keys=ALL_KEYS, ledger=Ledger(tmp_path))
     # Planning is a real API call; the staged tests turn it back on with a fake.
     bridge.config.split = False
+    # The plan made up front; the orchestrator has its own tests.
+    bridge.config.orchestrate = False
     bridge.set_context(kwami_id="k1", name="Jarvis", language="es-ES", timezone="Europe/Madrid")
 
     async def fake_ask(model: BrainModel, request: Any) -> BrainAnswer:
@@ -227,14 +235,13 @@ async def test_a_task_is_spoken_at_the_next_pause(tmp_path: Path) -> None:
 
 
 async def test_a_failed_model_falls_back_once(tmp_path: Path) -> None:
-    bridge = _bridge(
-        tmp_path, {"claude-sonnet": BrainAnswer("caído", "claude-sonnet", "x", ok=False)}
-    )
+    bridge = _bridge(tmp_path, {"claude-opus": BrainAnswer("caído", "claude-opus", "x", ok=False)})
     bridge.attach(FakeSession(), FakePublisher())
     task = bridge.start(task="analiza", title="Análisis", kind="analysis", difficulty="normal")
     await _finish(bridge)
     assert task.status == "done"
-    assert task.models == ["Claude Sonnet 5.5", "Claude Opus 5.5"]
+    # A normal analysis is Opus's; Sonnet is the next one down.
+    assert task.models == ["Claude Opus 5.5", "Claude Sonnet 5.5"]
 
 
 async def test_the_council_compares_and_the_chair_answers(tmp_path: Path) -> None:
@@ -329,13 +336,13 @@ async def test_split_tasks_send_each_part_to_its_model(tmp_path: Path, monkeypat
 
     assert [s["model"] for s in task.steps] == [
         "Gemini 3.5 Flash",  # quick web lookup: Gemini is the efficient one
-        "Claude Sonnet 5.5",  # everyday reasoning
+        "Claude Opus 5.5",  # reasoning is Opus's, normal or hard
         "Claude Opus 5.5",  # the decision
     ]
-    # The decision builds on both lookups, so it answers directly: Opus runs
-    # once, with no separate combine call. Haiku was never needed.
+    # The decision builds on both lookups, so it answers directly, with no separate
+    # combine call. Opus planned (0.001), reasoned (0.01) and decided (0.01).
     assert task.result == "respuesta de claude-opus"
-    assert bridge.ledger.month_spend()["byModel"]["claude-opus"] == pytest.approx(0.01)
+    assert bridge.ledger.month_spend()["byModel"]["claude-opus"] == pytest.approx(0.021)
     assert "Claude Haiku 5.5" not in task.models
 
 

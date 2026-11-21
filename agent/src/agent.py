@@ -26,6 +26,7 @@ from .domain.greeting import (
 from .domain.pipelines import REALTIME_MODEL_PIPELINES, STANDARD_PIPELINE
 from .domain.tool_gating import (
     BRAIN_SEARCH_TOOLS,
+    PAID_SEARCH_TOOLS,
     VOICE_SWITCH_TOOLS,
     describe_gating,
     unavailable_builtin_tools,
@@ -45,6 +46,7 @@ from .tools import (
     TradingToolsMixin,
 )
 from .tools.limits import enforce_tool_limit, tool_inventory, trim_client_tools
+from .tools.shelf import SHELF_TOOL, ToolShelfMixin
 from .utils.logging import get_logger, redacted
 from .utils.room import should_disconnect_as_duplicate
 
@@ -69,6 +71,7 @@ class KwamiAgent(
     MediaToolsMixin,
     TradingToolsMixin,
     BrainToolsMixin,
+    ToolShelfMixin,
 ):
     """Dynamic AI agent configured by the Kwami frontend library.
 
@@ -139,6 +142,10 @@ class KwamiAgent(
         # assistant on an errand is kept out of the memory graph (memory/gate.py).
         self._turn_tools: list[str] = []
 
+        # Client tools that did not fit under the ceiling, reachable through
+        # `find_more_tools` (tools/shelf.py). Empty: that tool is withheld.
+        self._shelf: list[Any] = []
+
         # Initialize client tool manager
         self.client_tools = ClientToolManager(self)
         if self.kwami_config.tools:
@@ -162,7 +169,14 @@ class KwamiAgent(
         builtin_count = sum(
             1 for tool in find_function_tools(type(self)) if _tool_name(tool) not in withheld
         )
-        self._tools = trim_client_tools(builtin_count, self.client_tools.create_client_tools())
+        client = self.client_tools.create_client_tools()
+        self._tools = trim_client_tools(builtin_count, client)
+        if len(self._tools) < len(client):
+            # Some do not fit: they go on the shelf, and the tool that reaches
+            # them takes one more place.
+            self._tools = trim_client_tools(builtin_count + 1, client)
+            kept = {id(tool) for tool in self._tools}
+            self._shelf = [tool for tool in client if id(tool) not in kept]
 
         super().__init__(
             instructions=instructions,
@@ -212,12 +226,24 @@ class KwamiAgent(
         locked = VOICE_SWITCH_TOOLS if self.kwami_config.voice.voice_locked else frozenset()
         if getattr(self, "_delegating", False):
             locked = locked | BRAIN_SEARCH_TOOLS
+        if self._paid_searches_off():
+            locked = locked | PAID_SEARCH_TOOLS
+        if not getattr(self, "_shelf", None):
+            locked = locked | {SHELF_TOOL}
         return missing, locked
 
     def _unavailable_for_prompt(self) -> frozenset[str]:
         """Tools the prompt must not describe: missing ones and delegated searches."""
         missing = unavailable_builtin_tools(get_settings())
+        if self._paid_searches_off():
+            missing = missing | PAID_SEARCH_TOOLS
         return missing | BRAIN_SEARCH_TOOLS if getattr(self, "_delegating", False) else missing
+
+    def _paid_searches_off(self) -> bool:
+        """With the plan only, the voice's paid searches are off too (`PAID_SEARCH_TOOLS`)."""
+        bridge = self._bridge()
+        config = getattr(bridge, "config", None)
+        return getattr(config, "billing", "") == "account_only"
 
     async def refresh_brain_gating(self) -> bool:
         """Bring the search tools in line with the brain. True when they changed.
@@ -228,16 +254,17 @@ class KwamiAgent(
         """
         delegating = self._brain_delegates()
         relay_all = self._relay_all()
-        tools_changed = delegating != getattr(self, "_delegating", False)
+        paid_off = self._paid_searches_off()
+        tools_changed = delegating != getattr(self, "_delegating", False) or paid_off != getattr(
+            self, "_paid_off", False
+        )
         if not tools_changed and relay_all == getattr(self, "_relaying_all", False):
             return False
         self._delegating = delegating
         self._relaying_all = relay_all
+        self._paid_off = paid_off
         if tools_changed:
-            combined = enforce_tool_limit(
-                self.available_builtin_tools(), self.client_tools.create_client_tools()
-            )
-            await self.update_tools(combined)
+            await self.update_tools(self.offered_tools())
             await self.publish_tool_inventory()
         await self.update_instructions(
             self._build_system_prompt(getattr(self, "_memory_text", None) or None)
@@ -246,6 +273,22 @@ class KwamiAgent(
             "Searches now %s", "delegated to the brain" if delegating else "done by the voice"
         )
         return True
+
+    def offered_tools(self) -> list[Any]:
+        """Everything the model is offered now, built-ins first, never over the ceiling.
+
+        What does not fit goes on the shelf, and `find_more_tools` comes in to reach it.
+        """
+        client = self.client_tools.create_client_tools()
+        self._shelf = []
+        builtins = self.available_builtin_tools()
+        combined = enforce_tool_limit(builtins, client)
+        if len(combined) < len(builtins) + len(client):
+            shelf_tool = ToolShelfMixin.find_more_tools.__get__(self, type(self))
+            combined = enforce_tool_limit([*builtins, shelf_tool], client)
+            offered = {id(tool) for tool in combined}
+            self._shelf = [tool for tool in client if id(tool) not in offered]
+        return combined
 
     def available_builtin_tools(self) -> list[Any]:
         """This agent's built-in tools, bound to it, minus the withheld ones.
@@ -638,7 +681,9 @@ class KwamiAgent(
         bridge = self._bridge()
         if bridge is None:
             return []
-        kwami_id = self.kwami_config.kwami_id
+        # The bridge's own id: the kwami's row, which the PC and the cloud leave
+        # their results under, not the memory's long name the app sends.
+        kwami_id = getattr(bridge, "kwami_id", "") or self.kwami_config.kwami_id
         # On the cloud the owed results live in Supabase; give the load that
         # `_sync_bridge_context` started a moment to land.
         await bridge.ready(kwami_id)

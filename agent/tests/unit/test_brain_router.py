@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.brain.config import BrainConfig, BrainModel, default_brain
 from src.brain.router import (
+    ACCOUNT_MARK,
     council_members,
     find_model,
     pick,
@@ -70,3 +71,71 @@ def test_council_policies() -> None:
     assert not should_convene(config, "question", important=False, requested=False)
     config.council = "on_request"
     assert not should_convene(config, "research", important=True, requested=False)
+
+
+# -- cheapest first --------------------------------------------------------------------
+
+
+def _two_standards(access: str = "auto") -> BrainConfig:
+    from src.brain.config import BrainModel
+
+    config = default_brain()
+    config.models = [
+        BrainModel("sonnet", "anthropic", "claude-sonnet-5-5", "standard", "Sonnet", access=access),
+        BrainModel("deepseek", "deepseek", "deepseek-chat", "standard", "DeepSeek"),
+        BrainModel("mistral", "mistral", "mistral-large", "standard", "Mistral"),
+    ]
+    return config
+
+
+def test_of_two_models_with_the_same_role_the_cheaper_one_works() -> None:
+    keys = {"ANTHROPIC_API_KEY": "a", "DEEPSEEK_API_KEY": "d", "MISTRAL_API_KEY": "m"}
+    # DeepSeek 0.5 + 2.0 beats Mistral 1 + 5 and Sonnet 2 + 10, whatever the order.
+    assert pick(_two_standards(), keys, "analysis", "normal").id == "deepseek"  # type: ignore[union-attr]
+
+
+def test_a_claude_model_on_the_pcs_account_costs_nothing_per_token() -> None:
+    keys = {"ANTHROPIC_API_KEY": "a", "DEEPSEEK_API_KEY": "d", ACCOUNT_MARK: "1"}
+    assert pick(_two_standards(), keys, "analysis", "normal").id == "sonnet"  # type: ignore[union-attr]
+    # Unless the user keeps it on the API key.
+    api_only = _two_standards(access="api")
+    assert pick(api_only, keys, "analysis", "normal").id == "deepseek"  # type: ignore[union-attr]
+
+
+def test_a_tie_keeps_the_users_order() -> None:
+    from src.brain.config import BrainModel
+    from src.brain.router import by_cost
+
+    a = BrainModel("a", "groq", "model-a", "fast")
+    b = BrainModel("b", "groq", "model-b", "fast")
+    assert by_cost([a, b], {}) == [a, b]
+    assert by_cost([b, a], {}) == [b, a]
+
+
+def test_each_kind_of_work_goes_to_the_model_best_at_it() -> None:
+    """The user's rule (2026-11-13): Opus most, Sonnet writes and reads, Haiku chores."""
+    from src.brain.router import KINDS, role_for
+
+    assert "reading" in KINDS
+    table = {
+        (kind, difficulty): role_for(kind, difficulty)
+        for kind in ("question", "analysis", "writing", "reading", "research")
+        for difficulty in ("simple", "normal", "hard")
+    }
+    assert table == {
+        ("question", "simple"): "fast",
+        ("question", "normal"): "expert",
+        ("question", "hard"): "expert",
+        ("analysis", "simple"): "fast",
+        ("analysis", "normal"): "expert",
+        ("analysis", "hard"): "expert",
+        ("writing", "simple"): "standard",
+        ("writing", "normal"): "standard",
+        ("writing", "hard"): "standard",
+        ("reading", "simple"): "standard",
+        ("reading", "normal"): "standard",
+        ("reading", "hard"): "standard",
+        ("research", "simple"): "search",
+        ("research", "normal"): "expert",
+        ("research", "hard"): "expert",
+    }

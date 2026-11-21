@@ -276,4 +276,4 @@ def test_the_registered_tools_are_the_ones_the_prompt_describes(agent: KwamiAgen
 
     prompt = agent._build_system_prompt()
     assert "eye-iris" in prompt
-    assert "apply_scene_preset" in prompt
+    assert "scene presets" in prompt

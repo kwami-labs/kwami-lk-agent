@@ -1,0 +1,30 @@
+{
+  "manifest_version": 3,
+  "name": "Kwami · Jarvis en tu Chrome",
+  "short_name": "Jarvis",
+  "version": "1.0.0",
+  "description": "Deja que Jarvis, de Kwami, vea tus pestañas y trabaje en tu propio Chrome, con las sesiones que ya tienes abiertas. Solo habla con Kwami en este ordenador.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA4FdX5fredmJoOtwI34zRfzvGoXUSE9+G/pWjbKxHIvKY02hMYDDLOCuI+JZkEG0KzFzuowhjBjV7iUwZ+ta5na9OIei7KPbCPZiGS6Si88i61qF3EAzsh7HfHX/B1aOfCbyr+RR5o4jKstFtjUA+xHwJw6URgeiTJXR29klGAi4w1d9oflYppNSTYLT8k3+sxOklMwSMTLMmhNExNo+u2KdDUtpDeSXhQuPj/chGeg/0ftoLZGR+fXW+VO/OJjCyqjG7TQ40z3XRwsP5XJvCD+8mEzAkJM6ITG9Fq1dTFJBOV0Xj71yYS9KVXmoOkxYOS9THXNsr0xVYRsMugIhwgwIDAQAB",
+  "minimum_chrome_version": "120",
+  "permissions": ["tabs", "tabGroups", "scripting", "storage", "alarms"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Jarvis en tu Chrome",
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  }
+}

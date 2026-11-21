@@ -35,6 +35,7 @@ def _fully_configured() -> Settings:
         zep_api_key="k",
         browserbase_api_key="k",
         browserbase_project_id="p",
+        supabase_secret_key="k",  # noqa: S106 - a placeholder
     )
 
 
@@ -59,6 +60,7 @@ def test_each_credential_gates_only_its_own_tools() -> None:
         tavily_api_key="k",
         zep_api_key="k",
         browserbase_api_key="k",
+        supabase_secret_key="k",  # noqa: S106 - a placeholder
     )
 
     assert unavailable_builtin_tools(settings) == frozenset({"product_search"})
@@ -185,3 +187,11 @@ def test_gating_does_not_disturb_client_tools() -> None:
     names = {t.info.name for t in KwamiAgent(config=config).tools}
 
     assert "set_ui_control" in names
+
+
+def test_the_users_agents_need_the_database() -> None:
+    missing = unavailable_builtin_tools(Settings())
+    assert {"list_my_agents", "save_my_agent"} <= missing
+    assert not {"list_my_agents", "save_my_agent"} & unavailable_builtin_tools(
+        Settings(supabase_secret_key="k")  # noqa: S106
+    )

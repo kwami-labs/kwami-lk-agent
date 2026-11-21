@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <title>Jarvis en tu Chrome</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header>
+      <img src="icons/icon-48.png" alt="" width="28" height="28" />
+      <div>
+        <h1>Jarvis en tu Chrome</h1>
+        <p class="sub">Kwami en este ordenador</p>
+      </div>
+    </header>
+
+    <section class="state" id="state" data-state="waiting">
+      <span class="dot"></span>
+      <span id="state-text">Buscando a Kwami…</span>
+    </section>
+
+    <p class="help" id="help"></p>
+
+    <button id="toggle" type="button"></button>
+
+    <dl class="facts">
+      <dt>Pestañas de Jarvis</dt>
+      <dd id="jarvis-tabs">0</dd>
+      <dt>Último encargo</dt>
+      <dd id="last">—</dd>
+    </dl>
+
+    <details>
+      <summary>Avanzado</summary>
+      <label>
+        Puerto de Kwami
+        <input id="port" type="number" min="1024" max="65535" />
+      </label>
+      <button id="reconnect" type="button" class="ghost">Reconectar</button>
+    </details>
+
+    <footer>
+      Jarvis nunca escribe contraseñas, códigos ni tarjetas: eso lo haces tú. Sus pestañas
+      van en el grupo «Jarvis».
+    </footer>
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

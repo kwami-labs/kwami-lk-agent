@@ -25,17 +25,20 @@ it could not be done, and the caller decides what that means.
 
 from __future__ import annotations
 
+import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlparse
 
-from ..adapters.supabase import SupabaseClient
+from ..adapters.supabase import SupabaseClient, as_user_id
 
 #: A worker beats every `BEAT_SECONDS`, and is gone after missing a few.
 BEAT_SECONDS = 30.0
 RUNNER_FRESH_SECONDS = 90.0
+#: How long a heartbeat goes without the plan after the database refused it.
+PLAN_COLUMN_RETRY_SECONDS = 3600.0
 #: How long without a heartbeat before a running job is given up on.
 JOB_STALE_SECONDS = 180.0
 #: How long a call's interest in a job lasts unless it renews it.
@@ -50,6 +53,8 @@ CLOUD_PER_USER = 2
 CLOUD_RUNNER_PREFIX = "cloud-"
 
 TERMINAL = frozenset({"done", "failed", "cancelled"})
+#: The most agents one user keeps; the API holds the same line (`brain_service.MAX_AGENTS`).
+MAX_USER_AGENTS = 30
 
 
 def _ago(seconds: float, now: datetime | None = None) -> str:
@@ -156,6 +161,9 @@ class JobStore:
         #: Whether it has migration 029, learnt from the last look for what the cloud
         #: left: the PC then looks far less often until it does.
         self.sync_ready = True
+        #: Whether `brain_runners` has migration 032's plan column. None: not tried yet.
+        self.plan_column: bool | None = None
+        self._plan_retry_at = 0.0
 
     # -- the side that asks --------------------------------------------------
 
@@ -196,18 +204,65 @@ class JobStore:
 
     async def account_ready(self, user_id: str) -> bool:
         """Whether a fresh worker of this user reports a Claude login on its PC."""
+        signed_in, _ = await self.account_state(user_id)
+        return signed_in
+
+    async def account_state(self, user_id: str) -> tuple[bool, dict[str, Any] | None]:
+        """Whether a fresh worker reports a Claude login, and what is left of its plan.
+
+        The plan is None until Claude Code has said anything, and before migration 032.
+        """
+        query = {
+            "user_id": f"eq.{user_id}",
+            "claude_login": "is.true",
+            "last_seen_at": f"gte.{_ago(RUNNER_FRESH_SECONDS)}",
+            "order": "last_seen_at.desc",
+            "limit": "1",
+        }
+        rows = None
+        if self.plan_column is not False or time.monotonic() >= self._plan_retry_at:
+            rows = await self._store.select(
+                "brain_runners",
+                {**query, "select": "runner_id,claude_plan"},
+                what="the PC's Claude login and plan",
+            )
+            if rows is None:
+                # Before migration 032: asked again in a while, not on every look.
+                self.plan_column = False
+                self._plan_retry_at = time.monotonic() + PLAN_COLUMN_RETRY_SECONDS
+            else:
+                self.plan_column = True
+        if rows is None:
+            rows = await self._store.select(
+                "brain_runners",
+                {**query, "select": "runner_id"},
+                what="whether the PC has a Claude login",
+            )
+        if not rows:
+            return False, None
+        plan = rows[0].get("claude_plan")
+        return True, plan if isinstance(plan, dict) else None
+
+    async def billing(self, user_id: str, kwami_id: str) -> str:
+        """How the user wants the brain to pay, as saved with this kwami's brain.
+
+        The worker reads it here, for jobs with no call behind them as much as for the
+        rest. Empty when it cannot be read: the caller keeps its default.
+        """
+        if as_user_id(kwami_id) is None:
+            return ""
         rows = await self._store.select(
-            "brain_runners",
+            "user_kwamis",
             {
-                "select": "runner_id",
+                "select": "billing:config->voice->brain->>billing",
+                "id": f"eq.{kwami_id}",
                 "user_id": f"eq.{user_id}",
-                "claude_login": "is.true",
-                "last_seen_at": f"gte.{_ago(RUNNER_FRESH_SECONDS)}",
                 "limit": "1",
             },
-            what="whether the PC has a Claude login",
+            what="how the user's brain pays",
         )
-        return bool(rows)
+        value = rows[0].get("billing") if rows else None
+        return value if isinstance(value, str) else ""
 
     async def enqueue(self, job: BrainJob) -> bool:
         """Queue `job`, minting its ids here: the insert returns nothing to read them from."""
@@ -323,10 +378,57 @@ class JobStore:
         )
         return list(rows or [])
 
+    async def all_agents(self, user_id: str) -> list[dict[str, Any]] | None:
+        """Every agent of this user, switched off too. None when they cannot be read."""
+        return await self._store.select(
+            "brain_agents",
+            {
+                "select": "id,name,description,model,tools,effort,target,enabled",
+                "user_id": f"eq.{user_id}",
+                "order": "name.asc",
+                "limit": str(MAX_USER_AGENTS + 1),
+            },
+            what="the user's agents",
+        )
+
+    async def save_agent(self, user_id: str, fields: dict[str, Any]) -> str:
+        """Create the agent named in `fields`, or change it. What happened, as a sentence.
+
+        Validated already (`team.agent_fields_from_voice`); the table checks again.
+        """
+        current = await self.all_agents(user_id)
+        if current is None:
+            return "Your agents cannot be reached right now."
+        existing = next((a for a in current if a.get("name") == fields["name"]), None)
+        now = datetime.now(UTC).isoformat()
+        if existing is None:
+            if len(current) >= MAX_USER_AGENTS:
+                return f"You already have {MAX_USER_AGENTS} agents, the most there can be."
+            if not fields.get("description") or not fields.get("prompt"):
+                return "A new agent needs a description of what it is for and its instructions."
+            row = {"user_id": user_id, **fields, "created_at": now, "updated_at": now}
+            saved = await self._store.insert("brain_agents", row, what="a new agent")
+            return f"Agent {fields['name']} created." if saved else "The agent was not saved."
+        changes = {k: v for k, v in fields.items() if k != "name"}
+        if not changes:
+            return f"Nothing to change in {fields['name']}."
+        saved = await self._store.update(
+            "brain_agents",
+            {**changes, "updated_at": now},
+            {"id": f"eq.{existing['id']}", "user_id": f"eq.{user_id}"},
+            what="an agent",
+        )
+        return f"Agent {fields['name']} updated." if saved else "The agent was not saved."
+
     # -- the worker's side -----------------------------------------------------
 
     async def beat(
-        self, user_id: str, runner_id: str, hostname: str, claude_login: bool = False
+        self,
+        user_id: str,
+        runner_id: str,
+        hostname: str,
+        claude_login: bool = False,
+        plan: dict[str, Any] | None = None,
     ) -> bool:
         row = {
             "user_id": user_id,
@@ -334,6 +436,19 @@ class JobStore:
             "hostname": hostname[:120],
             "last_seen_at": _now(),
         }
+        if self.plan_column is not False or time.monotonic() >= self._plan_retry_at:
+            stored = await self._store.insert(
+                "brain_runners",
+                {**row, "claude_login": claude_login, "claude_plan": plan},
+                on_conflict="user_id,runner_id",
+                what="the worker's heartbeat with its plan",
+            )
+            if stored:
+                self.plan_column = self.thinking_ready = True
+                return True
+            # Before migration 032, or a bad moment: asked again in a while.
+            self.plan_column = False
+            self._plan_retry_at = time.monotonic() + PLAN_COLUMN_RETRY_SECONDS
         stored = await self._store.insert(
             "brain_runners",
             {**row, "claude_login": claude_login},

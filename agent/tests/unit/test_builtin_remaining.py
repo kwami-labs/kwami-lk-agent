@@ -269,13 +269,17 @@ async def test_changing_language_updates_stt_and_tolerates_tts() -> None:
 
 
 async def test_an_stt_that_refuses_a_language_change_is_reported() -> None:
+    """Reported, and the rest of the switch still holds: the voice speaks it."""
+
     class Exploding:
         def update_options(self, **kwargs: Any) -> None:
             raise RuntimeError("stt is closed")
 
     tools = Tools(session=FakeSession(stt=Exploding()))
 
-    assert "couldn't change the language" in await tools.change_language(None, "es")
+    said = await tools.change_language(None, "es")
+    assert "couldn't change the language I listen in (stt is closed)" in said
+    assert tools.kwami_config.soul.language_override == "es"
 
 
 # -- the browser session accessor -------------------------------------------
@@ -614,3 +618,13 @@ async def test_a_handed_over_browser_when_the_agent_has_no_room_either() -> None
 
     assert session is handover
     assert handover._usage_tracker is agent.usage_tracker, "its minutes would go unbilled"
+
+
+async def test_a_language_change_that_cannot_be_kept_is_reported() -> None:
+    tools = Tools(session=FakeSession())
+
+    async def broken(language: str) -> None:
+        raise RuntimeError("config is gone")
+
+    tools._remember_language = broken  # type: ignore[method-assign]
+    assert "couldn't change the language: config is gone" in await tools.change_language(None, "en")

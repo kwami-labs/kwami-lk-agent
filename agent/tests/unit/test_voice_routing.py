@@ -111,6 +111,34 @@ async def test_switching_the_brain_off_hands_searching_back() -> None:
         set_settings(None)
 
 
+async def test_paying_with_the_plan_only_takes_the_voices_paid_searches_away() -> None:
+    """The panel says Tavily is off with the plan only: the voice's web_search too."""
+    from src.agent import KwamiAgent
+    from src.domain.prompt import QUICK_LOOKUP_NOTE
+    from src.domain.tool_gating import PAID_SEARCH_TOOLS
+
+    set_settings(Settings(**SEARCH_CREDENTIALS, provider_keys=dict(BRAIN_KEYS)))
+    try:
+        agent = KwamiAgent()
+        assert "web_search" in _names(agent)
+
+        bridge = _BridgeStub(delegates=True)
+        bridge.config = SimpleNamespace(relay="everything", billing="account_only")  # type: ignore[attr-defined]
+        agent._bridge = lambda: bridge  # type: ignore[method-assign]
+        assert await agent.refresh_brain_gating() is True
+        assert not (PAID_SEARCH_TOOLS & _names(agent))
+        assert QUICK_LOOKUP_NOTE not in agent.instructions
+        assert SEARCH_DELEGATION_NOTE in agent.instructions
+        assert await agent.refresh_brain_gating() is False
+
+        bridge.config.billing = "account_first"  # type: ignore[attr-defined]
+        assert await agent.refresh_brain_gating() is True
+        assert "web_search" in _names(agent)
+        assert QUICK_LOOKUP_NOTE in agent.instructions
+    finally:
+        set_settings(None)
+
+
 async def test_changing_who_thinks_rewrites_the_prompt_and_leaves_the_tools_alone() -> None:
     from src.agent import KwamiAgent
     from src.domain.prompt import RELAY_GUIDANCE
@@ -170,6 +198,8 @@ class _Publisher:
 def _bridge(tmp_path: Path, tavily: str, gemini_ok: bool) -> tuple[Bridge, list]:
     bridge = Bridge(keys=BRAIN_KEYS, tavily_key=tavily, ledger=Ledger(tmp_path))
     bridge.config.split = False
+    # The plan made up front; the orchestrator has its own tests.
+    bridge.config.orchestrate = False
     calls: list[tuple[str, BrainRequest]] = []
 
     async def fake_ask(model: BrainModel, request: BrainRequest) -> BrainAnswer:
@@ -208,16 +238,17 @@ async def test_a_spent_gemini_quota_searches_on_tavily(tmp_path: Path) -> None:
     task = await _run(bridge)
 
     assert task.status == "done"
-    assert [c[0] for c in calls] == ["gemini-flash", "claude-sonnet"]
+    # A lookup's writer is the cheapest that can call Tavily: Haiku, not Sonnet.
+    assert [c[0] for c in calls] == ["gemini-flash", "claude-haiku"]
     rescue = calls[1][1]
     assert rescue.native_search is False, "the writer must not pay for its own search"
     assert rescue.tavily_key == "t"
-    assert task.models == ["Gemini 3.5 Flash", "Claude Sonnet 5.5 + Tavily"]
+    assert task.models == ["Gemini 3.5 Flash", "Claude Haiku 5.5 + Tavily"]
 
 
 async def test_without_tavily_the_usual_fallback_still_answers(tmp_path: Path) -> None:
     bridge, calls = _bridge(tmp_path, tavily="", gemini_ok=False)
     task = await _run(bridge)
     assert task.status == "done"
-    assert [c[0] for c in calls] == ["gemini-flash", "claude-sonnet"]
+    assert [c[0] for c in calls] == ["gemini-flash", "claude-haiku"]
     assert calls[1][1].tavily_key == ""
