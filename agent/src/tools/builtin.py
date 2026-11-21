@@ -681,8 +681,6 @@ class AgentToolsMixin:
                 }
             )
         answer = f"Found {len(ui_results)} products for '{query[:50]}'."
-        # Fire and forget -- see the note in web_search.
-        self._remember_in_background([f"User searched for products: {query}"])
         published = await self._publisher(context).publish(
             {
                 "type": "search_results",
@@ -796,15 +794,9 @@ class AgentToolsMixin:
             for r in data.get("results", [])
         ]
         answer = data.get("answer") or ""
-
-        # Store search query in memory for future context. Fire and forget: this
-        # is a side effect nothing below depends on, and awaiting it added one
-        # or two Zep round-trips to the middle of a pipeline the user is already
-        # waiting through in silence.
-        facts = [f"User searched for: {query}"]
-        if search_for_products:
-            facts.append(f"User is shopping / looking for products: {query}")
-        self._remember_in_background(facts)
+        # Searches are not written to memory as facts: "User searched for: ..."
+        # was an errand stored as something about the user, the kind of junk
+        # that filled the graph (memory/gate.py).
 
         # Enrich results: extract features, fetch image per result (for UI)
         max_results = 5

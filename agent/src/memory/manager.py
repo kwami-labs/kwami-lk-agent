@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import uuid
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -31,6 +32,7 @@ from .context import (
     load_last_conversation,
     setup_shared_template,
 )
+from .gate import work_line, worth_extracting
 from .ontology import configure_ontology
 from .search import (
     get_entities_by_type,
@@ -366,7 +368,12 @@ class KwamiMemory:
         self._pending_user_message = (content.strip(), name)
         logger.debug("Buffered user message: %s", redacted(content))
 
-    async def add_exchange(self, assistant_content: str, assistant_name: str | None = None) -> None:
+    async def add_exchange(
+        self,
+        assistant_content: str,
+        assistant_name: str | None = None,
+        tools: Sequence[str] = (),
+    ) -> None:
         """Send buffered user message + assistant response as a batch.
 
         This is the PRIMARY method for adding messages to memory.
@@ -376,9 +383,15 @@ class KwamiMemory:
         3. Uses `ignore_roles=["assistant"]` so assistant messages provide
            context but don't create graph entities
 
+        A user turn that holds nothing lasting -- noise the assistant did not
+        understand, or an errand it ran a tool for -- is ignored too: it stays in
+        the thread for the history and the next session, out of the graph (see
+        `gate.worth_extracting`).
+
         Args:
             assistant_content: The assistant's response content.
             assistant_name: The assistant's display name.
+            tools: Names of the tools the response called.
         """
         if not self._initialized or not self._client:
             return
@@ -391,10 +404,13 @@ class KwamiMemory:
         user_name = self._cached_user_name or "User"
         assistant_name = assistant_name or self.kwami_name
         now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        ignore_roles = ["assistant"]
 
         # Add buffered user message
         if self._pending_user_message:
             content, name = self._pending_user_message
+            if not worth_extracting(content, assistant_content, tools):
+                ignore_roles = ["user", "assistant"]
             messages.append(
                 ZepMessage(
                     role="user",
@@ -426,7 +442,7 @@ class KwamiMemory:
             await self._client.thread.add_messages(
                 thread_id=self._session_id,
                 messages=messages,
-                ignore_roles=["assistant"],
+                ignore_roles=ignore_roles,
             )
             self._record_usage("zep/add_messages")
             self._exchanges += 1
@@ -585,6 +601,40 @@ class KwamiMemory:
         )
         self._record_usage("zep/add_fact")
         logger.debug("Added fact to the graph: %s", redacted(fact))
+
+    async def add_work_done(
+        self, title: str, result: str, finished_at: str = "", language: str = ""
+    ) -> None:
+        """Keep one line in the graph for a job the assistant finished for the user.
+
+        The result reaches the user in the assistant's own voice, and assistant
+        turns are kept out of extraction, so finished work left no memory at
+        all: asked a day later what the report said, the assistant had nothing.
+        One compact line per job -- what, when, the key result -- instead.
+        Never raises: the journal is a side effect of work already delivered.
+        """
+        if not self._initialized or not self._client or not title.strip():
+            return
+        line = work_line(
+            assistant=self.kwami_name,
+            user=self._cached_user_name,
+            date=(finished_at or datetime.now(UTC).isoformat())[:10],
+            title=title,
+            result=result,
+            language=language,
+        )
+        try:
+            await self._client.graph.add(
+                user_id=self._user_id,
+                type="text",
+                data=line,
+                source_description=f"Work journal of {self.kwami_name}",
+            )
+        except Exception as e:
+            logger.warning("Could not add finished work to memory: %s", e)
+            return
+        self._record_usage("zep/add_fact")
+        logger.debug("Added finished work to the graph: %s", redacted(line))
 
     # ========================================================================
     # Context Retrieval

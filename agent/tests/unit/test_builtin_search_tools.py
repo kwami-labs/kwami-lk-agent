@@ -312,7 +312,8 @@ async def test_the_result_count_is_bounded(requested: int, expected: int) -> Non
 
 
 @respx.mock
-async def test_the_query_is_remembered_for_later_conversations() -> None:
+async def test_a_search_is_not_written_to_memory_as_a_fact() -> None:
+    """A line like "User searched for: ..." was an errand stored as a fact about the user."""
     respx.post(TAVILY).mock(return_value=httpx.Response(200, json={"results": []}))
     memory = FakeMemory()
 
@@ -321,7 +322,7 @@ async def test_the_query_is_remembered_for_later_conversations() -> None:
     for task in list(getattr(tools, "_background_tasks", ())):
         await task
 
-    assert any("walking boots" in fact for fact in memory.facts)
+    assert memory.facts == []
 
 
 # -- product_search ----------------------------------------------------------

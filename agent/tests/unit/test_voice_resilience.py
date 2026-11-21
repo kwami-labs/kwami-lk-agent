@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -215,6 +216,19 @@ def test_a_typed_message_is_answered() -> None:
     assert handled == "text"
     assert session.replies == [{"user_input": "¿Qué hora es?"}]
     assert session.interrupts == 1
+
+
+def test_a_typed_message_is_handed_to_memory() -> None:
+    """Answering typed text skips the hook spoken turns are remembered through."""
+    session = RecordingSession()
+    typed: list[str] = []
+    agent = SimpleNamespace(remember_typed_turn=typed.append)
+    router = DataMessageRouter(session=session, state=SimpleNamespace(current_agent=agent))
+
+    router.handle({"type": "text", "text": "  Estoy montando un equipo  "})
+
+    assert typed == ["Estoy montando un equipo"]
+    assert session.replies == [{"user_input": "Estoy montando un equipo"}]
 
 
 def test_a_typed_message_answers_even_with_nothing_to_interrupt() -> None:

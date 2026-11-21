@@ -61,7 +61,10 @@ def test_the_memory_layer_only_calls_methods_that_exist(client: AsyncZep) -> Non
 
     missing: list[str] = []
     for source in sorted(memory_dir.glob("*.py")):
-        for call in set(pattern.findall(_strip_comments(source.read_text()))):
+        # UTF-8 explicitly: memory/gate.py matches Spanish words, and Windows
+        # reads text in its own code page by default.
+        text = source.read_text(encoding="utf-8")
+        for call in set(pattern.findall(_strip_comments(text))):
             target = client
             for part in call.split("."):
                 if not hasattr(target, part):

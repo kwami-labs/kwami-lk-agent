@@ -1536,6 +1536,29 @@ class Bridge:
         except Exception:
             logger.exception("Could not speak the result of %s", brain_task.id)
             self._store_pending(brain_task)
+            return
+        await self._journal(brain_task)
+
+    async def _journal(self, brain_task: BrainTask) -> None:
+        """One line in long-term memory for the work just told: what, when, its result.
+
+        The result reaches the user in the voice's words, which memory does not
+        extract from, so a finished job left nothing to recall the next day.
+        A result kept for the greeting is journaled when the greeting tells it.
+        """
+        memory = getattr(self._voice(), "_memory", None)
+        write = getattr(memory, "add_work_done", None)
+        if not callable(write) or brain_task.status != "done":
+            return
+        try:
+            await write(
+                brain_task.title,
+                brain_task.result,
+                brain_task.finished_at,
+                language=self.language,
+            )
+        except Exception:
+            logger.debug("Could not journal %s", brain_task.id, exc_info=True)
 
     def _remember(self, brain_task: BrainTask) -> None:
         """Keep the result in the voice's history, not only in the reply's instructions.

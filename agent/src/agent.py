@@ -31,6 +31,7 @@ from .domain.tool_gating import (
     unavailable_builtin_tools,
 )
 from .memory import KwamiMemory
+from .memory.gate import stated_name
 from .runtime.container import room_from_context
 from .runtime.turn_gate import TurnGate, sounds_unfinished
 from .settings import get_settings
@@ -134,6 +135,9 @@ class KwamiAgent(
         # Strong references to fire-and-forget tasks. The event loop only holds
         # a weak reference, so a bare create_task can be collected mid-flight.
         self._background_tasks: set[asyncio.Task] = set()
+        # Tools the answer to the current user turn called: a turn that sent the
+        # assistant on an errand is kept out of the memory graph (memory/gate.py).
+        self._turn_tools: list[str] = []
 
         # Initialize client tool manager
         self.client_tools = ClientToolManager(self)
@@ -638,7 +642,24 @@ class KwamiAgent(
         # On the cloud the owed results live in Supabase; give the load that
         # `_sync_bridge_context` started a moment to land.
         await bridge.ready(kwami_id)
-        return [f"{r.title}: {r.summary[:400]}" for r in bridge.take_pending(kwami_id)]
+        pending = bridge.take_pending(kwami_id)
+        for r in pending:
+            self._journal_work(r.title, r.summary, r.finished_at)
+        return [f"{r.title}: {r.summary[:400]}" for r in pending]
+
+    def _journal_work(self, title: str, result: str, finished_at: str = "") -> None:
+        """One line in memory for work finished while the user was away.
+
+        Work delivered during a call is journaled by the bridge as it speaks it;
+        what waited for the greeting is journaled here, when it is told.
+        """
+        write = getattr(self._memory, "add_work_done", None)
+        if not (callable(write) and self._memory.is_initialized):
+            return
+        language = self.kwami_config.locale or getattr(self.kwami_config.soul, "language", "")
+        task = asyncio.create_task(write(title, result, finished_at, language=language or ""))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _charter_greeting_fields(self) -> dict[str, Any]:
         """What the charter adds to the greeting, or nothing without one."""
@@ -682,14 +703,40 @@ class KwamiAgent(
             await self._buffer_for_memory(content)
 
     async def _buffer_for_memory(self, content: str) -> None:
+        # A new user turn: the tools of the last one no longer describe it.
+        self._turn_tools = []
         if not (self._memory and self._memory.is_initialized):
             return
         try:
+            self._note_stated_name(content)
             # Get user name for better graph attribution
             user_name = self._memory._cached_user_name or None
             await self._memory.buffer_user_message(content, name=user_name)
         except Exception as e:
             logger.warning("Failed to buffer user message: %s", e)
+
+    def _note_stated_name(self, content: str) -> None:
+        """Keep the name the user just gave on their Zep record.
+
+        Without it the user's own node is named after the memory id and every
+        message is signed "User"; the name the user said became a second node.
+        """
+        agent_name = self.kwami_config.soul.name or self.kwami_config.kwami_name
+        name = stated_name(content, agent_name=agent_name)
+        if name and name != self._memory._cached_user_name:
+            self._memory.set_user_name(name)
+            logger.info("The user gave their name: %s", redacted(name, keep=1))
+
+    def remember_typed_turn(self, text: str) -> None:
+        """A message typed in the chat box is a user turn for memory, as a spoken one is.
+
+        Typed text is answered with `generate_reply(user_input=...)`, which never
+        reaches `on_user_turn_completed`: every typed message was missing from
+        memory, and the history showed only the assistant's side of the talk.
+        """
+        task = asyncio.create_task(self._buffer_for_memory(text))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
 
     def _answer_held_turn(self, content: str) -> None:
         """The user stayed quiet after a turn that sounded unfinished: answer it as it is."""
@@ -723,6 +770,7 @@ class KwamiAgent(
             # No activity yet; on_enter will call us again once there is one.
             return
         session.on("conversation_item_added", self._on_conversation_item_added)
+        session.on("function_tools_executed", self._on_tools_executed)
         if self._turn_gate is not None:
             session.on("user_state_changed", self._on_user_state_changed)
             session.on("user_input_transcribed", self._on_user_transcribed)
@@ -761,22 +809,49 @@ class KwamiAgent(
         if sounds_unfinished(content) and len(content.split()) <= MAX_SCRAP_WORDS:
             return
 
-        task = asyncio.create_task(self._persist_assistant_turn(content))
+        tools = [*self._turn_tools, *self._tools_of_current_speech()]
+        task = asyncio.create_task(self._persist_assistant_turn(content, tools))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _persist_assistant_turn(self, content: str) -> None:
+    def _on_tools_executed(self, event: Any) -> None:
+        """Note the tools the answer to this turn ran (a reply after them follows)."""
+        for call in getattr(event, "function_calls", None) or []:
+            name = getattr(call, "name", "")
+            if name:
+                self._turn_tools.append(name)
+
+    def _tools_of_current_speech(self) -> list[str]:
+        """Tools started by the speech being committed.
+
+        A reply that speaks first and calls the tool in the same breath ("Abro
+        Fox News, señor") is committed before `function_tools_executed` fires,
+        but its speech already holds the call.
+        """
+        try:
+            speech = self.session.current_speech
+        except Exception:
+            return []
+        return [
+            getattr(item, "name", "")
+            for item in (getattr(speech, "chat_items", None) or [])
+            if getattr(item, "type", None) == "function_call"
+        ]
+
+    async def _persist_assistant_turn(self, content: str, tools: list[str] | None = None) -> None:
         """Send the buffered user message plus this reply to Zep as one batch.
 
         ``add_exchange`` passes ``ignore_roles=["assistant"]`` so only user
         messages create graph entities while the reply still provides context
-        for entity extraction.
+        for entity extraction; with the tools the reply called, it also keeps
+        errands and noise out of the graph.
         """
         try:
             agent_name = self.kwami_config.soul.name or self.kwami_config.kwami_name
             await self._memory.add_exchange(
                 assistant_content=content,
                 assistant_name=agent_name,
+                tools=tools or [],
             )
         except Exception as e:
             logger.warning("Failed to add exchange to memory: %s", e)
