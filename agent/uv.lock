@@ -1,11 +1,11 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.14"
 resolution-markers = [
     "python_full_version >= '3.13' and sys_platform == 'emscripten'",
     "python_full_version >= '3.13' and sys_platform != 'emscripten'",
     "python_full_version == '3.12.*' and sys_platform == 'emscripten'",
-    "(python_full_version < '3.13' and sys_platform != 'emscripten') or (python_full_version < '3.12' and sys_platform == 'emscripten')",
+    "python_full_version < '3.12' or (python_full_version == '3.12.*' and sys_platform != 'emscripten')",
 ]
 
 [manifest]
@@ -131,21 +131,21 @@ wheels = [
 
 [[package]]
 name = "anthropic"
-version = "0.125.0"
+version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
-    { name = "distro" },
     { name = "docstring-parser" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "jiter" },
+    { name = "opentelemetry-api" },
     { name = "pydantic" },
     { name = "sniffio" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/62/f8/6f0560884b5363848347bd640b6c1d04abc25e7aa61787a232f790c6b60a/anthropic-0.125.0.tar.gz", hash = "sha256:e0cdd336580cb7411c1cdab69f80973e9bf4bff7f8e08141811d46307d45c682", size = 1112593, upload-time = "2026-08-19T22:00:42.837Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/66/4ec271f7607460005276bb09b0d1c749a9ed0cead35a488a8676f15ed6d5/anthropic-1.17.0.tar.gz", hash = "sha256:dcf77a74dde89a9fd12405fca798b012725a107f7c9488454234a74e275c2163", size = 1756371, upload-time = "2026-10-20T22:13:35.117Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2f/1a/b1bd30cda3790557e8791bec5922a6ec8fabb6fa8b008c76a39cf7be6152/anthropic-0.125.0-py3-none-any.whl", hash = "sha256:3486013602eca76d8b12540764e53654f02cf4951110bca86cf06e67428a9f21", size = 1184067, upload-time = "2026-08-19T22:00:44.596Z" },
+    { url = "https://files.pythonhosted.org/packages/98/9d/b4d4e46ec05bf19bcfd46c1417337e7cf42b9ecb95c3c63f295e2e9fee4b/anthropic-1.17.0-py3-none-any.whl", hash = "sha256:ccb98b85e1a14f81cf1e2ba348393f341f342bad9e07e014f96c9b69f853aaa7", size = 2094718, upload-time = "2026-10-20T22:13:32.585Z" },
 ]
 
 [[package]]
@@ -1049,7 +1049,7 @@ google = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", specifier = ">=3.9.0" },
-    { name = "anthropic", specifier = ">=0.116,<1" },
+    { name = "anthropic", specifier = ">=0.116,<2" },
     { name = "claude-agent-sdk", specifier = ">=0.2.165" },
     { name = "cryptography", specifier = ">=46" },
     { name = "httpx", specifier = ">=0.27.0" },
@@ -1276,16 +1276,16 @@ wheels = [
 
 [[package]]
 name = "livekit-plugins-anthropic"
-version = "1.8.6"
+version = "1.8.13"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anthropic" },
-    { name = "httpx" },
+    { name = "httpx2" },
     { name = "livekit-agents" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d7/84/8a36c53980284bf4a58460cf2b9baf2379c046fc59ca971459fc5fef0a35/livekit_plugins_anthropic-1.8.6.tar.gz", hash = "sha256:7c147f63831ac7bffd2c4ed384090905a505dae38310766b40fa90d8847791a1", size = 9421, upload-time = "2026-10-09T22:12:20.256Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/eb/276785576b3138803a84eab2a87164b27be249e890d2a0014d93be893416/livekit_plugins_anthropic-1.8.13.tar.gz", hash = "sha256:f659f87e6dc30d504542332c59345169f1763dbce6f14e868c37bfa75d6d1a1d", size = 9874, upload-time = "2026-11-18T21:38:23.376Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/d6/bc/98c6ba18dec9c3561e1f1a673af7d40a924cbf987f613101063ad8eb30c5/livekit_plugins_anthropic-1.8.6-py3-none-any.whl", hash = "sha256:adedcb652bdfafebdc190870c0439239427be1999912265ba275211ade978a65", size = 11136, upload-time = "2026-10-09T22:12:19.014Z" },
+    { url = "https://files.pythonhosted.org/packages/a6/23/dbfadad7fc82291b2a1932a8140878c72e4f9b1724c247f361784ce7968f/livekit_plugins_anthropic-1.8.13-py3-none-any.whl", hash = "sha256:e9fb3bc8c6fc342bdd0751770d71c574a04b5b615f345b3b26335c7f4863d1a3", size = 11677, upload-time = "2026-11-18T21:38:22.151Z" },
 ]
 
 [[package]]
