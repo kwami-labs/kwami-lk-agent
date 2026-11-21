@@ -47,7 +47,10 @@ dependencies = [
     "opentelemetry-api>=1.30.0,<2.0.0",
     "opentelemetry-sdk>=1.30.0,<2.0.0",
     "opentelemetry-exporter-otlp-proto-http>=1.30.0,<2.0.0",
-    "anthropic>=0.116,<1",
+    # livekit-plugins-anthropic 1.8.13 needs anthropic>=1.8, and every release of it
+    # caps the SDK below 2. 1.x moved its HTTP layer to httpx2; this code only passes
+    # plain values (api_key, timeout), which 1.x keeps.
+    "anthropic>=1.8,<2",
     "claude-agent-sdk>=0.2.165",
     "cryptography>=46",
 ]
