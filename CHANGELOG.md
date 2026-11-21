@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Claude in Chrome over MCP is a second way in. It only runs where
   `KWAMI_BROWSER_PROVIDER=local`; the cloud keeps its own browser. The work thread follows
   the user's list of sites, and signing in needs Full access.
+- **Jarvis's own Chrome needs no extension (desktop only).** Asked about the user's tabs
+  without the extension, Jarvis reads Chrome's and Brave's windows through Windows UI
+  Automation (`browser/window_reader.py`, titles and the front tab's address, within the
+  user's list of sites) instead of asking them to install anything. Both of its windows
+  start with sync, extensions and password/card autofill off. A sign-in page opens in the
+  clean window rather than the driven one, which Google rejects, and that window closes
+  by itself once the user is in. Downloads go to Jarvis's own folder under their site's
+  name, wait for the file when a navigation turns into one, and reach the app as a
+  `browser_download` message. In the cloud only the install prompt goes away.
 - **Search results arrive whole.** A message too large for one data packet goes to an app
   that sets `kwami.messages=stream` as a LiveKit text stream on `kwami.message`, images
   included; every other app still gets it trimmed to 14 KB.

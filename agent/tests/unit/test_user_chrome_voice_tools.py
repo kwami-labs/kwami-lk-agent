@@ -10,14 +10,16 @@ from typing import Any
 
 import pytest
 
-from src.browser import chrome_bridge, user_chrome_session
+from src.browser import chrome_bridge, user_chrome_session, window_reader
 from src.browser.browser_session import CloudBrowserSession
 from src.browser.chrome_bridge import BridgeError
 from src.browser.user_chrome_session import UserChromeSession
+from src.browser.window_reader import BrowserWindow
 from src.domain import KwamiConfig
 from src.domain.tool_result import was_refused
 from src.tools.builtin import (
-    USER_CHROME_MISSING,
+    DESKTOP_TABS_NOTE,
+    NO_DESKTOP_TABS,
     USER_CHROME_SIGN_IN_HINT,
     AgentToolsMixin,
     _sign_in_hint,
@@ -228,13 +230,48 @@ async def test_closing_closes_only_jarvis_tab(monkeypatch: pytest.MonkeyPatch) -
 # -- their tabs -------------------------------------------------------------------------------
 
 
-async def test_without_their_chrome_it_says_how_to_connect_it(
+DESKTOP = [
+    BrowserWindow(
+        "chrome.exe",
+        "Recibidos - Gmail - Google Chrome",
+        "mail.google.com/mail/u/0/",
+        ["Recibidos - Gmail", "Factura"],
+    ),
+    BrowserWindow("brave.exe", "Banco - Brave", "banco.example/", ["Banco"]),
+]
+
+
+def on_windows(monkeypatch: pytest.MonkeyPatch, windows: list[BrowserWindow]) -> None:
+    async def read() -> list[BrowserWindow]:
+        return windows
+
+    monkeypatch.setattr(window_reader, "browser_tabs", read)
+
+
+async def test_without_an_extension_their_tabs_come_from_windows(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connected(monkeypatch, False)
+    on_windows(monkeypatch, DESKTOP)
+    tools = Tools()
+    tools.refused_sites = {"banco"}
+    said = await tools.read_navigation_page(None, which="all")
+    assert said.startswith(DESKTOP_TABS_NOTE)
+    assert "3 tabs open" in said and "1. Recibidos - Gmail" in said and "3. Banco" in said
+    assert "Brave window, the tab in front is on a site their list keeps you out of" in said
+    assert "extension" not in said.removeprefix(DESKTOP_TABS_NOTE)
+    one = await tools.read_navigation_page(None, which="gmail")
+    assert "https://mail.google.com/mail/u/0/" in one and "navigate_to" in one
+
+
+async def test_without_an_extension_or_windows_it_says_so_plainly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connected(monkeypatch, False)
+    on_windows(monkeypatch, [])
     said = await Tools().read_navigation_page(None, which="all")
     assert was_refused(said)
-    assert USER_CHROME_MISSING in said
+    assert NO_DESKTOP_TABS in said and "chrome://extensions" not in said
 
 
 async def test_it_lists_their_tabs_keeping_out_what_their_list_forbids(

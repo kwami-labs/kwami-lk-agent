@@ -12,6 +12,7 @@ from src.brain.browser_tool import BrowserTools
 from src.browser.browser_session import CloudBrowserSession
 from src.browser.chrome_bridge import BridgeError
 from src.browser.user_chrome_session import UserChromeSession
+from src.browser.window_reader import BrowserWindow
 
 
 class FakeBridge:
@@ -113,15 +114,40 @@ async def test_it_lists_their_tabs_and_works_in_one() -> None:
     assert "No tab matches" in await tools.call("tabs", {"which": "bank"})
 
 
-async def test_their_tabs_are_out_of_reach_in_jarvis_own_chrome() -> None:
-    class Own:
-        is_active = False
+class _Own:
+    is_active = False
 
-        async def close(self, **_: Any) -> None:
-            return None
+    async def close(self, **_: Any) -> None:
+        return None
 
-    tools = BrowserTools("user", Own())  # type: ignore[arg-type]
-    assert "not connected to Kwami" in await tools.call("tabs", {})
+
+async def test_in_jarvis_own_chrome_their_tabs_come_from_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    windows = [
+        BrowserWindow("chrome.exe", "Gmail - Google Chrome", "mail.google.com/", ["Gmail"]),
+        BrowserWindow("chrome.exe", "Banco - Google Chrome", "banco.example/", ["Banco"]),
+    ]
+
+    async def read() -> list[BrowserWindow]:
+        return windows
+
+    monkeypatch.setattr(browser_tool, "browser_tabs", read)
+    tools = BrowserTools("user", _Own())  # type: ignore[arg-type]
+    listed = await tools.call("tabs", {})
+    assert "Read from Windows" in listed and "1. Gmail" in listed and "2. Banco" in listed
+    one = await tools.call("tabs", {"which": "gmail"})
+    assert "https://mail.google.com/" in one and "`open`" in one
+
+
+async def test_with_no_windows_of_theirs_it_says_so(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def none() -> list[BrowserWindow]:
+        return []
+
+    monkeypatch.setattr(browser_tool, "browser_tabs", none)
+    tools = BrowserTools("user", _Own())  # type: ignore[arg-type]
+    said = await tools.call("tabs", {})
+    assert "cannot see the user's own browser" in said and "extension" not in said
 
 
 async def test_what_their_chrome_refuses_is_said_in_words() -> None:

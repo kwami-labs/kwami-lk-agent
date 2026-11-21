@@ -359,3 +359,25 @@ class TestTheSessionsEye:
         session._cdp.sent = []
         await session.bring_to_front()
         assert session._cdp.sent == ["Page.bringToFront"]
+
+
+async def test_a_refusing_site_is_named_and_left_for_the_check(tools, session) -> None:
+    """Google's "may not be secure": nothing to read, and `sites.check_site` reads it next."""
+    await tools.call("open", {"url": "https://accounts.google.com"})
+    session.refused = True
+    said = await tools.call("read", {})
+    assert "refuses to let a window you drive sign in" in said and "`sign_in`" in said
+    assert ("leave", None) not in session.calls
+
+
+async def test_a_download_is_told_after_a_click_a_key_or_a_read(tools, session) -> None:
+    from pathlib import Path
+
+    from src.browser.downloads import Download
+
+    done = [Download("g", "a.pdf", state="completed", path=Path("a.pdf"))]
+    session.finished_downloads = lambda: done.copy()  # type: ignore[attr-defined]
+    await tools.call("open", {"url": "https://example.com"})
+    assert "a.pdf saved at" in await tools.call("click", {"description": "Descargar"})
+    assert "a.pdf saved at" in await tools.call("press", {"key": "Enter"})
+    assert "a.pdf saved at" in await tools.call("read", {})

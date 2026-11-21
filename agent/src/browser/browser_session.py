@@ -24,6 +24,7 @@ from typing import Any
 
 from ..utils.logging import get_logger
 from .cloud_browser import CDPConnection
+from .downloads import DOWNLOAD_WAIT_SECONDS, Download, DownloadWatch
 from .providers import (
     HEADLESS,
     LOCAL,
@@ -141,6 +142,8 @@ class CloudBrowserSession:
         self._latest_frame = ""
         self._frame_ready = asyncio.Event()
         self._background: set[asyncio.Task] = set()
+        #: Where the window on the user's PC puts what it downloads (`downloads`).
+        self._downloads: DownloadWatch | None = None
         # Cloud browsers bill per minute, with a US proxy on top. This is the
         # single most expensive resource the agent can hold, and it was the one
         # resource never metered -- pure, invisible margin loss.
@@ -277,11 +280,16 @@ class CloudBrowserSession:
                 )
         except Exception as e:
             logger.debug("Failed to set CDP initial overrides: %s", e)
+        # On the user's PC, what Jarvis downloads goes to his folder and is told.
+        if self.runs_locally:
+            self._downloads = DownloadWatch(on_done=self._download_done)
+            await self._downloads.attach(self._connection)
 
         # Navigate to initial URL if provided
         if url:
-            await self._cdp.navigate(url)
+            landing = await self._cdp.navigate(url)
             self._current_url = url
+            await self._settle_download(landing)
 
         # Publish liveUrl to frontend
         await self._publish_session_event("open", url=url)
@@ -324,6 +332,7 @@ class CloudBrowserSession:
         if self._cdp:
             await self._cdp.close()
             self._cdp = None
+        self._downloads = None
 
         if self._provider and self._browser_id:
             try:
@@ -352,9 +361,10 @@ class CloudBrowserSession:
         # this is the boundary every browsing path eventually crosses, and it
         # must not depend on which of them got here.
         url = validate_url(url)
-        await self._connection.navigate(url)
+        landing = await self._connection.navigate(url)
         self._current_url = url
         self._reset_idle_timer()
+        await self._settle_download(landing)
 
         # Notify frontend of URL update
         await self._publish_session_event("update", url=url)
@@ -614,6 +624,45 @@ class CloudBrowserSession:
         except Exception:
             return False
         return bool(_SIGN_IN_REFUSED.search(str(text)))
+
+    async def _settle_download(self, landing: Any) -> None:
+        """A navigation Chrome turned into a download: the answer waits for the file."""
+        if self._downloads is not None and isinstance(landing, dict) and landing.get("isDownload"):
+            await self._downloads.settle(DOWNLOAD_WAIT_SECONDS)
+
+    def pending_downloads(self) -> list[Download]:
+        """Downloads still going."""
+        return self._downloads.in_progress() if self._downloads is not None else []
+
+    def finished_downloads(self) -> list[Download]:
+        """Downloads that finished since the last call, each told once."""
+        return self._downloads.take_finished() if self._downloads is not None else []
+
+    def _download_done(self, item: Download) -> None:
+        """A download finished: the app hears it at once."""
+        task = asyncio.create_task(self._publish_download(item))
+        self._background.add(task)
+        task.add_done_callback(self._background.discard)
+
+    async def _publish_download(self, item: Download) -> None:
+        """A message of its own type: the SDK hands the app every field of a type it does
+        not know (`kwami:agent_message`), but only action, url and title of a
+        `browser_session` (measured 2026-11-21: the name and the path never arrived)."""
+        if not self._room:
+            return
+        msg: dict[str, Any] = {
+            "type": "browser_download",
+            "state": item.state,
+            "name": item.path.name if item.path is not None else item.name,
+            "path": str(item.path or ""),
+            "size": item.size,
+        }
+        try:
+            await self._room.local_participant.publish_data(
+                json.dumps(msg).encode("utf-8"), reliable=True
+            )
+        except Exception as e:
+            logger.warning("Failed to publish a download: %s", e)
 
     async def bring_to_front(self) -> None:
         """Put this tab in front of the user. Nothing happens if it cannot."""

@@ -2103,8 +2103,8 @@ class Bridge:
             instructions=(
                 f"Tell the user, in very few words, that {site} asks them to sign in, that "
                 "the page is open in a clean Chrome window on their computer, and that once "
-                "they are in they close that window and you carry on by yourself. You never "
-                "see what they type."
+                "they are in the window closes by itself and you carry on. You never see "
+                "what they type."
             )
         )
 

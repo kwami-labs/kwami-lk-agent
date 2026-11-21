@@ -349,10 +349,7 @@ class TestTheNavigateTool:
         session.runs_locally = True
         said = await tools.navigate_to(None, "https://example.com")
         assert "Chrome window of Jarvis's behind KWAMI" in said
-        assert "brave://extensions" in said, "once a call, how to connect their own browser"
-        session.is_active = False
-        again = await tools.navigate_to(None, "https://example.org")
-        assert "brave://extensions" not in again
+        assert "extension" not in said, "the user chose not to have one (2026-11-21)"
 
     async def test_no_browser_service_is_said_plainly(self) -> None:
         tools, session = _tools(active=False, kwami_id="kwami-42")
