@@ -65,10 +65,16 @@ from .config import (
     shut_executor_folders,
 )
 from .google_tool import ALLOWED_TOOL, SERVER_NAME, google_available, google_server
+from .plan import from_event, from_failure
 from .supabase_tool import ALLOWED_TOOL as SUPABASE_TOOL
 from .supabase_tool import SERVER_NAME as SUPABASE_SERVER
 from .supabase_tool import supabase_available, supabase_server
 from .team import TEAM_GUIDANCE, agent_definitions
+from .user_chrome import ALLOWED_TOOLS as USER_CHROME_TOOLS
+from .user_chrome import GUIDANCE as USER_CHROME_GUIDANCE
+from .user_chrome import REFUSED_TOOLS as USER_CHROME_REFUSED
+from .user_chrome import TOOL_PREFIX as USER_CHROME_PREFIX
+from .user_chrome import user_chrome_available
 
 if TYPE_CHECKING:
     from claude_agent_sdk.types import EffortLevel
@@ -195,6 +201,9 @@ class ExecutorResult:
     uploaded: int = 0
     #: Pass it back as `resume` to carry on where this run stopped.
     session_id: str = ""
+    #: What Claude Code last said about the plan of the login it ran on (`plan.py`).
+    #: None when it said nothing, as on an API key.
+    plan: dict[str, Any] | None = None
 
 
 @dataclass
@@ -377,6 +386,36 @@ def child_env(api_key: str) -> dict[str, str]:
     }
 
 
+#: The input of each tool that says what it is doing: the app shows it in the task's log.
+_PROGRESS_FIELDS = {
+    "Bash": "command",
+    "Read": "file_path",
+    "Write": "file_path",
+    "Edit": "file_path",
+    "MultiEdit": "file_path",
+    "NotebookEdit": "notebook_path",
+    "Glob": "pattern",
+    "Grep": "pattern",
+    "WebSearch": "query",
+    "WebFetch": "url",
+}
+_FILE_TOOLS = frozenset({"Read", "Write", "Edit", "MultiEdit", "NotebookEdit"})
+#: Inputs of the tools from this module's own servers (browser, Google, the database).
+_MCP_FIELDS = ("url", "query", "description", "action")
+#: A long run that mixes letters and digits reads as a key or a token, not as words.
+_SECRET_LIKE = re.compile(
+    r"(?<![A-Za-z0-9_\-+=])(?=[A-Za-z0-9_\-+=]*\d)(?=[A-Za-z0-9_\-+=]*[A-Za-z])"
+    r"[A-Za-z0-9_\-+=]{24,}"
+)
+PROGRESS_DETAIL_CHARS = 120
+
+
+def _short_path(path: str) -> str:
+    """The last two parts of a path: enough to know the file, without the user's home."""
+    parts = [part for part in re.split(r"[\\/]+", path) if part]
+    return "/".join(parts[-2:])
+
+
 def _progress_line(block: Any) -> str:
     """A tool call in a few words, for whoever asks how the task is going."""
     tool_input = block.input if isinstance(block.input, dict) else {}
@@ -386,7 +425,18 @@ def _progress_line(block: Any) -> str:
     if who:
         what = tool_input.get("description") or ""
         return f"{who}: {what}"[:160].rstrip(" :")
-    return str(block.name)
+    name = str(block.name)
+    field = _PROGRESS_FIELDS.get(name)
+    if field:
+        detail = str(tool_input.get(field) or "")
+    elif name.startswith("mcp__"):
+        detail = next((str(tool_input[k]) for k in _MCP_FIELDS if tool_input.get(k)), "")
+    else:
+        detail = ""
+    if name in _FILE_TOOLS:
+        detail = _short_path(detail)
+    detail = _SECRET_LIKE.sub("•••", " ".join(detail.split()))[:PROGRESS_DETAIL_CHARS]
+    return f"{name}: {detail}" if detail else name
 
 
 _NEVER_OPENED = frozenset(
@@ -538,7 +588,8 @@ class _Lanes:
         return self.google or self.browser
 
     def refuse(self, tool_name: str) -> str | None:
-        if tool_name.startswith(BROWSER_PREFIX):
+        # The user's own Chrome is the same: outsiders' pages, with their sessions.
+        if tool_name.startswith((BROWSER_PREFIX, USER_CHROME_PREFIX)):
             if self.acted or self.google:
                 return (
                     "The browser is closed in this task: it already used commands, files or "
@@ -802,10 +853,27 @@ async def _run_in(
         }
         options.allowed_tools = [*options.allowed_tools, SUPABASE_TOOL]
     browser: BrowserTools | None = None
-    if config.permissions == "full_no_push" and browser_available(config.browser_user_id):
+    if (
+        config.permissions == "full_no_push"
+        and config.user_chrome
+        and shell
+        and user_chrome_available()
+    ):
+        # Their everyday Chrome, where Google lets them in, instead of Jarvis's window.
+        options.extra_args["chrome"] = None
+        options.allowed_tools = [*options.allowed_tools, *USER_CHROME_TOOLS]
+        options.disallowed_tools = sorted({*options.disallowed_tools, *USER_CHROME_REFUSED})
+        options.system_prompt = {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": guidance + TEAM_GUIDANCE + USER_CHROME_GUIDANCE,
+        }
+    elif config.permissions == "full_no_push" and browser_available(config.browser_user_id):
         from claude_agent_sdk import create_sdk_mcp_server, tool
 
-        browser = BrowserTools(config.browser_user_id)
+        browser = BrowserTools(
+            config.browser_user_id, their_chrome=True, site_user_id=config.site_user_id
+        )
         servers = options.mcp_servers if isinstance(options.mcp_servers, dict) else {}
         options.mcp_servers = {
             **servers,
@@ -831,11 +899,17 @@ async def _run_in(
     cost = 0.0
     ok = True
     session_id = resume
+    plan: dict[str, Any] | None = None
+    # Newer SDKs only. On the login it says how much of the plan is used and when it
+    # resets, and that it ran out (`plan.py`).
+    rate_limit_event = getattr(importlib.import_module("claude_agent_sdk"), "RateLimitEvent", None)
     try:
         async with ClaudeSDKClient(options=options) as client:
             await client.query(task)
             async for message in client.receive_response():
-                if isinstance(message, AssistantMessage):
+                if rate_limit_event is not None and isinstance(message, rate_limit_event):
+                    plan = from_event(message.rate_limit_info)
+                elif isinstance(message, AssistantMessage):
                     texts += [b.text for b in message.content if isinstance(b, TextBlock)]
                     if on_progress is not None:
                         for block in message.content:
@@ -851,11 +925,13 @@ async def _run_in(
         said = " | ".join(line.strip() for line in stderr_tail if line.strip())
         said = said[-STDERR_TAIL_CHARS:]
         logger.exception("Local executor failed%s", f"; Claude Code said: {said}" if said else "")
+        failed = f"El ejecutor local falló: {e}" + (f" Claude Code: {said}" if said else "")
         return ExecutorResult(
-            f"El ejecutor local falló: {e}" + (f" Claude Code: {said}" if said else ""),
+            failed,
             cost,
             False,
             session_id="" if lane.closed_session else session_id,
+            plan=plan if api_key else (from_failure(failed) or plan),
         )
 
     finally:
@@ -864,4 +940,9 @@ async def _run_in(
                 await browser.close()
 
     final = texts[-1].strip() if texts else "El ejecutor terminó sin decir nada."
-    return ExecutorResult(final, cost, ok, session_id="" if lane.closed_session else session_id)
+    if not ok and not api_key and (plan is None or plan.get("status") != "rejected"):
+        # Claude Code said it in words only: that is still the plan running out.
+        plan = from_failure(final) or plan
+    return ExecutorResult(
+        final, cost, ok, session_id="" if lane.closed_session else session_id, plan=plan
+    )

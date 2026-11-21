@@ -63,7 +63,33 @@ class FakeSession:
 @pytest.fixture(autouse=True)
 def quick_window(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(browser_tool, "_WINDOW", asyncio.Lock())
-    monkeypatch.setattr(browser_tool, "SIGN_IN_POLL_SECONDS", 0.001)
+
+
+class CleanWindow:
+    """The window the user signs in in, with nothing driving it."""
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[str, str]] = []
+        self.closed_in_time = True
+
+    async def open(self, user_id: str, url: str) -> None:
+        self.opened.append((user_id, url))
+
+    async def wait(self, user_id: str, timeout: float) -> bool:
+        return self.closed_in_time
+
+
+@pytest.fixture
+def clean(monkeypatch: pytest.MonkeyPatch) -> CleanWindow:
+    window = CleanWindow()
+    monkeypatch.setattr(browser_tool, "open_clean_window", window.open)
+    monkeypatch.setattr(browser_tool, "wait_clean_window_closed", window.wait)
+
+    async def same(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(browser_tool, "validate_url_async", same)
+    return window
 
 
 @pytest.fixture
@@ -93,25 +119,30 @@ async def test_nothing_is_typed_on_a_sign_in_page(tools, session) -> None:
     assert ("type", "secreto") not in session.calls
 
 
-async def test_signing_in_shows_the_page_and_carries_on_once_they_are_in(tools, session) -> None:
-    session.states = [True, True, False, False]
+async def test_signing_in_happens_in_a_clean_window_then_carries_on(tools, session, clean) -> None:
     said = await tools.call("sign_in", {"url": "https://example.com/login"})
-    assert session.calls[0][1] == "https://example.com/login"
-    assert ("front", None) in session.calls
+    assert clean.opened == [("user", "https://example.com/login")]
+    # Off the driven window first, then back on it once the user is through.
+    assert session.calls == [("close", None), ("start", "https://example.com/login")]
     assert said.startswith("The user is in") and "Page title" in said
-    assert session.states == [False], "it looked until they were through, and no further"
 
 
-async def test_a_user_who_never_signs_in_ends_the_wait(tools, session, monkeypatch) -> None:
-    monkeypatch.setattr(browser_tool, "SIGN_IN_WAIT_SECONDS", 0.01)
+async def test_a_window_still_open_ends_the_wait(tools, session, clean) -> None:
+    clean.closed_in_time = False
+    said = await tools.call("sign_in", {"url": "https://example.com/login"})
+    assert "not finished" in said
+    assert ("start", "https://example.com/login") not in session.calls
+
+
+async def test_a_window_closed_before_signing_in_is_said(tools, session, clean) -> None:
     session.signing_in = True
-    assert "did not sign in" in await tools.call("sign_in", {"url": "https://example.com/login"})
+    said = await tools.call("sign_in", {"url": "https://example.com/login"})
+    assert "still asks to sign in" in said
 
 
-async def test_a_site_that_refuses_this_browser_is_reported(tools, session) -> None:
-    session.signing_in = session.refused = True
-    said = await tools.call("sign_in", {"url": "https://accounts.google.com"})
-    assert "refuses" in said and "another way" in said
+async def test_a_sign_in_address_goes_through_the_gate(tools, session) -> None:
+    said = await tools.safe_call("sign_in", {"url": "http://127.0.0.1/login"})
+    assert said.startswith("Refused") and session.calls == []
 
 
 async def test_only_one_run_is_in_the_window_at_a_time(session) -> None:

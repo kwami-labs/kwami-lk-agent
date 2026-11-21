@@ -42,8 +42,26 @@ ELEVENLABS_SERVER_VAD: VADOptions = {
 }
 
 
-#: Always worth expecting: what the user calls the assistant and its models.
-DEFAULT_KEYTERMS = ("Jarvis", "Friday", "Kwami", "Claude", "Gemini", "Grok")
+#: Always worth expecting: what the user calls the assistant, its models, where it works
+#: and its stack. Heard wrong on 2026-11-16 without them: "Claude Code" as "Claude Muro"
+#: and "Claude" as "loot", "el PC" as "IPC".
+DEFAULT_KEYTERMS = (
+    "Jarvis",
+    "Friday",
+    "Kwami",
+    "Claude",
+    "Claude Code",
+    "Gemini",
+    "Grok",
+    "Opus",
+    "Sonnet",
+    "Haiku",
+    "PC",
+    "GitHub",
+    "Chrome",
+    "Tauri",
+    "Supabase",
+)
 MAX_KEYTERMS = 50
 
 

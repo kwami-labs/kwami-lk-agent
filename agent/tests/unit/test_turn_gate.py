@@ -277,6 +277,9 @@ class TestTheVocabulary:
         assert set(DEFAULT_KEYTERMS) <= set(words)
         assert not isinstance(_deepgram_keyterms("nova-2", voice), list)
 
+    def test_knows_the_stack_by_name(self):
+        assert {"Tauri", "Supabase"} <= set(DEFAULT_KEYTERMS)
+
     def test_comes_from_the_panel_clean(self):
         parsed = parse_listening(
             {"enhancements": {"vocabulary": [" Nexow ", "Nexow", "", 3, "x" * 60]}}

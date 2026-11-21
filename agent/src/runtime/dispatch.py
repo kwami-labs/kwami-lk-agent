@@ -104,6 +104,9 @@ class DataMessageRouter:
             "tool_result": self._on_tool_result,
             "browser_close_request": self._on_browser_close,
             "browser_open_request": self._on_browser_open,
+            "browser_sign_in_request": self._on_browser_sign_in,
+            "browser_frames": self._on_browser_frames,
+            "brain_cancel": self._on_brain_cancel,
             "search_similar": self._on_search_similar,
             "text": self._on_text,
             "interrupt": self._on_interrupt,
@@ -232,8 +235,41 @@ class DataMessageRouter:
             name="browser_open_request",
         )
 
+    def _on_browser_sign_in(self, message: dict[str, Any]) -> None:
+        """The panel's "sign in in a clean window" button, through `navigate_to`'s own gates."""
+        agent = self.state.current_agent
+        url = message.get("url")
+        if agent is None or not isinstance(url, str) or not url.strip():
+            logger.warning("Ignoring browser_sign_in_request without an agent or a url")
+            return
+        run_context = SyntheticRunContext(room=self.room, userdata=self.deps)
+        self.state.spawn(
+            self._open_and_report(agent, run_context, url.strip(), sign_in=True),
+            name="browser_sign_in_request",
+        )
+
+    def _on_browser_frames(self, message: dict[str, Any]) -> None:
+        """The app's browser window opened or folded away: frames only while it shows."""
+        browser_session = getattr(self.state, "active_browser_session", None)
+        if browser_session is not None:
+            self.state.spawn(
+                browser_session.set_frames_wanted(bool(message.get("on"))),
+                name="browser_frames",
+            )
+
+    def _on_brain_cancel(self, message: dict[str, Any]) -> None:
+        """The stop button on a task in the app: the same cancel a spoken one gets."""
+        bridge = getattr(self.deps, "bridge", None)
+        task_id = message.get("id")
+        if bridge is None or not isinstance(task_id, str):
+            return
+        if bridge.cancel(task_id):
+            logger.info("Task %s cancelled from the app", task_id)
+
     @staticmethod
-    async def _open_and_report(agent: Any, run_context: Any, url: str) -> None:
+    async def _open_and_report(
+        agent: Any, run_context: Any, url: str, *, sign_in: bool = False
+    ) -> None:
         """Navigate, and make a refusal visible rather than silent.
 
         `navigate_to` answers a rejected URL with a sentence for the model. On
@@ -247,7 +283,8 @@ class DataMessageRouter:
         message in `navigate_to` would have quietly restored the silent failure
         with nothing in CI to notice.
         """
-        result = await agent.navigate_to(run_context, url)
+        extra = {"sign_in": True} if sign_in else {}
+        result = await agent.navigate_to(run_context, url, **extra)
         if was_refused(result):
             logger.warning("browser_open_request refused for %s: %s", url[:80], result)
 

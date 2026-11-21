@@ -31,6 +31,7 @@ from src.brain.providers import (
     run_anthropic,
     run_gemini,
     run_openai,
+    run_xai,
 )
 
 
@@ -457,3 +458,134 @@ async def test_openai_failures_become_sentences(fake_openai, error, said) -> Non
     answer = await run_openai("o", "gpt", "gpt-5.2", _request())
     assert not answer.ok
     assert said in answer.text
+
+
+async def test_fable_5_2_gets_the_dynamic_tools_and_the_refusal_fallback(fake_anthropic) -> None:
+    fake_anthropic.script = [_message("end_turn", [_text("hola")])]
+    await run_anthropic("k", "fable", "claude-fable-5-2", _request())
+
+    call = fake_anthropic.calls[0]
+    assert call["_beta"] is True and call["fallbacks"] == "default"
+    assert [t["type"] for t in call["tools"]] == ["web_search_20260209", "web_fetch_20260209"]
+
+
+# -- which failures are the provider's ------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("error", "down", "limited"),
+    [
+        (_http_error(anthropic.AuthenticationError, 401, "https://api.anthropic.com"), True, False),
+        (_http_error(anthropic.RateLimitError, 429, "https://api.anthropic.com"), True, True),
+        (_http_error(anthropic.InternalServerError, 503, "https://api.anthropic.com"), True, False),
+        (_http_error(anthropic.BadRequestError, 400, "https://api.anthropic.com"), False, False),
+        (
+            anthropic.APIConnectionError(
+                request=httpx.Request("POST", "https://api.anthropic.com")
+            ),
+            True,
+            False,
+        ),
+    ],
+)
+async def test_anthropic_says_when_the_provider_itself_failed(
+    fake_anthropic, error, down, limited
+) -> None:
+    fake_anthropic.script = [error]
+    answer = await run_anthropic("k", "h", "claude-haiku-5-5", _request())
+    assert not answer.ok
+    assert answer.provider_down is down
+    # A spent quota rests the model, as Gemini's always did.
+    assert answer.rate_limited is limited
+
+
+@pytest.mark.parametrize(
+    ("error", "down", "limited"),
+    [
+        (_http_error(openai.AuthenticationError, 401, "https://api.openai.com"), True, False),
+        (_http_error(openai.RateLimitError, 429, "https://api.openai.com"), True, True),
+        (_http_error(openai.InternalServerError, 502, "https://api.openai.com"), True, False),
+        (_http_error(openai.BadRequestError, 400, "https://api.openai.com"), False, False),
+        (
+            openai.APIConnectionError(request=httpx.Request("POST", "https://api.openai.com")),
+            True,
+            False,
+        ),
+    ],
+)
+async def test_openai_says_when_the_provider_itself_failed(
+    fake_openai, error, down, limited
+) -> None:
+    fake_openai.script = [error]
+    answer = await run_openai("o", "gpt", "gpt-5.2", _request())
+    assert answer.provider_down is down
+    assert answer.rate_limited is limited
+
+
+@pytest.mark.parametrize(
+    ("code", "down"), [(429, True), (503, True), (403, True), (400, False), (None, True)]
+)
+async def test_gemini_says_when_the_provider_itself_failed(fake_genai, code, down) -> None:
+    fake_genai.reply = _GenaiError(code)
+    answer = await run_gemini("g", "gemini-flash", "gemini-3.5-flash", _request())
+    assert answer.provider_down is down
+
+
+# -- the prompt cache ------------------------------------------------------------------
+
+
+async def test_every_claude_round_asks_for_the_prompt_cache(fake_anthropic) -> None:
+    fake_anthropic.script = [_message("end_turn", [_text("hola")])]
+    await run_anthropic("k", "h", "claude-haiku-5-5", _request())
+    assert fake_anthropic.calls[0]["cache_control"] == {"type": "ephemeral"}
+
+
+async def test_cached_tokens_are_billed_at_their_own_rates(fake_anthropic) -> None:
+    usage = _usage(tin=1000, tout=100)
+    usage.cache_creation_input_tokens = 4000
+    usage.cache_read_input_tokens = 20000
+    fake_anthropic.script = [_message("end_turn", [_text("hola")], usage)]
+
+    answer = await run_anthropic("k", "o", "claude-opus-5-5", _request(native_search=False))
+
+    # Opus 5.5: 4 $ in, 20 $ out per million; writes at 1.25x, reads at 0.1x.
+    expected = (1000 * 4 + 4000 * 4 * 1.25 + 20000 * 4 * 0.1 + 100 * 20) / 1_000_000
+    assert answer.cost_usd == pytest.approx(expected)
+
+
+# -- effort on the other providers ----------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("difficulty", "level"), [("simple", "LOW"), ("normal", "MEDIUM"), ("hard", "HIGH")]
+)
+async def test_gemini_3_thinks_as_hard_as_the_task(fake_genai, difficulty, level) -> None:
+    fake_genai.reply = _gemini_reply("hola", None)
+    await run_gemini("g", "gemini-flash", "gemini-3.5-flash", _request(difficulty=difficulty))
+    thinking = fake_genai.calls[0]["config"].thinking_config
+    assert thinking.thinking_level.value == level
+
+
+async def test_an_older_gemini_keeps_its_own_thinking(fake_genai) -> None:
+    fake_genai.reply = _gemini_reply("hola", None)
+    await run_gemini("g", "old", "gemini-2.5-flash", _request(difficulty="simple"))
+    assert fake_genai.calls[0]["config"].thinking_config is None
+
+
+async def test_a_gpt_reasoning_model_reasons_as_hard_as_the_task(fake_openai) -> None:
+    import openai
+
+    fake_openai.script = [_response([], text="hola"), _response([], text="hola")]
+    await run_openai("o", "gpt", "gpt-5.2", _request(difficulty="simple"))
+    await run_openai("o", "gpt4", "gpt-4o", _request(difficulty="simple"))
+    assert fake_openai.calls[0]["reasoning"] == {"effort": "low"}
+    # A model that is not a reasoning one would refuse the field.
+    assert fake_openai.calls[1]["reasoning"] is openai.omit
+
+
+async def test_grok_is_sent_no_reasoning_effort(fake_openai) -> None:
+    import openai
+
+    fake_openai.script = [_response([], text="hola")]
+    await run_xai("x", "grok", "grok-5", _request(difficulty="hard"))
+    assert fake_openai.calls[0]["reasoning"] is openai.omit

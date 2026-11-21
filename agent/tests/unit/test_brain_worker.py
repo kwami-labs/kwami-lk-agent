@@ -218,8 +218,38 @@ async def test_no_model_means_the_default_and_hard_work_thinks_harder(tmp_path: 
     jobs, run = FakeJobs(), Recorder()
     jobs.add(difficulty="hard")
     await _worker(jobs, run, tmp_path).tick()
-    assert run.calls[0]["model"] == "claude-sonnet-5-5"
+    # On the PC's login a token costs nothing: Opus leads instead of Sonnet.
+    assert run.calls[0]["model"] == "claude-opus-5-5"
     assert run.calls[0]["effort"] == "high"
+
+
+async def test_on_the_key_the_default_lead_stays_sonnet(tmp_path: Path) -> None:
+    jobs = FakeJobs()
+    results = iter(
+        [ExecutorResult("Usage limit reached", 0.0, False), ExecutorResult("Ok.", 0.1, True)]
+    )
+    models: list[tuple[str, str]] = []
+
+    async def run(api_key: str, model: str, task: str, config: Any, **kwargs: Any) -> Any:
+        models.append((api_key, model))
+        return next(results)
+
+    jobs.add()
+    await _worker(jobs, run, tmp_path).tick()
+    assert models[0] == ("", "claude-opus-5-5")
+    assert models[1][0] != "" and models[1][1] == "claude-sonnet-5-5"
+
+
+def test_a_chosen_model_or_an_agent_keeps_its_own_lead() -> None:
+    from src.brain.jobs import BrainJob
+    from src.brain.worker import lead_on_login
+
+    def job(**kw: Any) -> BrainJob:
+        return BrainJob(USER, USER, "T", "x", **kw)
+
+    assert lead_on_login(job()) == "claude-opus-5-5"
+    assert lead_on_login(job(model="claude-haiku-5-5")) == "claude-haiku-5-5"
+    assert lead_on_login(job(model="claude-sonnet-5-5", agent_id="a1")) == "claude-sonnet-5-5"
 
 
 async def test_a_follow_up_resumes_its_thread(tmp_path: Path) -> None:
@@ -470,3 +500,83 @@ async def test_a_job_whose_agent_is_gone_does_not_run(tmp_path: Path) -> None:
         (job.id, "failed", worker_module.AGENT_GONE),
         (other.id, "failed", worker_module.AGENT_GONE),
     ]
+
+
+async def test_their_chrome_on_another_account_falls_back_to_jarvis_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Measured 2026-11-16: the extension answered for another claude.ai account."""
+    from src.brain import user_chrome
+
+    mismatch = "Its OAuth token belongs to a different claude.ai account."
+    results = iter(
+        [
+            ExecutorResult(mismatch, 0.01, True, session_id="s9"),
+            ExecutorResult("Hecho en la ventana.", 0.01, True),
+            ExecutorResult("Otra hecha.", 0.0, True),
+            ExecutorResult("Y otra.", 0.0, True),
+        ]
+    )
+    calls: list[tuple[bool, str]] = []
+
+    async def run(api_key: str, model: str, task: str, config: Any, **kwargs: Any) -> Any:
+        calls.append((config.user_chrome, kwargs.get("resume", "")))
+        return next(results)
+
+    jobs = FakeJobs()
+    worker = _worker(jobs, run, tmp_path)
+    jobs.sessions["t1"] = "s1"
+    first = jobs.add(thread_id="t1")
+    await worker.tick()
+
+    # Their Chrome first; refused, Jarvis's window from scratch, and the user told why.
+    assert calls == [(True, "s1"), (False, "")]
+    (job_id, status, text, cost, _session) = jobs.finished[0]
+    assert (job_id, status, cost) == (first.id, "done", 0.0)
+    assert text.startswith("Hecho en la ventana.") and user_chrome.FELL_BACK_NOTE in text
+
+    # Not tried again for a while...
+    jobs.add()
+    await worker.tick()
+    assert calls[-1] == (False, "")
+
+    # ...and again once the user may have fixed it.
+    worker._user_chrome_refused_at = -user_chrome.USER_CHROME_RETRY_SECONDS
+    jobs.add()
+    await worker.tick()
+    assert calls[-1][0] is True
+
+
+async def test_jarvis_own_code_never_gets_their_chrome(tmp_path: Path) -> None:
+    run = Recorder()
+    jobs = FakeJobs()
+    worker = _worker(jobs, run, tmp_path)
+    result = await worker._run_paid(
+        jobs.add(), "t", tmp_path, "", 1.0, lambda _line: None, google=False
+    )
+    assert result.ok and run.calls[0]["config"].user_chrome is False
+
+
+async def test_the_pc_thread_hosts_the_bridge_to_the_users_chrome_while_it_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class Hub:
+        stopped = False
+
+        async def stop(self) -> None:
+            Hub.stopped = True
+
+    async def start_hub() -> Hub:
+        return Hub()
+
+    monkeypatch.setattr(worker_module, "start_hub", start_hub)
+    worker = _worker(FakeJobs(), Recorder(), tmp_path)
+    stop = asyncio.Event()
+
+    async def once() -> bool:
+        stop.set()
+        return False
+
+    worker.start_next = once  # type: ignore[method-assign]
+    await asyncio.wait_for(worker.run_forever(stop), 2)
+    assert Hub.stopped, "the port is let go when the thread ends"

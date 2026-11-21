@@ -24,11 +24,14 @@ These tools close that last step. Two design points carry the safety argument:
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote_plus
 
 from livekit.agents import RunContext, function_tool
 
+from ..browser.media_scripts import FIRST_RESULT_JS, MEDIA_ACTION_JS, NOW_PLAYING_JS, VOLUME_JS
 from ..utils.logging import get_logger
 
 if TYPE_CHECKING:
@@ -65,62 +68,12 @@ SERVICES: dict[str, dict[str, Any]] = {
 
 DEFAULT_SERVICE_FOR_KIND = {"video": "youtube", "music": "youtube_music"}
 
-#: Fixed, audited snippets. The model chooses a named action; it never writes one.
-#:
-#: Each is written to fail quietly on a page that does not match, so a snippet
-#: aimed at YouTube does nothing at all on Spotify rather than throwing.
-_FIRST_RESULT_JS = """
-(() => {
-  const sel = [
-    'ytd-video-renderer a#video-title',
-    'ytmusic-responsive-list-item-renderer a',
-    'a[data-testid="track-row"]',
-    'ul.sc-list-nav li a',
-    'a[href*="/watch"]', 'a[href*="/track/"]', 'a[href*="/album/"]'
-  ];
-  for (const s of sel) {
-    const el = document.querySelector(s);
-    if (el) { el.click(); return 'clicked:' + s; }
-  }
-  return 'no-result';
-})()
-"""
-
-_MEDIA_ACTION_JS: dict[str, str] = {
-    "pause": "(()=>{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.pause();return'paused';})()",
-    "resume": "(()=>{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.play();return'playing';})()",
-    "stop": "(()=>{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.pause();m.currentTime=0;return'stopped';})()",
-    "mute": "(()=>{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.muted=true;return'muted';})()",
-    "unmute": "(()=>{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.muted=false;return'unmuted';})()",
-    "restart": "(()=>{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.currentTime=0;m.play();return'restarted';})()",
-}
-
-#: Volume is the one action that takes a value, so it is built rather than looked up.
-_VOLUME_JS = (
-    "(()=>{{const m=document.querySelector('video,audio');"
-    "if(!m)return'no-media';m.volume={level};m.muted=false;return'volume:'+m.volume;}})()"
-)
-
-_NOW_PLAYING_JS = """
-(() => {
-  const m = document.querySelector('video,audio');
-  if (!m) return 'no-media';
-  return JSON.stringify({
-    title: document.title,
-    paused: m.paused,
-    muted: m.muted,
-    volume: m.volume,
-    position: Math.round(m.currentTime || 0),
-    duration: Math.round(m.duration || 0),
-  });
-})()
-"""
+#: Fixed, audited snippets (`browser.media_scripts`). The model chooses a named action;
+#: it never writes one.
+_FIRST_RESULT_JS = FIRST_RESULT_JS
+_MEDIA_ACTION_JS = MEDIA_ACTION_JS
+_VOLUME_JS = VOLUME_JS
+_NOW_PLAYING_JS = NOW_PLAYING_JS
 
 #: How long to let a results page settle before clicking into it.
 RESULTS_SETTLE_SECONDS = 2.5
@@ -128,6 +81,51 @@ RESULTS_SETTLE_SECONDS = 2.5
 PLAYBACK_SETTLE_SECONDS = 2.0
 
 MAX_QUERY_CHARS = 200
+
+#: Jarvis's own screen in the app (2026-11-17): a YouTube result plays in its video
+#: window, not in a browser that opens beside it. The app's tool that says it has one.
+OWN_SCREEN_TOOL = "show_on_screen"
+#: Services whose first result is a YouTube video, which that window plays.
+SCREEN_SERVICES = frozenset({"youtube", "youtube_music"})
+YOUTUBE_RESULTS = "https://www.youtube.com/results"
+YOUTUBE_WATCH = "https://www.youtube.com/watch?v={id}"
+#: The first video of a results page, and the title that follows it.
+_FIRST_VIDEO = re.compile(r'"videoRenderer":\{"videoId":"([\w-]{11})"')
+_VIDEO_TITLE = re.compile(r'"title":\{"runs":\[\{"text":"(.*?)"\}')
+#: YouTube's consent page stands in front of results for a request with no cookies in
+#: the EU; this is the "reject all" answer, which is enough to see the results.
+_YOUTUBE_CONSENT = {"SOCS": "CAI"}
+YOUTUBE_TIMEOUT_SECONDS = 8.0
+
+
+async def first_youtube_video(query: str) -> tuple[str, str] | None:
+    """The address and title of YouTube's first video for `query`, or None."""
+    from ..adapters.http import shared_client
+
+    try:
+        response = await shared_client().get(
+            YOUTUBE_RESULTS,
+            params={"search_query": query.strip()[:MAX_QUERY_CHARS]},
+            headers={"Accept-Language": "es-ES,es;q=0.9,en;q=0.8"},
+            cookies=_YOUTUBE_CONSENT,
+            follow_redirects=True,
+            timeout=YOUTUBE_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+    except Exception as e:
+        logger.warning("Could not search YouTube: %s", e)
+        return None
+    found = _FIRST_VIDEO.search(response.text)
+    if found is None:
+        return None
+    title = ""
+    named = _VIDEO_TITLE.search(response.text, found.end(), found.end() + 4000)
+    if named is not None:
+        try:
+            title = json.loads(f'"{named.group(1)}"')
+        except ValueError:
+            title = named.group(1)
+    return YOUTUBE_WATCH.format(id=found.group(1)), title[:120]
 
 
 def resolve_service(kind: str, service: str | None) -> tuple[str, dict[str, Any]] | None:
@@ -171,6 +169,8 @@ class MediaToolsMixin:
     """
 
     kwami_config: KwamiConfig
+    #: Whether what plays now is in the app's video window rather than in a browser.
+    _media_on_screen: bool = False
 
     async def _media_session(self) -> Any:
         """The live browser, or None when there is nothing playing to control."""
@@ -179,6 +179,51 @@ class MediaToolsMixin:
             return None
         session = await getter()
         return session if getattr(session, "is_active", False) else None
+
+    def _has_own_screen(self) -> bool:
+        """Whether the app gives Jarvis a screen of its own, with a video window."""
+        names = getattr(self, "_registered_client_tool_names", None)
+        if not callable(names):
+            return False
+        try:
+            return OWN_SCREEN_TOOL in names()
+        except Exception:
+            return False
+
+    async def _publish_to_app(self, context: Any, message: dict[str, Any]) -> bool:
+        publisher = getattr(self, "_publisher", None)
+        if not callable(publisher):
+            return False
+        try:
+            return bool(await publisher(context).publish(message))
+        except Exception:
+            logger.warning("Could not send %s to the app", message.get("type"), exc_info=True)
+            return False
+
+    async def _play_on_screen(self, context: Any, wanted: str, label: str) -> str | None:
+        """YouTube's first video for `wanted`, in the app's video window. None if it cannot."""
+        found = await first_youtube_video(wanted)
+        if found is None:
+            return None
+        url, title = found
+        sent = await self._publish_to_app(
+            context,
+            {"type": "hud_open", "kind": "video", "url": url, "title": title or wanted},
+        )
+        if not sent:
+            return None
+        self._media_on_screen = True
+        logger.info("play_media: %s on Jarvis's screen (%s)", wanted[:60], url)
+        shown = f" ({title})" if title else ""
+        return f"Playing '{wanted}'{shown} from {label} in the video window on Jarvis's screen."
+
+    @staticmethod
+    async def _run_named(session: Any, name: str, script: str, level: float = 0.0) -> str:
+        """A fixed media action: by name where the browser has its own (the user's Chrome)."""
+        runner = getattr(session, "run_named", None)
+        if callable(runner):
+            return str(await runner(name, level))
+        return str(await session.evaluate_js(script))
 
     @function_tool()
     async def play_media(
@@ -190,8 +235,8 @@ class MediaToolsMixin:
     ) -> str:
         """Play a song, album, artist or video. Starts playback, not just a search.
 
-        The user watches it in the browser panel and hears it through their own
-        speakers.
+        With Jarvis's own screen in the app, a YouTube result plays in its video window;
+        otherwise in the browser panel. The user hears it through their own speakers.
 
         Args:
             query: What to play -- a song, artist, album or video title.
@@ -208,6 +253,11 @@ class MediaToolsMixin:
             return f"I can't play on '{service}'. I can use: {', '.join(sorted(SERVICES))}."
         service_key, entry = resolved
 
+        if service_key in SCREEN_SERVICES and self._has_own_screen():
+            played = await self._play_on_screen(context, wanted, entry["label"])
+            if played is not None:
+                return played
+
         opener = getattr(self, "navigate_to", None)
         if opener is None:
             return "I can't open the browser panel in this session."
@@ -219,13 +269,14 @@ class MediaToolsMixin:
         session = await self._media_session()
         if session is None:
             return f"I opened {entry['label']} but the browser panel didn't come up."
+        self._media_on_screen = False
 
         # Let the results render, then click the first one. This is the step
         # `navigate_to` alone cannot do: on YouTube the results live in a shadow
         # DOM that read_navigation_page cannot see at all.
         await asyncio.sleep(RESULTS_SETTLE_SECONDS)
-        clicked = await session.evaluate_js(_FIRST_RESULT_JS)
-        if "no-result" in str(clicked):
+        clicked = await self._run_named(session, "first_result", _FIRST_RESULT_JS)
+        if "no-result" in clicked:
             return (
                 f"I searched {entry['label']} for '{wanted}' but couldn't find a result to "
                 "play. It's on screen if you want to pick one."
@@ -234,7 +285,7 @@ class MediaToolsMixin:
         await asyncio.sleep(PLAYBACK_SETTLE_SECONDS)
         # Some services need the play button; calling play() is harmless when
         # it is already playing.
-        await session.evaluate_js(_MEDIA_ACTION_JS["resume"])
+        await self._run_named(session, "resume", _MEDIA_ACTION_JS["resume"])
         return f"Playing '{wanted}' on {entry['label']}."
 
     @function_tool()
@@ -263,14 +314,20 @@ class MediaToolsMixin:
                 "unmute or restart."
             )
 
+        done = f"Done -- {key}d." if key not in ("stop", "restart") else f"Done -- {key}ped."
+        if self._media_on_screen and await self._publish_to_app(
+            context, {"type": "hud_media", "action": key}
+        ):
+            return done
+
         session = await self._media_session()
         if session is None:
             return "Nothing is playing right now."
 
-        result = str(await session.evaluate_js(snippet))
+        result = await self._run_named(session, key, snippet)
         if "no-media" in result:
             return "I can't find anything playing on this page."
-        return f"Done -- {key}d." if key not in ("stop", "restart") else f"Done -- {key}ped."
+        return done
 
     @function_tool()
     async def set_playback_volume(self, context: RunContext, level: float) -> str:
@@ -284,11 +341,20 @@ class MediaToolsMixin:
         except (TypeError, ValueError):
             return "Give me a volume between 0 and 1."
 
+        if self._media_on_screen:
+            sent = await self._publish_to_app(
+                context, {"type": "hud_media", "action": "volume", "level": clamped}
+            )
+            if sent:
+                return f"Volume set to {int(clamped * 100)} percent."
+
         session = await self._media_session()
         if session is None:
             return "Nothing is playing right now."
 
-        result = str(await session.evaluate_js(_VOLUME_JS.format(level=clamped)))
+        result = await self._run_named(
+            session, "volume", _VOLUME_JS.format(level=clamped), level=clamped
+        )
         if "no-media" in result:
             return "I can't find anything playing on this page."
         return f"Volume set to {int(clamped * 100)} percent."
@@ -296,16 +362,18 @@ class MediaToolsMixin:
     @function_tool()
     async def get_now_playing(self, context: RunContext) -> dict[str, Any]:
         """What is playing right now, and how far through it is."""
+        if self._media_on_screen:
+            return {
+                "where": "the video window on Jarvis's screen",
+                "reason": "its position and title are shown there, to the user",
+            }
         session = await self._media_session()
         if session is None:
             return {"playing": False, "reason": "no browser panel open"}
 
-        raw = str(await session.evaluate_js(_NOW_PLAYING_JS))
+        raw = await self._run_named(session, "now_playing", _NOW_PLAYING_JS)
         if "no-media" in raw:
             return {"playing": False, "reason": "no media on this page"}
-
-        import json
-        import re
 
         # `evaluate_js` returns a human-readable wrapper around the value, so
         # the JSON has to be recovered from it rather than parsed directly.

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+from collections.abc import Callable
 from typing import Any
 
 from ..adapters.http import shared_client
@@ -228,6 +229,15 @@ class CDPConnection:
         # (`connect_ws`). Every command then has to carry it, or it is answered
         # by the browser target, where Page/Input/Runtime do not exist.
         self._session_id: str | None = None
+        #: Who hears each CDP event (`Page.screencastFrame`...), one per event.
+        self._events: dict[str, Callable[[dict[str, Any]], None]] = {}
+
+    def on(self, method: str, handler: Callable[[dict[str, Any]], None]) -> None:
+        """Hear a CDP event. Synchronous: a handler with work to await schedules it."""
+        self._events[method] = handler
+
+    def off(self, method: str) -> None:
+        self._events.pop(method, None)
 
     async def connect(self, cdp_url: str) -> None:
         """Connect to the CDP endpoint.
@@ -367,6 +377,11 @@ class CDPConnection:
                 msg_id = msg.get("id")
                 if msg_id is not None and msg_id in self._pending:
                     self._pending[msg_id].set_result(msg)
+                elif msg_id is None and (handler := self._events.get(msg.get("method", ""))):
+                    try:
+                        handler(msg.get("params") or {})
+                    except Exception:
+                        logger.debug("A CDP event handler failed", exc_info=True)
         except Exception as e:
             logger.debug("CDP reader loop ended: %s", e)
             # Resolve all pending futures with error
@@ -541,7 +556,21 @@ class CDPConnection:
             doc.querySelectorAll('[data-kwami-id]').forEach(el => el.removeAttribute('data-kwami-id'));
 
             const main = doc.querySelector('main, article, [role="main"], .content, #content') || body;
-            const textContent = (main.innerText || '').slice(0, 5000);
+            // What a person reads first: headings and paragraphs, not the tables, infoboxes,
+            // menus, headers and footers many pages put before them (Wikipedia's infobox
+            // filled the whole excerpt, and the first sentence never arrived: 2026-11-17).
+            const skip = 'table, nav, aside, header, footer, [role="navigation"], '
+                + '[role="banner"], .infobox, .navbox, .sidebar';
+            const blocks = [...main.querySelectorAll('h1, h2, h3, p, li, blockquote, pre')]
+                .filter(el => !el.closest(skip)
+                    && !(el.parentElement && el.parentElement.closest('p, li, blockquote, pre'))
+                    && el.getClientRects().length > 0);
+            let readable = blocks
+                .map(el => (el.innerText || '').trim().replace(/\\s+/g, ' '))
+                .filter(t => t.length > 1)
+                .join('\\n');
+            if (readable.length < 200) readable = main.innerText || '';
+            const textContent = readable.slice(0, 5000);
 
             const items = [];
             doc.querySelectorAll(clickableSelector).forEach((el, i) => {

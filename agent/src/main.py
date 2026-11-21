@@ -32,6 +32,7 @@ from .runtime import (
     decode_data_message,
     resolve_identity_on_join,
 )
+from .runtime.action_feed import ActionFeed
 from .runtime.away import USER_AWAY_SECONDS, PhoneAwayWatcher
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
@@ -263,6 +264,10 @@ async def _run_session(ctx: JobContext) -> None:
     # Each turn's text to the browser as a `transcript` frame (runtime/transcript_relay.py).
     transcript = TranscriptRelay(LiveKitRoomPublisher(ctx.room))
     session.on("conversation_item_added", transcript.on_conversation_item_added)
+
+    # Each tool call as it starts and ends, for the app's action log (runtime/action_feed.py).
+    actions = ActionFeed(LiveKitRoomPublisher(ctx.room))
+    session.on("tool_execution_updated", actions.on_tool_execution_updated)
 
     # Routing lives in runtime.dispatch so each branch is reachable from a test.
     router = DataMessageRouter(

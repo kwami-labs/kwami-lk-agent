@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The brain pays the way the user chose.** `billing` in the brain config:
+  `account_first` (default: the PC's Claude plan until it runs out, then the API key),
+  `api_first`, `account_only` (no pay-per-use at all, the voice's web search included) and
+  `api_only`. Set from the Models panel or by voice through `brain_status`; each task
+  reports where it ran and who paid. Without the PC's Claude login nothing changes: work
+  goes to the API as before.
+- **Jarvis's screen in the app.** The agent puts what it plays or opens on the app's HUD
+  and drives it by voice (`hud_open` / `hud_media` messages, not tools, so they take no
+  slot of the 128). A task's report travels apart from what was said about it, task ids
+  are unique across calls, and browser frames are sent only when they change.
+- **Tools past the ceiling stay within reach.** Client tools that do not fit under the
+  model's 128 go on a shelf the model reaches through `find_more_tools`, instead of being
+  dropped; a client tool named like a built-in is skipped.
+- **Jarvis in the user's own browser (desktop only).** Kwami's Chrome extension
+  (`chrome-extension/`) connects to a bridge on 127.0.0.1 that the PC worker hosts, and
+  Claude in Chrome over MCP is a second way in. It only runs where
+  `KWAMI_BROWSER_PROVIDER=local`; the cloud keeps its own browser. The work thread follows
+  the user's list of sites, and signing in needs Full access.
 - **Search results arrive whole.** A message too large for one data packet goes to an app
   that sets `kwami.messages=stream` as a LiveKit text stream on `kwami.message`, images
   included; every other app still gets it trimmed to 14 KB.

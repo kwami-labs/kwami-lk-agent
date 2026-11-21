@@ -90,6 +90,20 @@ TEAM: dict[str, TeamMember] = {
         tools=[*_READ, *_WEB],
         effort="high",
     ),
+    "writer": TeamMember(
+        description=(
+            "Writes and reads: drafts documents, mails, reports, READMEs and messages, and "
+            "reads long files or pages to summarise them or pull out what matters. Use it "
+            "for any text longer than a few lines."
+        ),
+        prompt=(
+            "Write what you are asked, in the language and tone asked, ready to use: no "
+            "preamble, no notes about the text. When you read, report what the text says "
+            "and where, and never add what it does not say."
+        ),
+        model=SONNET,
+        tools=[*_READ, "Write", "Edit"],
+    ),
     "reviewer": TeamMember(
         description=(
             "Checks finished work against what was asked before it is reported: reads it "
@@ -100,17 +114,24 @@ TEAM: dict[str, TeamMember] = {
             "request, run what can be run, and report what fails with the evidence. Change "
             "nothing. If it holds up, say so in one line and say what you did to check."
         ),
-        model=SONNET,
+        # Finding what is wrong is judgement: the user's rule (2026-11-13) gives it to
+        # Opus, at medium effort so a check costs less than the work it checks.
+        model=OPUS,
         tools=[*_READ, "Bash"],
-        effort="high",
+        effort="medium",
     ),
 }
 
 #: How the executor is told to use them, on top of the Claude Code preset.
 TEAM_GUIDANCE = """
-You lead a small team, available through the Agent tool: clerk (mechanical chores),
-researcher (facts from the web), reasoner (hard decisions and maths), reviewer
-(checks finished work).
+You lead a small team, available through the Agent tool, each on the model best at
+its work:
+- clerk (Haiku): mechanical chores -- find files, extract, reformat, rename, translate.
+- researcher (Sonnet): facts from the web and the folder, with their sources.
+- writer (Sonnet): drafting any text longer than a few lines, and reading long files or
+  pages to summarise them.
+- reasoner (Opus): hard decisions, trade-offs, maths, architecture.
+- reviewer (Opus): checks finished work before it is reported.
 
 - Before acting, decide what done looks like. For anything beyond a few steps, write
   the plan down first and split it into the parts that can be handed over.
@@ -188,6 +209,65 @@ def platform_members(rows: list[Any]) -> dict[str, TeamMember]:
             if member is not None:
                 members[name] = member
     return members
+
+
+#: What the voice may give an agent it saves. Bash runs commands on the PC, so an
+#: agent that has it is made in the app, where the user writes it down themselves:
+#: a page or a mail read aloud is one sentence away from the voice.
+VOICE_AGENT_TOOLS = frozenset(OWN_MEMBER_TOOLS - {"Bash"})
+AGENT_MODELS = (HAIKU, SONNET, OPUS)
+AGENT_TARGETS = ("auto", "pc", "cloud")
+
+
+def agent_fields_from_voice(raw: dict[str, Any]) -> dict[str, Any] | str:
+    """The `brain_agents` columns for what the voice asked, or why it cannot be saved.
+
+    The same rules the API keeps for the app (`brain_service.clean_agent`), with Bash
+    left to the app. Empty values mean "leave as it is".
+    """
+    out: dict[str, Any] = {}
+    name = str(raw.get("name") or "").strip().lower()
+    if not AGENT_NAME.fullmatch(name):
+        return "An agent's name is 2 to 40 lowercase letters, digits and dashes, a letter first."
+    out["name"] = name
+    for key, limit in (("description", 500), ("prompt", MAX_OWN_TEXT_CHARS)):
+        text = str(raw.get(key) or "").strip()
+        if len(text) > limit:
+            return f"The {key} is longer than {limit} characters."
+        if text:
+            out[key] = text
+    model = str(raw.get("model") or "").strip()
+    if model:
+        if model not in AGENT_MODELS:
+            return f"The model must be one of: {', '.join(AGENT_MODELS)}."
+        out["model"] = model
+    tools = raw.get("tools")
+    if isinstance(tools, list) and tools:
+        wanted = list(dict.fromkeys(str(t) for t in tools))
+        if "Bash" in wanted:
+            return (
+                "Running commands (Bash) is given to an agent in the app, by the user. "
+                "Save it without Bash, or ask them to add it there."
+            )
+        unknown = [t for t in wanted if t not in VOICE_AGENT_TOOLS]
+        if unknown:
+            return (
+                f"Unknown tools: {', '.join(unknown)}. Use {', '.join(sorted(VOICE_AGENT_TOOLS))}."
+            )
+        out["tools"] = wanted
+    effort = str(raw.get("effort") or "").strip()
+    if effort:
+        if effort not in ("low", "medium", "high"):
+            return "The effort must be low, medium or high."
+        out["effort"] = effort
+    target = str(raw.get("target") or "").strip()
+    if target:
+        if target not in AGENT_TARGETS:
+            return "Where it runs must be auto, pc or cloud."
+        out["target"] = target
+    if isinstance(raw.get("enabled"), bool):
+        out["enabled"] = raw["enabled"]
+    return out
 
 
 def permissions_for(tools: list[str]) -> str:

@@ -174,7 +174,7 @@ def test_ui_control_guidance_appears_once_the_client_registers_them() -> None:
     prompt = build_system_prompt(soul(), client_tool_names={"set_ui_control", "list_ui_controls"})
 
     assert "set_ui_control" in prompt
-    assert "list_ui_controls" in prompt
+    assert "listControls" in prompt, "how to find a control name it does not know"
     # A worked example is the point of the block: the model has to see how a
     # spoken request maps onto domain/control/value, not just be told it can.
     assert "theme/mode/dark" in prompt
@@ -367,3 +367,23 @@ def test_a_generated_opening_needs_no_reminder() -> None:
     from src.domain.prompt import PERSONA_REMINDER
 
     assert PERSONA_REMINDER not in build_system_prompt(soul(name="Ada"))
+
+
+def test_english_asked_for_in_the_call_overrides_a_spanish_character() -> None:
+    """Jarvis is written "en castellano": English must be said, not left as the default."""
+    from src.domain.prompt import build_system_prompt, normalize_language
+
+    soul = KwamiSoulConfig(
+        name="Jarvis", system_prompt="Mayordomo inglés, en castellano.", language="es-ES"
+    )
+    assert "Castilian Spanish" in build_system_prompt(soul)
+
+    soul.language_override = normalize_language(" English ")
+    prompt = build_system_prompt(soul)
+    assert "speak and write only in English, whatever your description" in prompt
+    assert "Castilian Spanish" not in prompt
+
+    soul.language_override = normalize_language("castellano")
+    assert "only in Spanish" in build_system_prompt(soul)
+    soul.language_override = "xx"
+    assert "whatever your description" not in build_system_prompt(soul)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -182,10 +183,14 @@ def test_the_director_is_the_users_choice_when_it_can_run() -> None:
     config.director = "claude-opus"
     keys = {"ANTHROPIC_API_KEY": "a"}
     assert director_of(config, keys).id == "claude-opus"  # type: ignore[union-attr]
+    config.director = "claude-sonnet"
+    assert director_of(config, keys).id == "claude-sonnet"  # type: ignore[union-attr]
+    # Otherwise the expert directs: Opus, not the everyday model.
+    # Otherwise the router's pick for normal analysis, which is Opus's now.
     config.director = "claude-code"  # it writes code, it does not plan
-    assert director_of(config, keys).id == "claude-sonnet"  # type: ignore[union-attr]
+    assert director_of(config, keys).id == "claude-opus"  # type: ignore[union-attr]
     config.director = "nobody"
-    assert director_of(config, keys).id == "claude-sonnet"  # type: ignore[union-attr]
+    assert director_of(config, keys).id == "claude-opus"  # type: ignore[union-attr]
     assert director_of(config, {}) is None
 
 
@@ -235,12 +240,17 @@ class FakeJobs:
         self.online = True
         self.ready = True
         self.accept = True
+        #: What the PC says is left of its plan (`plan.py`).
+        self.plan: dict[str, Any] | None = None
 
     async def runner_online(self, user_id: str) -> bool:
         return self.online
 
     async def account_ready(self, user_id: str) -> bool:
         return self.ready
+
+    async def account_state(self, user_id: str) -> tuple[bool, dict[str, Any] | None]:
+        return self.ready, self.plan
 
     async def enqueue(self, job: BrainJob) -> bool:
         job.id = job.id or "j1"
@@ -340,7 +350,8 @@ async def test_account_only_never_touches_the_key(tmp_path: Path, api: list[Brai
     jobs.online = False
     await bridge._refresh_account(force=True)
     answer = await bridge._ask(model, BrainRequest("T", "S"))
-    assert not answer.ok and "no está disponible" in answer.text and api == []
+    assert not answer.ok and "no está en marcha" in answer.text and api == []
+    assert "solo la cuenta" in answer.text
 
 
 async def test_api_only_never_touches_the_account(tmp_path: Path, api: list[BrainRequest]) -> None:
@@ -724,12 +735,14 @@ async def test_only_a_thought_names_its_mode(store: JobStore) -> None:
 @respx.mock
 async def test_a_heartbeat_survives_a_database_without_the_login_column(store: JobStore) -> None:
     route = respx.post("https://db.test/rest/v1/brain_runners").mock(
-        side_effect=[httpx.Response(400), httpx.Response(201)]
+        side_effect=[httpx.Response(400), httpx.Response(400), httpx.Response(201)]
     )
     assert await store.beat(USER, "r", "host", True) is True
     assert store.thinking_ready is False
-    assert b"claude_login" in route.calls[0].request.content
-    assert b"claude_login" not in route.calls[1].request.content
+    assert b"claude_plan" in route.calls[0].request.content
+    assert b"claude_plan" not in route.calls[1].request.content
+    assert b"claude_login" in route.calls[1].request.content
+    assert b"claude_login" not in route.calls[2].request.content
 
 
 @respx.mock
@@ -1167,7 +1180,7 @@ async def test_the_heartbeat_says_whether_the_pc_is_signed_in(tmp_path: Path) ->
 
     worker = Worker(Beating(), None, "", USER, folder=tmp_path, check_login=yes)  # type: ignore[arg-type]
     await asyncio.wait_for(worker._beat_forever(stop), 2)
-    assert beats[0][0] == USER and beats[0][-1] is True
+    assert beats[0][0] == USER and beats[0][3] is True
 
 
 async def test_a_pc_still_there_keeps_being_waited_for(
@@ -1247,9 +1260,11 @@ async def test_a_history_that_cannot_keep_it_does_not_stop_the_reply(
     assert session.replies
 
 
-async def test_a_failed_task_is_told_but_not_kept_as_a_result(
+async def test_a_failed_task_is_told_and_kept_as_a_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Asked "why?" a turn later, the voice must still have the reason (2026-11-16)."""
+
     async def now(self: Any) -> bool:
         return True
 
@@ -1261,7 +1276,9 @@ async def test_a_failed_task_is_told_but_not_kept_as_a_result(
     await bridge._deliver(
         BrainTask("t1", "T", "?", "question", "simple", status="failed", result="No pude")
     )
-    assert history.messages == [] and session.replies
+    assert session.replies
+    ((role, content),) = history.messages
+    assert role == "system" and "failed" in content and "No pude" in content
 
 
 def test_whose_repositories_is_the_deployments_to_say() -> None:
@@ -1305,6 +1322,110 @@ async def test_a_login_check_cancelled_leaves_no_process_behind(
     with pytest.raises(asyncio.CancelledError):
         await running
     assert process.killed
+
+
+# -- a chat provider that searches through Tavily ------------------------------------
+
+
+def _chat_reply(content: str = "", calls: list[Any] | None = None) -> SimpleNamespace:
+    message = SimpleNamespace(content=content, tool_calls=calls)
+    return SimpleNamespace(
+        usage=SimpleNamespace(prompt_tokens=100, completion_tokens=50),
+        choices=[SimpleNamespace(message=message)],
+    )
+
+
+def _search_call(call_id: str, arguments: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=call_id, function=SimpleNamespace(name="tavily_search", arguments=arguments)
+    )
+
+
+@pytest.fixture
+def scripted_chat(fake_openai: type[FakeOpenAI], monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    sent: list[dict[str, Any]] = []
+    script: list[Any] = []
+
+    async def chat(self: Any, **kwargs: Any) -> Any:
+        sent.append({**kwargs, "messages": list(kwargs["messages"])})
+        return script.pop(0)
+
+    monkeypatch.setattr(FakeOpenAI, "_chat", chat)
+    return [script, sent]
+
+
+async def test_with_tavily_a_chat_provider_searches_before_it_answers(scripted_chat) -> None:
+    import respx
+
+    script, sent = scripted_chat
+    script += [
+        _chat_reply(
+            calls=[_search_call("c1", '{"query": "precio oro"}'), _search_call("c2", "{x")]
+        ),
+        _chat_reply(" El oro sube. "),
+    ]
+    with respx.mock:
+        route = respx.post(providers_module.TAVILY_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json={"answer": "sube", "results": []})
+        )
+        answer = await run_compatible(
+            "deepseek", "k", "d", "deepseek-chat", BrainRequest("T", "S", tavily_key="tv")
+        )
+
+    assert answer.ok and answer.text == "El oro sube." and answer.searches == 2
+    assert sent[0]["tools"] == [providers_module.TAVILY_CHAT_FUNCTION]
+    second = sent[1]["messages"]
+    assert second[2]["tool_calls"][0]["id"] == "c1"
+    assert [m["tool_call_id"] for m in second[3:]] == ["c1", "c2"]
+    assert json.loads(route.calls[0].request.content)["query"] == "precio oro"
+    # A call whose arguments cannot be read searches for nothing rather than failing.
+    assert json.loads(route.calls[1].request.content)["query"] == ""
+    assert answer.cost_usd > 0
+
+
+async def test_without_tavily_a_chat_provider_gets_no_tools(scripted_chat) -> None:
+    import openai
+
+    script, sent = scripted_chat
+    # Even a model that asks for a search is not answered: there is no key.
+    script += [_chat_reply("de memoria", calls=[_search_call("c1", "{}")])]
+    answer = await run_compatible("groq", "k", "l", "llama", BrainRequest("T", "S"))
+    assert sent[0]["tools"] is openai.omit
+    assert answer.text == "de memoria" and len(sent) == 1
+
+
+async def test_a_chat_provider_that_keeps_searching_stops_at_the_ceiling(
+    scripted_chat, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import respx
+
+    monkeypatch.setattr(providers_module, "MAX_TOOL_ROUNDS", 2)
+    script, sent = scripted_chat
+    script += [_chat_reply(calls=[_search_call(f"c{i}", '{"query": "q"}')]) for i in range(2)]
+    with respx.mock:
+        respx.post(providers_module.TAVILY_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json={})
+        )
+        answer = await run_compatible(
+            "mistral", "k", "m", "mistral-large", BrainRequest("T", "S", tavily_key="tv")
+        )
+    assert len(sent) == 2 and not answer.ok
+
+
+def test_fable_and_mythos_are_never_on_the_roster() -> None:
+    from src.brain.config import parse_brain
+
+    config = parse_brain(
+        {
+            "models": [
+                {"provider": "anthropic", "model": "claude-fable-5-2", "role": "expert"},
+                {"provider": "anthropic", "model": "Claude-Mythos-5-2", "role": "expert"},
+                {"provider": "openrouter", "model": "anthropic/claude-fable-5-1", "role": "fast"},
+                {"provider": "anthropic", "model": "claude-opus-5-5", "role": "expert"},
+            ]
+        }
+    )
+    assert [m.model for m in config.models] == ["claude-opus-5-5"]
 
 
 # -- the user's instructions reach every model, the director included ---------------

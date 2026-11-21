@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 from collections import defaultdict
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -251,3 +252,38 @@ async def test_spend_resets_when_the_month_turns(store: FakeStore) -> None:
     ledger._month = "1999-12"
     assert ledger.month_spend()["usd"] == 0.0
     assert ledger.month_spend()["month"] != "1999-12"
+
+
+@pytest.mark.parametrize(
+    ("model", "rates"),
+    [
+        ("claude-fable-5-2", (8.00, 40.00)),
+        ("claude-fable-5", (10.00, 50.00)),
+        ("claude-opus-5", (5.00, 25.00)),
+        ("claude-sonnet-5", (2.00, 10.00)),
+    ],
+)
+def test_current_claude_models_are_billed_at_their_own_price(
+    model: str, rates: tuple[float, float]
+) -> None:
+    from src.brain.ledger import token_cost
+
+    # A million tokens each way: the price per million, in and out.
+    assert token_cost("anthropic", model, 1_000_000, 1_000_000) == pytest.approx(sum(rates))
+
+
+async def test_owed_results_older_than_a_week_are_no_news(store: FakeStore) -> None:
+    """Nine from 2026-11-06 waited ten days; the greeting must not read them out."""
+    asked: list[dict[str, str]] = []
+    select = store.select
+
+    async def recording(table: str, params: dict[str, str], *, what: str = "") -> Any:
+        asked.append({"table": table, **params})
+        return await select(table, params, what=what)
+
+    store.select = recording  # type: ignore[method-assign]
+    await _ledger(store).bind(KWAMI, user_id=USER)
+
+    (pending,) = [a for a in asked if a["table"] == "brain_pending"]
+    since = datetime.fromisoformat(pending["created_at"].removeprefix("gte."))
+    assert timedelta(days=6) < datetime.now(UTC) - since <= timedelta(days=7, seconds=5)

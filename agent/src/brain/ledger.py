@@ -29,7 +29,7 @@ import re
 import threading
 import uuid
 from dataclasses import asdict, dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -48,7 +48,13 @@ PRICES: dict[str, tuple[float, float]] = {
     "claude-haiku-5-5": (0.10, 0.50),
     "claude-sonnet-5-5": (2.00, 10.00),
     "claude-opus-5-5": (4.00, 20.00),
+    # Without their own line they were billed at the Anthropic default (Opus 5.5's
+    # price): Fable 5.2 counted half of what it costs against the monthly ceiling.
+    "claude-fable-5-2": (8.00, 40.00),
     "claude-fable-5-1": (10.00, 50.00),
+    "claude-fable-5": (10.00, 50.00),
+    "claude-opus-5": (5.00, 25.00),
+    "claude-sonnet-5": (2.00, 10.00),
     "gemini-3.5-flash": (0.50, 3.00),
     "gemini-3-pro-preview": (2.00, 12.00),
     "gpt-5.2": (1.75, 14.00),
@@ -72,6 +78,23 @@ def token_cost(provider: str, model: str, input_tokens: int, output_tokens: int)
     return (input_tokens * rate_in + output_tokens * rate_out) / 1_000_000
 
 
+#: Anthropic bills a prompt-cache write at 1.25 times the input price and a read at
+#: a tenth of it, and reports both apart from `input_tokens`.
+CACHE_WRITE_FACTOR = 1.25
+CACHE_READ_FACTOR = 0.1
+
+
+def anthropic_cost(model: str, usage: Any) -> float:
+    """What one Messages API answer cost, its prompt-cache tokens included."""
+    rate_in, rate_out = PRICES.get(model) or PROVIDER_DEFAULT_PRICES["anthropic"]
+    fresh = getattr(usage, "input_tokens", 0) or 0
+    written = getattr(usage, "cache_creation_input_tokens", 0) or 0
+    read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    out = getattr(usage, "output_tokens", 0) or 0
+    billed_in = fresh + written * CACHE_WRITE_FACTOR + read * CACHE_READ_FACTOR
+    return (billed_in * rate_in + out * rate_out) / 1_000_000
+
+
 def search_cost(provider: str, searches: int) -> float:
     return SEARCH_PRICES.get(provider, 0.01) * max(searches, 0)
 
@@ -85,6 +108,9 @@ _SAFE_ID = re.compile(r"[^A-Za-z0-9_.-]")
 
 #: How many owed results one kwami keeps. Older ones are dropped.
 MAX_PENDING = 20
+#: An owed result older than this is no news: the greeting leaves it out. Nine from
+#: 2026-11-06 waited ten days under the kwami's row while calls looked elsewhere.
+PENDING_MAX_AGE = timedelta(days=7)
 
 
 @dataclass
@@ -300,6 +326,7 @@ class SupabaseLedger(Ledger):
                 "select": "id,task_id,title,text,models,created_at",
                 "kwami_id": f"eq.{kwami_id}",
                 "taken_at": "is.null",
+                "created_at": f"gte.{(datetime.now(UTC) - PENDING_MAX_AGE).isoformat()}",
                 "order": "created_at.asc",
                 "limit": str(MAX_PENDING),
             },
