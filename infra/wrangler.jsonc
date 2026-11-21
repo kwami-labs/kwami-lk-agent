@@ -6,6 +6,14 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "preview_urls": true,
+  // Local runs leave the container out. From 1.8, @cloudflare/vitest-plugin
+  // builds every container image before the tests start: in CI that build
+  // outlasted the pool's start-up timeout, and on Windows it cannot run at
+  // all. The agent itself runs locally with `uv run`, and deploys are not
+  // affected: this section only applies to `wrangler dev` and the tests.
+  "dev": {
+    "enable_containers": false,
+  },
   "observability": {
     "enabled": true,
     "head_sampling_rate": 1,
