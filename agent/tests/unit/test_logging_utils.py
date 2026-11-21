@@ -73,3 +73,35 @@ def test_a_work_thread_logs_its_info_lines_to_stderr(monkeypatch) -> None:
     logging_module.log_to_console()
     assert calls == [{"level": logging.INFO, "format": logging_module.CONSOLE_FORMAT}]
     assert configured == [True]
+
+
+def test_a_work_thread_logs_failed_requests_but_not_its_polling(monkeypatch) -> None:
+    """A job poll every two seconds was 40,000 "200 OK" lines a day."""
+    import logging
+
+    from src.utils import logging as logging_module
+
+    monkeypatch.setattr(logging, "basicConfig", lambda **kw: None)
+    monkeypatch.setattr(logging_module, "configure_logging", lambda: None)
+    http = logging.getLogger("httpx")
+    monkeypatch.setattr(http, "filters", [])
+    logging_module.log_to_console()
+    logging_module.log_to_console()
+    assert len(http.filters) == 1
+
+    def request(status: int) -> logging.LogRecord:
+        return http.makeRecord(
+            "httpx",
+            logging.INFO,
+            __file__,
+            1,
+            'HTTP Request: %s %s "%s %d %s"',
+            ("POST", "https://x.supabase.co/rest/v1/rpc/brain_claim_job", "HTTP/1.1", status, "OK"),
+            None,
+        )
+
+    assert not http.filter(request(200))
+    assert not http.filter(request(204))
+    assert http.filter(request(400))
+    assert http.filter(request(503))
+    assert http.filter(http.makeRecord("httpx", logging.INFO, __file__, 1, "other", None, None))

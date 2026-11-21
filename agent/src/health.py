@@ -94,7 +94,9 @@ async def run_heartbeat(
     """
     written = 0
     while iterations is None or written < iterations:
-        write_heartbeat(state)
+        # In a thread: on the PC a write to the temp folder took up to 590 ms (the
+        # antivirus looks at each new file), and on the loop that stalls the worker.
+        await asyncio.to_thread(write_heartbeat, state)
         written += 1
         if iterations is not None and written >= iterations:
             return

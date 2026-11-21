@@ -262,7 +262,26 @@ def log_to_console(level: int = logging.INFO) -> None:
     2026-11-06). Does nothing to a process that already has a handler.
     """
     logging.basicConfig(level=level, format=CONSOLE_FORMAT)
+    http = logging.getLogger("httpx")
+    if not any(isinstance(f, SuccessfulRequestFilter) for f in http.filters):
+        http.addFilter(SuccessfulRequestFilter())
     configure_logging()
+
+
+class SuccessfulRequestFilter(logging.Filter):
+    """Drops httpx's line for a request that succeeded; keeps every other.
+
+    The work thread asks Supabase for a job every two seconds, and httpx logs each
+    request at INFO: 40,000 lines a day of "200 OK" (20 MB in two days on the PC),
+    in which the thread's own lines and the one failing request were hard to find.
+    A 4xx or 5xx still gets its line, which is how a missing column was spotted.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        args = record.args
+        if isinstance(args, tuple) and len(args) >= 4 and isinstance(args[3], int):
+            return not 200 <= args[3] < 300
+        return True
 
 
 def configure_logging(*, force_json: bool | None = None) -> None:
