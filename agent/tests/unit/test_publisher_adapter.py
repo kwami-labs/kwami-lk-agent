@@ -99,6 +99,20 @@ async def test_no_room_is_not_an_error() -> None:
     assert await LiveKitRoomPublisher(object()).publish({"type": "x"}) is False
 
 
+class NotConnectedRoom:
+    """LiveKit's Room before it connects: `local_participant` raises a bare Exception."""
+
+    @property
+    def local_participant(self):
+        raise Exception("cannot access local participant before connecting")  # noqa: TRY002 -- as LiveKit does
+
+
+async def test_a_room_that_has_not_connected_yet_is_no_room(caplog) -> None:
+    """The agent reports its tools as it enters, a moment before the room connects."""
+    assert await LiveKitRoomPublisher(NotConnectedRoom()).publish({"type": "x"}) is False
+    assert "Traceback" not in caplog.text
+
+
 async def test_a_publish_failure_is_reported_not_raised() -> None:
     room = FakeRoom(fail=True)
     assert await LiveKitRoomPublisher(room).publish({"type": "x"}) is False

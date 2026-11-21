@@ -133,6 +133,19 @@ def test_bad_fields_are_skipped_with_a_warning(caplog) -> None:
         assert name in caplog.text
 
 
+def test_the_kwami_id_the_api_dispatches_with_is_not_a_warning(caplog) -> None:
+    """The API's dispatch carries the kwami's id as plain text, on every call."""
+    with caplog.at_level(logging.WARNING):
+        config = placeholder_config(
+            env=JARVIS_ENV, job_metadata="a1d1eeba-06f9-4bd1-9caf-b5280d82e811"
+        )
+    assert config.voice.llm_provider == "google"
+    assert "not JSON" not in caplog.text
+    with caplog.at_level(logging.WARNING):
+        placeholder_config(env=JARVIS_ENV, job_metadata="{broken")
+    assert "not JSON" in caplog.text
+
+
 def test_any_metadata_still_gives_an_agent() -> None:
     for metadata in ("not json", "[1, 2]", '{"voice": "assemblyai"}', '{"voice": null}', ""):
         config = placeholder_config(env=JARVIS_ENV, job_metadata=metadata)
