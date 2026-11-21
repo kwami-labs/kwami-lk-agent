@@ -128,9 +128,15 @@ def no_claude_in_chrome(monkeypatch: pytest.MonkeyPatch, request: pytest.Fixture
     with a stand-in server.
     """
     import src.browser.claude_chrome as claude_chrome
+    import src.browser.downloads as downloads
+    import src.browser.window_reader as window_reader
 
     if not request.node.get_closest_marker("live"):
         monkeypatch.setenv(claude_chrome.SWITCH, "off")
+        # Nor does any read the developer's own browser windows through PowerShell,
+        monkeypatch.setenv(window_reader.SWITCH, "off")
+        # or make a folder in their Documents\Jarvis.
+        monkeypatch.setattr(downloads, "DOWNLOADS_DIR", request.getfixturevalue("tmp_path"))
     claude_chrome._port = None
     yield
     claude_chrome._port = None

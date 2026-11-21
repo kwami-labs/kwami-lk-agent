@@ -418,9 +418,21 @@ class _SignInSession:
     is_builtin = False
     runs_locally = True
 
-    def __init__(self, answer: Any) -> None:
+    def __init__(self, answer: Any, address: str = "https://forum.example/") -> None:
         self.answer = answer
         self.typed: list[str] = []
+        self.address = address
+        self.refused = False
+        self.left = 0
+
+    async def page_address(self) -> str:
+        return self.address
+
+    async def sign_in_refused(self) -> bool:
+        return self.refused
+
+    async def leave_page(self) -> None:
+        self.left += 1
 
     async def on_sign_in_page(self) -> Any:
         if isinstance(self.answer, Exception):
@@ -488,8 +500,73 @@ async def test_the_voice_is_told_a_page_asks_to_sign_in(monkeypatch) -> None:
     session = _SignInSession(True)
     session.bring_to_front = _front  # type: ignore[attr-defined]
     _with_session(tools, session)
-    assert builtin.LOCAL_SIGN_IN_HINT in await tools.navigate_to(None, "https://github.com/login")
+    assert builtin.LOCAL_SIGN_IN_HINT in await tools.navigate_to(None, "https://forum.example/")
+    assert session.left == 0, "a page with a password box among other things stays"
     assert builtin.LOCAL_SIGN_IN_HINT in await tools.read_navigation_page(None)
+
+
+class _Route:
+    """navigate_to on the user's PC up to a sign-in page, with the clean window faked."""
+
+    def __init__(self, monkeypatch: Any, address: str, *, refused: bool = False) -> None:
+        from src.tools import builtin
+
+        async def public(url: str) -> str:
+            if "unsafe" in url:
+                raise builtin.UnsafeURLError("private address")
+            return url
+
+        monkeypatch.setattr(builtin, "validate_url_async", public)
+        self.tools, _ = _tools()
+        self.session = _SignInSession(True, address)
+        self.session.refused = refused
+        _with_session(self.tools, self.session)
+        self.opened: list[str] = []
+        self.allowed = True
+
+        async def clean(_context: Any, url: str, _user: str) -> str:
+            self.opened.append(url)
+            return "Opened it in a clean Chrome window."
+
+        async def refusal_for(_context: Any, needed: str, _address: str | None = None):
+            return None if self.allowed or needed != "account" else "refused"
+
+        self.tools._open_sign_in_window = clean
+        self.tools._site_refusal = refusal_for
+
+
+async def test_a_sign_in_page_opens_the_clean_window_straight_away(monkeypatch) -> None:
+    route = _Route(monkeypatch, "https://accounts.google.com/v3/signin/identifier?continue=x")
+    said = await route.tools.navigate_to(None, "https://mail.google.com/")
+    assert route.session.left == 1, "the window Jarvis drives leaves Google's sign-in page"
+    assert route.opened == ["https://accounts.google.com/v3/signin/identifier?continue=x"]
+    assert said.startswith("https://mail.google.com/ asks the user to sign in")
+    assert "clean Chrome window" in said
+
+
+async def test_after_googles_refusal_the_site_itself_is_opened_clean(monkeypatch) -> None:
+    route = _Route(monkeypatch, "https://accounts.google.com/v3/signin/rejected?continue=x")
+    await route.tools.navigate_to(None, "https://mail.google.com/")
+    assert route.opened == ["https://mail.google.com/"], "never the refusal page"
+    route = _Route(monkeypatch, "https://mail.google.com/", refused=True)
+    await route.tools.navigate_to(None, "https://mail.google.com/")
+    assert route.opened == ["https://mail.google.com/"]
+
+
+async def test_an_address_that_will_not_validate_falls_back_to_the_site(monkeypatch) -> None:
+    route = _Route(monkeypatch, "https://unsafe.example/login")
+    await route.tools.navigate_to(None, "https://site.example/")
+    assert route.opened == ["https://site.example/"]
+
+
+async def test_without_the_account_level_nothing_opens(monkeypatch) -> None:
+    from src.domain.tool_result import was_refused
+
+    route = _Route(monkeypatch, "https://github.com/login")
+    route.allowed = False
+    said = await route.tools.navigate_to(None, "https://github.com/")
+    assert was_refused(said) and "Settings > Access" in said
+    assert route.opened == [] and route.session.left == 1
 
 
 async def test_the_voice_never_types_on_a_sign_in_page() -> None:

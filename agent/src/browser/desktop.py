@@ -38,6 +38,8 @@ WINDOW_WAIT_SECONDS = 5.0
 POLL_SECONDS = 0.1
 #: Bubbles (translate, restore) arrive a moment after the window: one more pass then.
 SETTLE_SECONDS = 1.0
+#: The message a window's close button sends.
+WM_CLOSE = 0x0010
 
 
 def quiet_startup(windows: bool | None = None) -> Any | None:
@@ -109,6 +111,10 @@ class Win32:
     def send_back(self, hwnd: int) -> None:
         self._user32.SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0, SWP_BEHIND)
 
+    def close(self, hwnd: int) -> bool:
+        """Ask a window to close, as its own close button does (the program saves first)."""
+        return bool(self._user32.PostMessageW(hwnd, WM_CLOSE, 0, 0))
+
 
 def win32() -> Win32:
     import ctypes
@@ -168,6 +174,20 @@ def keep_behind(
     if focus and api.owner(api.foreground())[0] == pid:
         api.give_focus(focus)
     return len(sent)
+
+
+def close_windows(pid: int, *, windows: bool | None = None, api: Win32 | None = None) -> int:
+    """Close process `pid`'s windows the way their close buttons do. How many; 0 elsewhere.
+
+    For Chrome that is a normal exit: it writes the cookies and the session first, which a
+    killed process would not.
+    """
+    if windows is None:
+        windows = os.name == "nt"
+    if not windows:
+        return 0
+    api = api or win32()
+    return sum(1 for hwnd in api.windows_of(pid) if api.close(hwnd))
 
 
 #: The browsers whose new windows give the focus back (Claude in Chrome opens its group in one).

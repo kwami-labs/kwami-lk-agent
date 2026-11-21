@@ -423,7 +423,7 @@ def local(monkeypatch: pytest.MonkeyPatch) -> Any:
         opened.append((user_id, url))
 
     monkeypatch.setattr(builtin, "open_clean_window", open_window)
-    monkeypatch.setattr(builtin, "wait_clean_window_closed", AsyncMock(return_value=True))
+    monkeypatch.setattr(builtin, "wait_sign_in", AsyncMock(return_value=local_chrome.CLOSED))
     return opened
 
 
@@ -432,18 +432,97 @@ async def test_the_voice_opens_a_clean_window_to_sign_in(local: Any) -> None:
     said = await tools.navigate_to(None, "https://github.com/login", sign_in=True)
     assert local == [("kwami-1", "https://github.com/login")]
     assert session.closed == 1, "off the driven window first"
-    assert "clean Chrome window" in said and "close that window" in said
+    assert "clean Chrome window" in said and "closes by itself" in said
     await asyncio.gather(*tools._background_tasks)
     actions = [m.get("action") for m in tools.publisher.published]
     assert actions == ["sign_in", "sign_in_done"]
 
 
 async def test_a_window_never_closed_is_not_announced(local: Any, monkeypatch) -> None:
-    monkeypatch.setattr(builtin, "wait_clean_window_closed", AsyncMock(return_value=False))
+    monkeypatch.setattr(builtin, "wait_sign_in", AsyncMock(return_value=local_chrome.STILL_OPEN))
     tools, _ = _tools()
     await tools.navigate_to(None, "https://github.com/login", sign_in=True)
     await asyncio.gather(*tools._background_tasks)
     assert [m.get("action") for m in tools.publisher.published] == ["sign_in"]
+
+
+async def test_once_the_user_is_in_jarvis_says_so_and_carries_on(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "wait_sign_in", AsyncMock(return_value=local_chrome.SIGNED_IN))
+    publisher = FakePublisher()
+    voice = MagicMock()
+    await builtin.AgentToolsMixin._announce_sign_in_done(
+        publisher, "u", "https://github.com/login", voice
+    )
+    assert [m.get("action") for m in publisher.messages] == ["sign_in_done"]
+    instructions = voice.generate_reply.call_args.kwargs["instructions"]
+    assert "github.com" in instructions and "carry on" in instructions
+
+
+async def test_a_window_the_user_closed_moves_the_panel_on_quietly(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "wait_sign_in", AsyncMock(return_value=local_chrome.CLOSED))
+    publisher = FakePublisher()
+    voice = MagicMock()
+    await builtin.AgentToolsMixin._announce_sign_in_done(publisher, "u", "https://a.b", voice)
+    assert [m.get("action") for m in publisher.messages] == ["sign_in_done"]
+    voice.generate_reply.assert_not_called()
+
+
+async def test_a_conversation_gone_does_not_break_the_sign_in(monkeypatch) -> None:
+    monkeypatch.setattr(builtin, "wait_sign_in", AsyncMock(return_value=local_chrome.SIGNED_IN))
+    publisher = FakePublisher()
+    voice = MagicMock()
+    voice.generate_reply.side_effect = RuntimeError("session closed")
+    await builtin.AgentToolsMixin._announce_sign_in_done(publisher, "u", "https://a.b", voice)
+    await builtin.AgentToolsMixin._announce_sign_in_done(publisher, "u", "https://a.b", None)
+    assert [m.get("action") for m in publisher.messages] == ["sign_in_done", "sign_in_done"]
+
+
+async def test_the_conversation_is_handed_to_the_wait(local: Any, monkeypatch) -> None:
+    seen: list[Any] = []
+
+    async def announce(_publisher: Any, _user: str, _url: str, voice: Any = None) -> None:
+        seen.append(voice)
+
+    tools, _ = _tools()
+    monkeypatch.setattr(tools, "_announce_sign_in_done", announce)
+    voice = object()
+
+    class Context:
+        session = voice
+
+    monkeypatch.setattr(tools, "_site_refusal", AsyncMock(return_value=None))
+    monkeypatch.setattr(tools, "_remember_site", AsyncMock(return_value=None))
+    await tools.navigate_to(Context(), "https://github.com/login", sign_in=True)
+    await asyncio.gather(*tools._background_tasks)
+    assert seen == [voice]
+
+    # The HUD's button comes with no context: the agent's own conversation is told.
+    tools.session = agent_voice = object()
+    await tools.navigate_to(None, "https://github.com/login", sign_in=True)
+    await asyncio.gather(*tools._background_tasks)
+    assert seen[-1] is agent_voice
+
+
+async def test_an_agent_out_of_its_conversation_is_not_told(local: Any, monkeypatch) -> None:
+    seen: list[Any] = []
+
+    async def announce(_publisher: Any, _user: str, _url: str, voice: Any = None) -> None:
+        seen.append(voice)
+
+    class Ended(type(_tools()[0])):  # type: ignore[misc]
+        @property
+        def session(self) -> Any:
+            raise RuntimeError("the agent is not running")
+
+        @session.setter
+        def session(self, _value: Any) -> None:
+            return None
+
+    tools = Ended(session=_tools()[1])
+    monkeypatch.setattr(tools, "_announce_sign_in_done", announce)
+    await tools.navigate_to(None, "https://github.com/login", sign_in=True)
+    await asyncio.gather(*tools._background_tasks)
+    assert seen == [None]
 
 
 async def test_a_second_sign_in_reuses_the_task_set(local: Any) -> None:

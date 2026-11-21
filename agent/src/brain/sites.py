@@ -30,7 +30,10 @@ _SAID = {
     SIGNED_OUT: "La web sigue pidiendo entrar. Puedes volver a intentarlo cuando quieras.",
     REFUSED: "Esa web no deja iniciar sesión desde este navegador.",
 }
-STILL_OPEN = "La ventana sigue abierta: inicia sesión y ciérrala, y Jarvis lo guardará."
+STILL_OPEN = (
+    "La ventana sigue abierta: inicia sesión en ella. Se cierra sola cuando entras, y Jarvis "
+    "lo guarda."
+)
 UNCHECKED = "Ventana cerrada. Chrome está en uso: lo compruebo en el próximo repaso."
 
 
@@ -41,7 +44,7 @@ def host_of(url: str) -> str:
 async def show_site(
     url: str, profile: str, note: Callable[[str], Awaitable[object]] | None = None
 ) -> str:
-    """A site for the user to sign in to, in a clean window until they close it.
+    """A site for the user to sign in to, in a clean window until they are in or close it.
 
     Then the site is opened again the usual way, to see whether the session took.
     What to tell them.
