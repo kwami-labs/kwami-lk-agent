@@ -97,6 +97,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Nothing slow on the call's loop.** The heartbeat runs in a thread, and the imports a
+  call used to pay mid-sentence (Zep's client, the Claude Agent SDK, the HTTP/2 transport)
+  load at prewarm. In dev mode one job runner is kept warm, so a call on the PC no longer
+  waits 1.3 s for its runner; production keeps LiveKit's own count. A room not yet
+  connected, or a kwami id dispatched as plain text, no longer logs a warning, and the
+  work thread's log keeps failed requests instead of its polling.
 - **A session's thread is created with its first message.** Every session created a Zep
   thread before the greeting, so each reconnect or dropped call left an empty one behind and
   paid two round trips for it. The thread now appears when there is something to store.

@@ -146,6 +146,10 @@ def _metadata_voice(job_metadata: str | None) -> dict[str, Any]:
     """The `voice` object of the job metadata, or {} for anything else."""
     if not job_metadata:
         return {}
+    if not job_metadata.lstrip().startswith(("{", "[")):
+        # The API dispatches with the kwami's id as plain text: that is not a
+        # voice override, and saying "not JSON" on every call hid the real ones.
+        return {}
     try:
         parsed = json.loads(job_metadata)
     except ValueError:

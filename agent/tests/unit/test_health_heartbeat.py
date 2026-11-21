@@ -367,3 +367,21 @@ async def test_no_cloud_work_thread_unless_asked(
             with pytest.raises(asyncio.CancelledError):
                 await main._heartbeat_task
             main._heartbeat_task = None
+
+
+async def test_the_loop_writes_off_the_event_loop(beat_file, monkeypatch) -> None:
+    """A slow write to the temp folder (590 ms on the PC) must not stall the worker's loop."""
+    import threading
+
+    from src import health
+
+    threads: list[str] = []
+    real = health.write_heartbeat
+
+    def recording(state: str) -> bool:
+        threads.append(threading.current_thread().name)
+        return real(state)
+
+    monkeypatch.setattr(health, "write_heartbeat", recording)
+    await run_heartbeat(interval=0, iterations=1)
+    assert threads and threads[0] != threading.main_thread().name

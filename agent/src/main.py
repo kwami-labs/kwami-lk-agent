@@ -1,6 +1,7 @@
 """Kwami Agent - Entry point for LiveKit Cloud agent sessions."""
 
 import asyncio
+import importlib
 from pathlib import Path
 
 from .envfile import load_env_file
@@ -17,6 +18,7 @@ from livekit.agents import (
     cli,
     room_io,
 )
+from livekit.agents.worker import ServerEnvOption
 
 from .adapters.publisher import LiveKitRoomPublisher
 from .brain import Bridge
@@ -67,7 +69,25 @@ logger.info("Settings resolved: %s", get_settings().describe())
 # A delegated task still running when the call ends is finished, not dropped
 # (brain/bridge.py). on_session_end is where that waits, so it gets the time.
 BRAIN_DRAIN_SECONDS = 840.0
-server = AgentServer(session_end_timeout=BRAIN_DRAIN_SECONDS + 60.0)
+
+
+def idle_runners() -> ServerEnvOption[int]:
+    """Job runners kept warm: one in dev mode, LiveKit's own default in production.
+
+    LiveKit keeps none warm in dev mode, which is how KWAMI runs on the PC: each call
+    waited 1.3 s for its runner to start (VAD, resamplers, the imports above) with the
+    user already speaking ("no warmed process available for job"). On Windows a runner
+    is a thread, so one kept ready costs little.
+    """
+    default = getattr(AgentServer, "_default_num_idle_processes", None)
+    prod = default.prod_default if isinstance(default, ServerEnvOption) else 4
+    return ServerEnvOption(dev_default=1, prod_default=prod)
+
+
+server = AgentServer(
+    session_end_timeout=BRAIN_DRAIN_SECONDS + 60.0,
+    num_idle_processes=idle_runners(),
+)
 
 #: Bridges by room, for `on_session_end`, which only receives the JobContext.
 _bridges: dict[str, Bridge] = {}
@@ -79,10 +99,41 @@ _heartbeat_task: asyncio.Task | None = None
 _cloud_task: asyncio.Task | None = None
 
 
+#: Imported on first use deep inside a call, where the import itself stalls the loop
+#: that carries the audio: zep_cloud as the config arrives (0.6 s on the PC) and
+#: claude_agent_sdk, which pulls in mcp and starlette, on the first navigate_to (2 s);
+#: the HTTP/2 transport, which the Anthropic LLM's client loads as the session starts (0.36 s).
+PREWARMED_IMPORTS: tuple[str, ...] = (
+    "zep_cloud.client",
+    "zep_cloud.core.serialization",
+    "claude_agent_sdk",
+    "httpcore._async.http2",
+    "h2.connection",
+)
+
+
+def prewarm_imports(modules: tuple[str, ...] = PREWARMED_IMPORTS) -> list[str]:
+    """Import what a call would otherwise import mid-sentence. Returns what loaded.
+
+    A module that is not installed is skipped: each is an optional path, and the
+    call that needs it reports its absence as it always did.
+    """
+    loaded = []
+    for name in modules:
+        try:
+            importlib.import_module(name)
+        except Exception as e:  # warm-up only: never take the worker down
+            logger.debug("Not prewarmed: %s (%s)", name, e)
+        else:
+            loaded.append(name)
+    return loaded
+
+
 def prewarm(proc: JobProcess) -> None:
-    """Prewarm soxr's FFT cache and the VAD model before any session starts."""
+    """Prewarm soxr's FFT cache, the VAD model and slow imports before any session starts."""
     prewarm_resampler()
     proc.userdata["vad"] = prewarm_vad()
+    prewarm_imports()
 
 
 server.setup_fnc = prewarm

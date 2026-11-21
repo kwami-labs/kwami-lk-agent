@@ -507,3 +507,34 @@ async def test_the_bridge_is_closed_once_when_the_session_ends(fake_session, vad
     assert bridge._closed is True
     # A second end-of-session callback finds nothing to close.
     await main_module._close_brain(ctx)
+
+
+def test_prewarm_imports_what_a_call_would_import_mid_sentence() -> None:
+    """zep_cloud and claude_agent_sdk took 0.6 s and 2 s on the call's loop (2026-11-21)."""
+    import sys
+
+    from src.main import PREWARMED_IMPORTS, prewarm_imports
+
+    loaded = prewarm_imports()
+    assert set(loaded) <= set(PREWARMED_IMPORTS)
+    for name in loaded:
+        assert name in sys.modules
+
+
+def test_prewarm_skips_what_is_not_installed() -> None:
+    from src.main import prewarm_imports
+
+    assert prewarm_imports(("no_such_module_here", "json")) == ["json"]
+
+
+def test_one_job_runner_is_kept_warm_on_the_pc() -> None:
+    """Dev mode kept none, and each call waited 1.3 s for its runner (2026-11-21)."""
+    from livekit.agents.worker import ServerEnvOption
+
+    from src.main import idle_runners
+
+    option = idle_runners()
+    assert isinstance(option, ServerEnvOption)
+    assert option.dev_default == 1
+    assert option.prod_default >= 1
+    assert server._num_idle_processes == option

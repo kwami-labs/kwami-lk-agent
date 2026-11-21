@@ -60,6 +60,21 @@ class NullRoomPublisher:
         return False
 
 
+def _publish_data(room: Any) -> Any:
+    """The room's `publish_data`, or None while there is no connected room to send on.
+
+    `getattr` with a default is not enough: before the room connects, LiveKit's
+    `local_participant` raises a bare Exception rather than AttributeError. The
+    agent reports its tools as it enters, which can be a moment before that, and
+    every session logged a traceback for it.
+    """
+    try:
+        participant = getattr(room, "local_participant", None)
+    except Exception:
+        return None
+    return getattr(participant, "publish_data", None)
+
+
 class LiveKitRoomPublisher:
     """Publishes to a LiveKit room, trimming to fit the data-channel limit."""
 
@@ -76,7 +91,7 @@ class LiveKitRoomPublisher:
         Returns False rather than raising when there is no room: a tool must
         still be able to answer the user when the UI is absent.
         """
-        participant = getattr(getattr(self._room, "local_participant", None), "publish_data", None)
+        participant = _publish_data(self._room)
         if participant is None:
             logger.debug("No room to publish to; dropping %s payload", payload.get("type"))
             return False
