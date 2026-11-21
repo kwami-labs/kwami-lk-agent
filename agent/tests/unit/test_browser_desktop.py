@@ -46,6 +46,10 @@ class FakeUser32:
         self.moved.append(args)
         return True
 
+    def PostMessageW(self, *args: Any) -> bool:  # noqa: N802
+        self.posted = [*getattr(self, "posted", []), args]
+        return args[0] != 3
+
 
 def same(function: Any) -> Any:
     return function
@@ -238,3 +242,25 @@ def test_a_process_is_named_or_left_unnamed(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(psutil, "Process", gone)
     assert desktop.process_name(1) == ""
+
+
+# -- closing a window as its close button would ---------------------------------------------
+
+
+def test_a_process_windows_are_closed_as_their_buttons_would() -> None:
+    user32 = FakeUser32({1: (42, True, True), 2: (7, True, True), 3: (42, True, True)})
+    api = Win32(user32, same)
+    assert desktop.close_windows(42, windows=True, api=api) == 1, "window 3 did not take it"
+    assert [args[:2] for args in user32.posted] == [(1, desktop.WM_CLOSE), (3, desktop.WM_CLOSE)]
+
+
+def test_elsewhere_no_window_is_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert desktop.close_windows(42, windows=False) == 0
+    monkeypatch.setattr(desktop.os, "name", "posix")
+    assert desktop.close_windows(42) == 0
+
+
+def test_closing_uses_the_real_api_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    user32 = FakeUser32({1: (42, True, True)})
+    monkeypatch.setattr(desktop, "win32", lambda: Win32(user32, same))
+    assert desktop.close_windows(42, windows=True) == 1

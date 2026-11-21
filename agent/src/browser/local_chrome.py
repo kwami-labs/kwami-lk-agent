@@ -26,6 +26,20 @@ Chrome that no program controls, where the user signs in themselves. Nothing is
 disguised and nothing is typed for them. Until they close it nothing drives the
 profile (`SignInWindowOpenError`); once they do, Jarvis opens it again as before and the
 session they started is in the profile.
+
+Since 2026-11-21 the user does not have to close it. Measured that day: Google refuses the
+driven window as soon as its sign-in page loads, even with no program attached and nobody
+typing (the debugging port is enough), and lets the user in through the clean one. That
+window's address is read through Windows' accessibility layer (`window_reader`), and once
+the user has gone through a sign-in page and stayed off one for a few seconds, Jarvis
+closes the window as its close button would, so Chrome saves the session first.
+
+**The profile stays Jarvis's own.** The same day, signing in to Google in the clean window
+switched on Chrome's account sync, which installed the user's extensions in this profile (a
+crypto wallet among them) and would bring their saved passwords to a window a program
+drives. Both windows now start with sync and extensions off (`PROFILE_FLAGS`), and the
+profile does not save or fill passwords, addresses or cards (`harden_profile`): the user
+types their own passwords, and an autofilled one would be Jarvis signing in for them.
 """
 
 from __future__ import annotations
@@ -34,14 +48,18 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
 from ..adapters.http import shared_client
 from ..utils.logging import get_logger
-from .desktop import foreground_window, keep_behind, quiet_startup
+from . import window_reader
+from .browser_session import _SIGN_IN_ADDRESS
+from .desktop import close_windows, foreground_window, keep_behind, quiet_startup
 from .launched import LOCAL, MISSING, BrowserVendorError, LaunchedBrowser
 
 logger = get_logger("browser.local")
@@ -54,6 +72,39 @@ _POLL_SECONDS = 0.25
 RELEASE_TIMEOUT_SECONDS = 10.0
 #: How often a clean window is looked at, to know when the user closed it.
 CLEAN_WINDOW_POLL_SECONDS = 2.0
+#: How often the clean window's address is read while the user signs in.
+ADDRESS_POLL_SECONDS = 1.0
+#: Off every sign-in page this long, the user is in: redirects after a sign-in take less.
+SIGNED_IN_SECONDS = 4.0
+#: Both windows on a profile. Sync off and extensions off keep the user's account out of a
+#: browser a program drives (see the module's docstring); the restore bubble would greet them
+#: after Jarvis's window was closed with the agent.
+PROFILE_FLAGS = (
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--hide-crash-restore-bubble",
+    "--disable-sync",
+    "--disable-extensions",
+)
+#: Chrome's own settings, in the profile's Preferences: nothing saved or filled for the user.
+QUIET_PREFERENCES: dict[str, Any] = {
+    "credentials_enable_service": False,
+    "credentials_enable_autosignin": False,
+    "profile": {"password_manager_enabled": False},
+    "autofill": {"profile_enabled": False, "credit_card_enabled": False},
+}
+#: What the address of the clean window says when it is how the user was told no.
+_REFUSED_ADDRESS = re.compile(r"/signin/rejected|/signin/v2/deniedsigninrejected", re.IGNORECASE)
+#: Hosts that only sign people in, whatever the path: accounts.google.com, login.live.com...
+_SIGN_IN_HOST = re.compile(
+    r"^(?:accounts|login|signin|auth|id|sso|secure|passport|account)\.", re.IGNORECASE
+)
+#: Signed in: the user went through a sign-in page and the window is off one (and closed).
+SIGNED_IN = "signed_in"
+#: The window is gone, closed by the user, whether or not they finished.
+CLOSED = "closed"
+#: Still open when the wait ran out.
+STILL_OPEN = "open"
 
 #: Clean windows open now, by profile directory name.
 _clean_windows: dict[str, subprocess.Popen] = {}
@@ -106,6 +157,112 @@ def find_chrome() -> str:
 def profile_dir_for(user_id: str) -> Path:
     """This user's profile directory. Hashed: ids do not belong in file names."""
     return PROFILES_DIR / hashlib.sha256(user_id.encode()).hexdigest()[:16]
+
+
+def _merge(into: dict[str, Any], wanted: dict[str, Any]) -> bool:
+    """`wanted`'s values into `into`, nested; whether anything changed."""
+    changed = False
+    for key, value in wanted.items():
+        if isinstance(value, dict):
+            inner = into.get(key)
+            if not isinstance(inner, dict):
+                inner = {}
+                into[key] = inner
+                changed = True
+            changed = _merge(inner, value) or changed
+        elif into.get(key) != value:
+            into[key] = value
+            changed = True
+    return changed
+
+
+def harden_profile(profile: Path) -> bool:
+    """Chrome's password manager and autofill off in this profile. Whether it wrote.
+
+    Called before a Chrome starts on the profile: a running one would overwrite the file.
+    A Preferences file that cannot be read is left alone, so Chrome's own is never lost.
+    """
+    prefs = profile / "Default" / "Preferences"
+    try:
+        data = json.loads(prefs.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {}
+    except (OSError, ValueError):
+        logger.warning("Could not read the Chrome profile's preferences; left as they are")
+        return False
+    if not isinstance(data, dict) or not _merge(data, QUIET_PREFERENCES):
+        return False
+    try:
+        prefs.parent.mkdir(parents=True, exist_ok=True)
+        prefs.write_text(json.dumps(data), encoding="utf-8")
+    except OSError:
+        logger.warning("Could not write the Chrome profile's preferences", exc_info=True)
+        return False
+    return True
+
+
+def _host_and_path(address: str) -> tuple[str, str]:
+    """An address bar's text split into host and the rest. Chrome shows it without scheme."""
+    rest = re.sub(r"^[a-z][a-z0-9+.-]*://", "", address.strip(), flags=re.IGNORECASE)
+    host, _, path = rest.partition("/")
+    return host.lower(), "/" + path
+
+
+def is_web_address(address: str) -> bool:
+    """A page's address, not what the user is typing or one of Chrome's own pages."""
+    text = (address or "").strip()
+    if not text or any(ch.isspace() for ch in text):
+        return False
+    if re.match(r"^[a-z][a-z0-9+.-]*://", text, re.IGNORECASE) and not re.match(
+        r"^https?://", text, re.IGNORECASE
+    ):
+        return False
+    host, _ = _host_and_path(text)
+    return "." in host and not host.startswith(".")
+
+
+def is_sign_in_address(address: str) -> bool:
+    """Whether an address is a sign-in page (or a refusal of one)."""
+    host, path = _host_and_path(address)
+    return bool(
+        _SIGN_IN_HOST.match(host)
+        or _SIGN_IN_ADDRESS.search(host + path)
+        or _REFUSED_ADDRESS.search(path)
+    )
+
+
+def is_refused_address(address: str) -> bool:
+    """Whether the site's answer to the sign-in is that this browser may not sign in."""
+    return bool(_REFUSED_ADDRESS.search(_host_and_path(address)[1]))
+
+
+class SignInProgress:
+    """Whether the user is in, from the addresses the clean window shows one after another.
+
+    In once they have been on a sign-in page and then off every one for `SIGNED_IN_SECONDS`.
+    What they type in the address bar, and Chrome's own pages, say nothing either way. A
+    window that never shows a sign-in page is never taken as done: they close it themselves.
+    """
+
+    def __init__(self, settle: float | None = None) -> None:
+        self._settle = SIGNED_IN_SECONDS if settle is None else settle
+        self.seen_sign_in = False
+        self.refused = False
+        self._off_since: float | None = None
+
+    def see(self, address: str, *, typing: bool, now: float) -> bool:
+        if typing or not is_web_address(address):
+            return False
+        if is_sign_in_address(address):
+            self.seen_sign_in = True
+            self.refused = is_refused_address(address)
+            self._off_since = None
+            return False
+        if not self.seen_sign_in:
+            return False
+        if self._off_since is None:
+            self._off_since = now
+        return now - self._off_since >= self._settle
 
 
 def _active_port(profile: Path) -> int | None:
@@ -197,16 +354,10 @@ async def open_clean_window(user_id: str, url: str, chrome: str | None = None) -
     already = clean_window_open(user_id)
     if not already:
         await _close_debug_window(profile)
+        await asyncio.to_thread(harden_profile, profile)
     process = await asyncio.to_thread(
         subprocess.Popen,
-        [
-            chrome,
-            f"--user-data-dir={profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            "--new-window",
-            url,
-        ],
+        [chrome, f"--user-data-dir={profile}", *PROFILE_FLAGS, "--new-window", url],
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
@@ -215,14 +366,65 @@ async def open_clean_window(user_id: str, url: str, chrome: str | None = None) -
     logger.info("Opened a clean window for the user to sign in")
 
 
-async def wait_clean_window_closed(user_id: str, timeout: float) -> bool:
-    """Wait until the user closes the clean window. False if it is still open at `timeout`."""
+def close_clean_window(user_id: str) -> bool:
+    """Close the clean window as its close button would (Chrome saves the session first)."""
+    process = _clean_windows.get(profile_dir_for(user_id).name)
+    if process is None or process.poll() is not None:
+        return False
+    return close_windows(process.pid) > 0
+
+
+async def _start_watch(user_id: str, timeout: float) -> window_reader.AddressWatch | None:
+    """A reader of the clean window's address, or None where windows cannot be read."""
+    if not window_reader.available():
+        return None
+    watch = window_reader.AddressWatch(
+        profile_dir_for(user_id).name, every=ADDRESS_POLL_SECONDS, limit=timeout + 5
+    )
+    try:
+        await watch.start()
+    except Exception:
+        logger.warning("Could not read the sign-in window's address", exc_info=True)
+        await watch.close()
+        return None
+    return watch
+
+
+async def wait_sign_in(user_id: str, timeout: float) -> str:
+    """Wait for the user in the clean window: `SIGNED_IN`, `CLOSED` or `STILL_OPEN`.
+
+    Where its address can be read, the window is closed for them once they are in. Where it
+    cannot, or when they never meet a sign-in page there, they close it themselves.
+    """
     deadline = time.monotonic() + timeout
-    while clean_window_open(user_id):
-        if time.monotonic() >= deadline:
-            return False
-        await asyncio.sleep(CLEAN_WINDOW_POLL_SECONDS)
-    return True
+    watch = await _start_watch(user_id, timeout)
+    progress = SignInProgress()
+    closed_it = False
+    try:
+        while clean_window_open(user_id):
+            if time.monotonic() >= deadline:
+                return STILL_OPEN
+            if watch is None:
+                await asyncio.sleep(CLEAN_WINDOW_POLL_SECONDS)
+                continue
+            seen = await watch.next(CLEAN_WINDOW_POLL_SECONDS)
+            if seen is None or seen.get("closed") or closed_it:
+                continue
+            address = str(seen.get("address") or "")
+            if progress.see(address, typing=bool(seen.get("typing")), now=time.monotonic()):
+                closed_it = await asyncio.to_thread(close_clean_window, user_id)
+                if closed_it:
+                    logger.info("The user is signed in; closed the clean window for them")
+        return SIGNED_IN if closed_it else CLOSED
+    finally:
+        if watch is not None:
+            await watch.close()
+
+
+async def wait_clean_window_closed(user_id: str, timeout: float) -> bool:
+    """Wait until the clean window is gone, closed by the user or, once they are in, by
+    Jarvis. False if it is still open at `timeout`."""
+    return await wait_sign_in(user_id, timeout) != STILL_OPEN
 
 
 async def _version_info(port: int) -> dict | None:
@@ -267,6 +469,7 @@ class LocalChromeProvider:
         KWAMI: it comes forward only for the user, on a sign-in page or from the taskbar.
         """
         (profile / "DevToolsActivePort").unlink(missing_ok=True)
+        await asyncio.to_thread(harden_profile, profile)
         focus = await asyncio.to_thread(foreground_window)
         process = await asyncio.to_thread(
             subprocess.Popen,
@@ -274,10 +477,7 @@ class LocalChromeProvider:
                 chrome,
                 "--remote-debugging-port=0",
                 f"--user-data-dir={profile}",
-                "--no-first-run",
-                "--no-default-browser-check",
-                # Killed with the agent, it would greet the user with "Restore pages?".
-                "--hide-crash-restore-bubble",
+                *PROFILE_FLAGS,
                 "about:blank",
             ],
             stdout=subprocess.DEVNULL,
