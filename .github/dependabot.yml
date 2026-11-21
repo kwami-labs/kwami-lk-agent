@@ -20,6 +20,17 @@ updates:
         patterns: ["livekit-agents", "livekit-plugins-*"]
       dev-tooling:
         patterns: ["pytest*", "mypy", "ruff", "respx"]
+    ignore:
+      # Every livekit-plugins-anthropic release caps the SDK below 2 (1.8.13:
+      # anthropic>=1.8,<2). Offered 2.x, the resolver fell back to plugin 1.8.1
+      # and the tests failed (#168). Lift this when the plugin allows 2.
+      - dependency-name: "anthropic"
+        versions: [">=2"]
+      # zep-cloud 4 removed graph.search, graph.add, user.add, thread.get_user_context
+      # and more of what src/memory calls (tests/contract/test_zep_contract.py fails on
+      # it). Moving to it is a migration of the memory layer, not a version bump.
+      - dependency-name: "zep-cloud"
+        versions: [">=4"]
 
   # The Cloudflare Worker.
   - package-ecosystem: npm

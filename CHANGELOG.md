@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **LiveKit Agents 1.8.13.** The framework and its plugins move from 1.8.11 together, so
+  the Google plugin runs on google-genai 3, the version it now requires, and websockets
+  goes to 17.4. `livekit-plugins-anthropic` stays on 1.8.6 with `anthropic<1`: every
+  release of the plugin caps the SDK below 2, so Dependabot no longer offers 2.x. The
+  Worker's tests run without building the agent's container (`dev.enable_containers`),
+  which `@cloudflare/vitest-plugin` 1.8 started doing before every run.
 - **Nothing slow on the call's loop.** The heartbeat runs in a thread, and the imports a
   call used to pay mid-sentence (Zep's client, the Claude Agent SDK, the HTTP/2 transport)
   load at prewarm. In dev mode one job runner is kept warm, so a call on the PC no longer
