@@ -90,6 +90,64 @@ def language_name(language: str | None) -> str | None:
     return LANGUAGE_NAMES.get(code)
 
 
+#: What a voice model passes for a language when it does not pass the code.
+LANGUAGE_ALIASES: dict[str, str] = {
+    "english": "en",
+    "inglés": "en",
+    "ingles": "en",
+    "spanish": "es",
+    "español": "es",
+    "espanol": "es",
+    "castellano": "es",
+    "castilian": "es",
+    "french": "fr",
+    "francés": "fr",
+    "frances": "fr",
+    "german": "de",
+    "alemán": "de",
+    "aleman": "de",
+    "italian": "it",
+    "italiano": "it",
+    "portuguese": "pt",
+    "portugués": "pt",
+    "portugues": "pt",
+    "catalan": "ca",
+    "catalán": "ca",
+    "català": "ca",
+    "japanese": "ja",
+    "japonés": "ja",
+    "chinese": "zh",
+    "chino": "zh",
+    "korean": "ko",
+    "coreano": "ko",
+}
+
+
+def normalize_language(language: str | None) -> str:
+    """A language as the engines take it: a code, from a code or a name in either tongue."""
+    raw = (language or "").strip().lower()
+    return LANGUAGE_ALIASES.get(raw, raw)
+
+
+def switched_language_directive(language: str | None) -> str:
+    """The instruction for a language the user asked for in the call, English included.
+
+    `language_directive` says nothing for English, the model's default. But a character
+    written in Spanish ("Mayordomo inglés ... en castellano") stays in Spanish unless told
+    otherwise, and on 2026-11-16 Jarvis answered "seguiré en castellano" when asked for
+    English. Said after the character, and over it.
+    """
+    code = normalize_language(language)
+    name = LANGUAGE_VARIANT_NAMES.get(code) or LANGUAGE_NAMES.get(code.split("-", 1)[0])
+    if not name:
+        return ""
+    return (
+        f"\nThe user asked you to speak {name}: from now on speak and write only in "
+        f"{name}, whatever your description above says about language, until they ask "
+        "for another one. Keep your character, your manner and how you address them."
+    )
+
+
 def language_directive(language: str | None) -> str:
     """The instruction that makes the model *generate* in `language`.
 
@@ -199,14 +257,17 @@ _GUIDANCE_BLOCKS: tuple[tuple[frozenset[str], tuple[str, ...]], ...] = (
     (
         frozenset({"navigate_to"}),
         (
-            "\nYou can browse the web for the user. Use navigate_to to open a website. "
-            "The page opens in a live browser panel embedded in the app. The user sees "
-            "everything you do in real time. Use read_navigation_page to see page content and interactive elements, then "
+            "\nYou can work on the web for the user. navigate_to opens a website for you to work "
+            "in: the user's own Chrome when it is connected to Kwami, where they are already "
+            "signed in, otherwise a browser of yours; the app mirrors it live. Use "
+            "read_navigation_page to see page content and interactive elements, then "
             "click_in_navigation to click elements (prefer element_id like 'el-5'), "
             "type_in_navigation to type text, press_key_in_navigation for keys like Enter, "
-            "and scroll_navigation to scroll. Describe what you see and what you're doing so the user can follow along. "
-            "This browser keeps its own logins, apart from the browser the user normally uses: never say "
-            "a site is already signed in until the page shows it.",
+            "and scroll_navigation to scroll. Describe briefly what you're doing so the user "
+            "can follow along. read_navigation_page with which='all' lists the tabs the user "
+            "has open in their Chrome, and with a tab's number or words of its title it reads "
+            "that tab and works there: use it when they ask about their tabs or a page they "
+            "have open. Never say a site is signed in until the page shows it.",
         ),
     ),
     (
@@ -432,6 +493,14 @@ CLAUDE_HEARING_NOTE = (
 )
 
 
+#: The user's agents were reachable only by a name the voice had to guess.
+AGENTS_NOTE = (
+    "\nThe user keeps their own agents, specialists you hand work to by name "
+    "(delegate_task with `agent`). list_my_agents says who they are; when the user asks "
+    "for a new specialist, or to change one, save_my_agent does it."
+)
+
+
 def build_system_prompt(
     soul: Any,
     memory_context: str | None = None,
@@ -463,7 +532,12 @@ def build_system_prompt(
     else:
         parts.append(f"You are {soul.name}, {soul.personality}.")
 
-    directive = language_directive(getattr(soul, "language", None))
+    override = getattr(soul, "language_override", "")
+    directive = (
+        switched_language_directive(override)
+        if override
+        else language_directive(getattr(soul, "language", None))
+    )
     if directive:
         parts.append(directive)
 
@@ -510,6 +584,7 @@ def build_system_prompt(
     if "delegate_task" not in withheld:
         parts.append(RELAY_GUIDANCE if relay_all else BRIDGE_GUIDANCE)
         parts.append(CLAUDE_HEARING_NOTE)
+        parts.append(AGENTS_NOTE)
         if withheld >= BRAIN_SEARCH_TOOLS:
             parts.append(SEARCH_DELEGATION_NOTE)
         if "web_search" not in withheld:

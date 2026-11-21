@@ -57,6 +57,7 @@ def test_the_inventory_names_the_builtins_and_the_dropped_client_tools() -> None
         "builtin": ["web_search"],
         "client": 2,
         "dropped": ["get_weather"],
+        "shelf": False,
     }
 
 

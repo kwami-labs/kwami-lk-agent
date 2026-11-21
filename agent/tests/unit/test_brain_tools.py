@@ -34,6 +34,7 @@ class FakeBridge:
     tasks: dict[str, FakeTask] = field(default_factory=dict)
     config: Any = field(default_factory=default_brain)
     edits: list[tuple[str, str, str]] = field(default_factory=list)
+    failures: list[dict[str, str]] = field(default_factory=list)
 
     def start(self, **kwargs: Any) -> FakeTask | str:
         self.started.append(kwargs)
@@ -43,6 +44,15 @@ class FakeBridge:
 
     async def runner_online(self) -> bool:
         return True
+
+    def note_failure(self, what: str, why: str) -> None:
+        self.failures.append({"what": what, "why": why})
+
+    async def where_work_runs(self) -> dict[str, Any]:
+        return {"pc": {"workThreadOn": True, "claudeAccountSignedIn": True}}
+
+    async def placement(self, where: str = "") -> tuple[str, str]:
+        return ("", "La nube no tiene su permiso.") if where == "cloud" else (where or "auto", "")
 
     def cancel(self, task_id: str) -> bool:
         return task_id in self.tasks
@@ -183,3 +193,28 @@ async def test_an_agent_named_by_the_user_goes_to_the_bridge(
     await agent.delegate_task(_ctx(bridge), "otra cosa", "Otra")
     assert bridge.started[0]["agent"] == "facturas"
     assert bridge.started[1]["agent"] == ""
+
+
+async def test_a_place_that_cannot_take_it_is_said_at_once(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    """On 2026-11-16 the voice said "lo encargo en la nube" of work that ran on the PC."""
+    result = await agent.delegate_task(_ctx(bridge), "prueba", "Prueba", where=" Nube ")
+    assert result == {"error": "La nube no tiene su permiso.", "where": "cloud"}
+    assert bridge.started == []
+    assert bridge.failures == [{"what": "Prueba", "why": "La nube no tiene su permiso."}]
+    status = await agent.brain_status(_ctx(bridge))
+    assert status["recentFailures"] == bridge.failures
+
+
+async def test_where_reaches_the_bridge_in_its_own_words(
+    agent: KwamiAgent, bridge: FakeBridge
+) -> None:
+    await agent.delegate_task(_ctx(bridge), "prueba", "Prueba", where="ordenador")
+    await agent.delegate_task(_ctx(bridge), "otra", "Otra")
+    assert [s["where"] for s in bridge.started] == ["pc", ""]
+
+
+async def test_brain_status_says_where_work_runs(agent: KwamiAgent, bridge: FakeBridge) -> None:
+    status = await agent.brain_status(_ctx(bridge))
+    assert status["whereWorkRuns"]["pc"]["claudeAccountSignedIn"] is True

@@ -69,8 +69,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="ui_discovery",
-        requires=frozenset({"list_ui_controls", "show_workspace_status"}),
-        guidance="Unsure of a control name? Call list_ui_controls rather than guessing.",
+        requires=frozenset({"list_ui_controls", "show_workspace_status", "set_ui_control"}),
+        guidance="Unsure of a control name? Ask set_ui_control for workspace listControls rather than guessing.",
     ),
     Capability(
         name="panels",
@@ -81,6 +81,7 @@ CAPABILITIES: tuple[Capability, ...] = (
                 "set_panel_control",
                 "focus_transcription_panel",
                 "set_panel_arrangement",
+                "set_ui_control",
             }
         ),
         guidance="Asked where something is, open its panel.",
@@ -118,7 +119,7 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="avatar",
-        requires=frozenset({"set_avatar_control", "set_workspace_renderer"}),
+        requires=frozenset({"set_avatar_control", "set_workspace_renderer", "set_ui_control"}),
         guidance="Your avatar renderers are blob-xyz, black-hole, particles-face and eye-iris. Colors, spikes, amplitude and rotation take x, y and z. Nudge modestly.",
     ),
     Capability(
@@ -128,13 +129,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="scene_presets",
-        requires=frozenset({"list_scene_presets", "apply_scene_preset"}),
-        guidance="A described background ('a waterfall behind you') is apply_scene_preset. Never invent an image or HDRI URL: a guessed one loads nothing.",
+        requires=frozenset({"list_scene_presets", "apply_scene_preset", "scene_presets"}),
+        guidance="A described background ('a waterfall behind you') is one of the scene presets: apply it by name. Never invent an image or HDRI URL: a guessed one loads nothing.",
     ),
     Capability(
         name="app_language",
-        requires=frozenset({"set_app_language", "get_app_language"}),
-        guidance="Asked for another language, call both set_app_language (the labels) and change_language (your speech).",
+        requires=frozenset({"set_app_language", "get_app_language", "app_language"}),
+        guidance="Asked for another language, change both the app's labels (its app language tool) and your speech (change_language).",
     ),
     Capability(
         name="theme",
@@ -143,13 +144,13 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="voice_ui",
-        requires=frozenset({"set_voice_control"}),
-        guidance="set_voice_control only edits the settings screen. To really change your voice or model use change_voice, change_realtime_voice, change_ai_model or switch_pipeline_mode; use both to persist it.",
+        requires=frozenset({"set_voice_control", "set_ui_control"}),
+        guidance="The app's voice settings (set_ui_control, domain voice) only edit the settings screen. To really change your voice or model use change_voice, change_realtime_voice, change_ai_model or switch_pipeline_mode; use both to persist it.",
     ),
     Capability(
         name="enhancements",
-        requires=frozenset({"set_enhancement_control"}),
-        guidance="If you interrupt too much or the room is noisy, tune listening with set_enhancement_control.",
+        requires=frozenset({"set_enhancement_control", "set_ui_control"}),
+        guidance="If you interrupt too much or the room is noisy, tune listening in set_ui_control's enhancements domain.",
     ),
     Capability(
         name="recall",
@@ -171,7 +172,9 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="metrics",
-        requires=frozenset({"get_performance_metrics", "reset_performance_metrics"}),
+        requires=frozenset(
+            {"get_performance_metrics", "reset_performance_metrics", "performance_metrics"}
+        ),
         guidance="",
     ),
     Capability(
@@ -186,8 +189,8 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="response_length",
-        requires=frozenset({"set_response_length"}),
-        guidance="set_response_length is lasting: never use it to shorten a single answer.",
+        requires=frozenset({"set_response_length", "set_ui_control"}),
+        guidance="The response length setting is lasting: never change it to shorten a single answer.",
     ),
     Capability(
         name="communications",
@@ -299,9 +302,15 @@ CAPABILITIES: tuple[Capability, ...] = (
     Capability(
         name="soul",
         requires=frozenset(
-            {"set_soul_control", "get_soul_profile", "list_soul_presets", "apply_soul_preset"}
+            {
+                "set_soul_control",
+                "get_soul_profile",
+                "list_soul_presets",
+                "apply_soul_preset",
+                "soul_profile",
+            }
         ),
-        guidance="Call get_soul_profile before any partial soul change: emotionalTraits is replaced whole, each from -100 to 100 with 0 neutral.",
+        guidance="Read the soul profile before any partial soul change: emotionalTraits is replaced whole, each from -100 to 100 with 0 neutral.",
     ),
     Capability(
         name="kwami_admin",
@@ -320,13 +329,27 @@ CAPABILITIES: tuple[Capability, ...] = (
     ),
     Capability(
         name="profiles",
-        requires=frozenset({"list_kwami_profiles", "switch_kwami_profile"}),
+        requires=frozenset({"list_kwami_profiles", "switch_kwami_profile", "kwami_profiles"}),
         guidance="",
     ),
     Capability(
         name="reset",
-        requires=frozenset({"reset_ui_domain"}),
+        requires=frozenset({"reset_ui_domain", "set_ui_control"}),
         guidance="",
+    ),
+    Capability(
+        # Jarvis's own screen in the app (the HUD, 2026-11-16). Three tools can
+        # put a page or a video in front of the user; only one is for showing.
+        name="own_screen",
+        requires=frozenset({"show_on_screen"}),
+        guidance=(
+            "To show the user something (a report, a video, a live channel, a page, a "
+            "picture), use show_on_screen: it opens on Jarvis's own screen. navigate_to is "
+            "only for working inside a page yourself (reading it for them, clicking, typing, "
+            "signing in), never to show one, and never for a page you already put on "
+            "screen. To play a song or a video by name, play_media finds it and plays it on "
+            "that screen."
+        ),
     ),
 )
 

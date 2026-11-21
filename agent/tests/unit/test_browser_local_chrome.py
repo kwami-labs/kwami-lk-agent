@@ -6,6 +6,7 @@ its profile holds logins: so one profile per user, and it closes only when asked
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -54,6 +55,8 @@ def _answering(monkeypatch: pytest.MonkeyPatch, info: dict | None) -> None:
 
 
 class _FakeProcess:
+    pid = 4242
+
     def __init__(self, code: int | None) -> None:
         self.code = code
 
@@ -138,6 +141,13 @@ class TestAskingChrome:
 
 
 class TestLaunching:
+    @pytest.fixture(autouse=True)
+    def behind(self, monkeypatch: pytest.MonkeyPatch) -> list[int]:
+        """Where a started Chrome's windows were sent: behind, by process id."""
+        sent: list[int] = []
+        monkeypatch.setattr(local_chrome, "keep_behind", lambda pid, **_: sent.append(pid) or 1)
+        return sent
+
     @pytest.mark.parametrize("user_id", ["", "   "])
     async def test_a_shared_profile_is_refused(self, user_id: str) -> None:
         with pytest.raises(ValueError, match="real user id"):
@@ -169,22 +179,29 @@ class TestLaunching:
         assert launched.persistence_id == profile.name
 
     async def test_otherwise_chrome_starts_on_its_own_profile(
-        self, profiles: Path, monkeypatch: pytest.MonkeyPatch
+        self, profiles: Path, monkeypatch: pytest.MonkeyPatch, behind: list[int]
     ) -> None:
         profile = profile_dir_for("user-1")
+        options: dict[str, Any] = {}
 
-        def start(command: list[str], **_: Any) -> _FakeProcess:
+        def start(command: list[str], **kwargs: Any) -> _FakeProcess:
             assert f"--user-data-dir={profile}" in command
             assert "--remote-debugging-port=0" in command
+            assert "--hide-crash-restore-bubble" in command
+            options.update(kwargs)
             (profile / "DevToolsActivePort").write_text("9444\n/devtools/browser/x")
             return _FakeProcess(None)
 
         monkeypatch.setattr(local_chrome.subprocess, "Popen", start)
+        monkeypatch.setattr(local_chrome, "quiet_startup", lambda: "no-focus")
         _answering(monkeypatch, {"Browser": "Chrome"})
 
         launched = await LocalChromeProvider(chrome_path="chrome").launch("user-1")
+        await asyncio.gather(*local_chrome._behind)
 
         assert launched.browser_id == "local-9444"
+        assert options["startupinfo"] == "no-focus", "it starts without taking the focus"
+        assert behind == [_FakeProcess.pid], "and its windows go behind KWAMI"
 
     async def test_a_chrome_that_keeps_starting_is_waited_for(
         self, profiles: Path, monkeypatch: pytest.MonkeyPatch
@@ -297,9 +314,10 @@ class TestTheFailoverEdges:
 
 
 class TestTheSession:
-    async def test_the_users_window_comes_to_the_front_at_its_own_size(
+    async def test_the_users_window_stays_behind_at_its_own_size(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        """Jarvis's screen mirrors it: brought forward, it showed the page twice."""
         cdp = AsyncMock()
         cdp.send.return_value = {}
         monkeypatch.setattr(session_module, "CDPConnection", lambda: cdp)
@@ -309,7 +327,7 @@ class TestTheSession:
         session._provider = provider
         await session.start(user_id="user-1")
         sent = [call.args[0] for call in cdp.send.await_args_list]
-        assert "Page.bringToFront" in sent
+        assert "Page.bringToFront" not in sent
         assert "Emulation.setDeviceMetricsOverride" not in sent
         await session.close()
 
@@ -329,9 +347,12 @@ class TestTheNavigateTool:
     async def test_it_says_the_page_opened_on_the_users_computer(self) -> None:
         tools, session = _tools(active=False, kwami_id="kwami-42")
         session.runs_locally = True
-        assert "Chrome window on the user's computer" in await tools.navigate_to(
-            None, "https://example.com"
-        )
+        said = await tools.navigate_to(None, "https://example.com")
+        assert "Chrome window of Jarvis's behind KWAMI" in said
+        assert "brave://extensions" in said, "once a call, how to connect their own browser"
+        session.is_active = False
+        again = await tools.navigate_to(None, "https://example.org")
+        assert "brave://extensions" not in again
 
     async def test_no_browser_service_is_said_plainly(self) -> None:
         tools, session = _tools(active=False, kwami_id="kwami-42")

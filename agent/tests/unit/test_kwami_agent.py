@@ -182,7 +182,8 @@ def test_builtins_are_not_duplicated_on_the_agent(all_tools_available) -> None:
 
     agent = KwamiAgent()
 
-    assert len(agent.tools) == len(find_function_tools(KwamiAgent))
+    # Less the shelf's own tool, withheld while nothing is set aside (tools/shelf.py).
+    assert len(agent.tools) == len(find_function_tools(KwamiAgent)) - 1
 
 
 def test_registered_tool_names_tolerate_both_entry_shapes() -> None:

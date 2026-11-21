@@ -63,6 +63,16 @@ APP_TOOL_NAMES = frozenset(
         "forget_about_user",
         "read_user_profile",
         "set_ui_control",
+        # Folded on 2026-11-16 so the whole list fits under the 128: the domain
+        # setters below are reached through set_ui_control, and each list/apply
+        # pair is one tool with an action. The old names stay for older apps.
+        "scene_presets",
+        # Jarvis's own screen (useHudAgentTools.ts).
+        "show_on_screen",
+        "kwami_profiles",
+        "soul_profile",
+        "app_language",
+        "performance_metrics",
         "open_workspace_panel",
         "close_workspace_panel",
         "focus_transcription_panel",

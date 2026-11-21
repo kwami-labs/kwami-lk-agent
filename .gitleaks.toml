@@ -1,0 +1,14 @@
+# gitleaks reads this file from the repository root (security.yml runs `gitleaks git .`).
+title = "kwami-lk-agent"
+
+[extend]
+useDefault = true
+
+# Chrome's `key` in an extension manifest is the public half of the key pair: it fixes the
+# extension's id (`EXTENSION_ID` in agent/src/browser/chrome_bridge.py) and is meant to be
+# published. Only that file, and only an RSA public key, is let through.
+[[allowlists]]
+description = "Public key that fixes the Chrome extension's id"
+condition = "AND"
+paths = ['''^chrome-extension/manifest\.json$''']
+regexes = ['''^MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA''']

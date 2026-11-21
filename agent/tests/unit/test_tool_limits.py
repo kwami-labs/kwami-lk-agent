@@ -80,13 +80,13 @@ def test_the_builtins_survive_a_trim() -> None:
 
 def test_a_trim_says_what_it_dropped(caplog: pytest.LogCaptureFixture) -> None:
     """A capability vanishing with no log line is the failure to avoid."""
-    with caplog.at_level(logging.ERROR):
+    with caplog.at_level(logging.WARNING):
         enforce_tool_limit(_tools("b", 40), _tools("c", 100))
 
     assert any("Tool limit exceeded" in record.message for record in caplog.records)
     combined_text = " ".join(record.getMessage() for record in caplog.records)
     assert "c99" in combined_text, "the dropped tool names were not logged"
-    assert "NOT available" in combined_text
+    assert "find_more_tools" in combined_text, "it says where the rest went"
 
 
 def test_approaching_the_limit_warns_before_it_bites(caplog: pytest.LogCaptureFixture) -> None:
@@ -158,7 +158,7 @@ def test_todays_real_tool_count_is_under_the_limit(all_tools_available) -> None:
     agent = _agent_with(53)
 
     assert len(agent.tools) <= MAX_TOOLS_PER_REQUEST
-    assert len(agent.tools) == 102, (
+    assert len(agent.tools) == 104, (
         "the tool count moved; if it is climbing, the 128 ceiling is the thing to watch"
     )
 

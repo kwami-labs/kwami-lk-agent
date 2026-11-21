@@ -132,7 +132,10 @@ async def test_a_local_run_works_in_the_jarvis_folder(sdk, jarvis: Path) -> None
     assert options.env["ANTHROPIC_API_KEY"] == "ak"
     assert options.setting_sources == []
     assert options.resume is None
-    assert set(options.agents) == {"clerk", "researcher", "reasoner", "reviewer"}
+    assert set(options.agents) == {"clerk", "researcher", "writer", "reasoner", "reviewer"}
+    # Each on the model best at its work (team.py).
+    assert options.agents["writer"].model == "claude-sonnet-5-5"
+    assert options.agents["reviewer"].model == "claude-opus-5-5"
     assert all(member.background is False for member in options.agents.values())
     assert options.permission_mode == "bypassPermissions"
     assert options.max_budget_usd == 2.0
@@ -212,6 +215,45 @@ async def test_a_failed_result_is_not_ok(sdk, jarvis: Path) -> None:
     assert not result.ok
     assert result.text == "me quedé sin presupuesto"
     assert result.cost_usd == 0.0
+
+
+async def test_the_plan_is_kept_as_claude_code_tells_it(sdk, jarvis: Path) -> None:
+    """On the login it says how much of the plan is used, and that it ran out (`plan.py`)."""
+    from claude_agent_sdk import RateLimitEvent, RateLimitInfo
+
+    warning = RateLimitInfo(status="allowed_warning", rate_limit_type="five_hour", utilization=0.9)
+    sdk.messages = [
+        RateLimitEvent(rate_limit_info=warning, uuid="u", session_id="s"),
+        _result("Hecho"),
+    ]
+    result = await run_executor("", "m", "t", ExecutorConfig(str(jarvis)))
+    assert result.ok and result.plan is not None
+    assert result.plan["status"] == "allowed_warning" and result.plan["utilization"] == 0.9
+
+    out = RateLimitInfo(status="rejected", resets_at=1900000000, rate_limit_type="five_hour")
+    sdk.messages = [
+        RateLimitEvent(rate_limit_info=out, uuid="u", session_id="s"),
+        _result("Claude AI usage limit reached|1900000000", None, True),
+    ]
+    result = await run_executor("", "m", "t", ExecutorConfig(str(jarvis)))
+    assert result.plan is not None and result.plan["status"] == "rejected"
+    assert result.plan["type"] == "five_hour"
+
+
+async def test_a_plan_out_said_only_in_words_still_counts(sdk, jarvis: Path) -> None:
+    sdk.messages = [_result("You've hit your limit · resets 3pm (UTC)", None, True)]
+    result = await run_executor("", "m", "t", ExecutorConfig(str(jarvis)))
+    assert result.plan is not None and result.plan["status"] == "rejected"
+    # On a key it is the key's limit, not the plan's.
+    result = await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))
+    assert result.plan is None
+    # Nor is a task that failed for its own reasons.
+    sdk.messages = [_result("No compila", None, True)]
+    assert (await run_executor("", "m", "t", ExecutorConfig(str(jarvis)))).plan is None
+    sdk.error = RuntimeError("Claude AI usage limit reached|1900000000")
+    crashed = await run_executor("", "m", "t", ExecutorConfig(str(jarvis)))
+    assert crashed.plan is not None and crashed.plan["status"] == "rejected"
+    assert (await run_executor("ak", "m", "t", ExecutorConfig(str(jarvis)))).plan is None
 
 
 async def test_silence_is_reported_as_such(sdk, jarvis: Path) -> None:
@@ -568,7 +610,7 @@ async def test_tool_calls_are_reported_as_progress(sdk, jarvis: Path) -> None:
     await run_executor(
         "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis)), on_progress=seen.append
     )
-    assert seen == ["Bash", "reviewer: Comprueba el informe"]
+    assert seen == ["Bash: ls", "reviewer: Comprueba el informe"]
 
 
 @pytest.mark.parametrize("permissions", ["read_only", "edit_only"])
@@ -704,10 +746,14 @@ async def test_the_work_thread_has_chrome_on_the_pc_and_gives_it_back(
     sdk, jarvis: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     closed: list[bool] = []
+    theirs: list[bool] = []
 
     class FakeTools:
-        def __init__(self, user_id: str) -> None:
+        def __init__(
+            self, user_id: str, *, their_chrome: bool = False, site_user_id: str = ""
+        ) -> None:
             assert user_id == "u1"
+            theirs.append(their_chrome)
 
         async def close(self) -> None:
             closed.append(True)
@@ -722,6 +768,7 @@ async def test_the_work_thread_has_chrome_on_the_pc_and_gives_it_back(
     assert set(executor.BROWSER_TOOLS) <= set(options.allowed_tools)
     assert "real Chrome" in options.system_prompt["append"]
     assert closed == [True]
+    assert theirs == [True], "a task may work in the user's own Chrome when it is connected"
 
 
 async def test_a_task_that_used_the_browser_leaves_no_session(sdk, jarvis: Path) -> None:
@@ -879,7 +926,7 @@ async def test_the_users_agents_join_the_team(sdk: Any, jarvis: Path) -> None:
         "ak", "claude-sonnet-5-5", "t", ExecutorConfig(str(jarvis), members={"facturas": member})
     )
     agents = sdk.last.options.agents
-    assert set(agents) == {"clerk", "researcher", "reasoner", "reviewer", "facturas"}
+    assert set(agents) == {"clerk", "researcher", "writer", "reasoner", "reviewer", "facturas"}
     assert agents["facturas"].model == "claude-haiku-5-5"
 
 
@@ -1018,3 +1065,67 @@ async def test_a_missing_sdk_is_left_for_the_run_to_report(monkeypatch: pytest.M
 
     monkeypatch.setattr(executor.importlib, "import_module", missing)
     await executor.load_sdk()
+
+
+# -- the user's own Chrome (2026-11-16) ------------------------------------------
+
+
+async def test_the_users_chrome_comes_only_when_they_switched_it_on(
+    sdk, jarvis: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.brain import user_chrome
+
+    config = ExecutorConfig(str(jarvis), user_chrome=True)
+    monkeypatch.delenv(user_chrome.SWITCH, raising=False)
+    await run_executor("", "claude-sonnet-5-5", "mira github", config)
+    assert "chrome" not in sdk.last.options.extra_args
+
+    monkeypatch.setenv(user_chrome.SWITCH, "on")
+    monkeypatch.setattr(user_chrome, "executor_in_cloud", lambda _mode: False)
+    await run_executor("", "claude-sonnet-5-5", "mira github", config)
+    options = sdk.last.options
+    assert "chrome" in options.extra_args and "strict-mcp-config" in options.extra_args
+    assert set(user_chrome.ALLOWED_TOOLS) <= set(options.allowed_tools)
+    assert "mcp__claude-in-chrome__javascript_tool" in options.disallowed_tools
+    assert "mcp__claude-in-chrome__file_upload" in options.disallowed_tools
+    assert "already signed in" in options.system_prompt["append"]
+
+    # Not for a run that asked for no browser, nor for one with no shell (a shared host).
+    await run_executor("", "claude-sonnet-5-5", "x", ExecutorConfig(str(jarvis)))
+    assert "chrome" not in sdk.last.options.extra_args
+    await run_executor("", "m", "x", config, root=jarvis)
+    assert "chrome" not in sdk.last.options.extra_args
+
+
+def test_the_users_chrome_is_never_given_in_the_cloud(monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.brain import user_chrome
+
+    monkeypatch.setenv(user_chrome.SWITCH, "on")
+    monkeypatch.setattr(user_chrome, "executor_in_cloud", lambda _mode: True)
+    assert not user_chrome.user_chrome_available()
+    monkeypatch.setenv(user_chrome.SWITCH, "yes")
+    monkeypatch.setattr(user_chrome, "executor_in_cloud", lambda _mode: False)
+    assert not user_chrome.user_chrome_available()
+
+
+async def test_their_chrome_closes_commands_and_files_as_jarvis_window_does(
+    sdk, jarvis: Path
+) -> None:
+    sdk.tool_calls = [
+        {"tool_name": "mcp__claude-in-chrome__navigate", "tool_input": {"url": "x"}},
+        {"tool_name": "Bash", "tool_input": {"command": "ls"}},
+    ]
+    sdk.messages = [_result("Hecho")]
+    result = await run_executor("", "m", "mira", ExecutorConfig(str(jarvis)))
+    first, second = sdk.last.decisions
+    assert first == {}
+    assert second["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert result.session_id == ""
+
+
+def test_a_chrome_on_another_account_is_explained_first() -> None:
+    from src.brain.user_chrome import MISMATCH_ADVICE, explain
+
+    said = "Its OAuth token belongs to a different claude.ai account than Claude Code."
+    assert explain(said).startswith(MISMATCH_ADVICE) and said in explain(said)
+    assert explain("Hecho.") == "Hecho."

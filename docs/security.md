@@ -140,6 +140,35 @@ flowchart TD
     Priv -->|no| Open["Cloud browser"]
 ```
 
+### The user's own Chrome (`browser/chrome_bridge.py`)
+
+On the user's PC (`KWAMI_BROWSER_PROVIDER=local`), Jarvis works in the user's everyday
+Chrome when Kwami's extension (`chrome-extension/`) is installed there. That Chrome is
+signed in to everything the user uses, so the bridge is built to be reachable only by
+the two parties that belong on it:
+
+- **Loopback only.** The PC's work thread hosts the hub on `127.0.0.1:47219`
+  (`KWAMI_CHROME_BRIDGE_PORT`); `KWAMI_CHROME_BRIDGE=off` turns it off.
+- **The browser side is one extension.** `/extension` accepts only the `Origin`
+  `chrome-extension://bkgbdgdkjbfagjkghfdfeilncobkiiie`, fixed by the `key` in the
+  manifest. Another extension or a web page cannot send that origin.
+- **The command side is Jarvis's processes.** `/control` needs the random token the hub
+  writes to `~/.jarvis/chrome-bridge.json` at start, and refuses any connection that
+  sends an `Origin` at all, which every web page's WebSocket does. A local process
+  running as the same Windows user can read the token: such a process can already read
+  the browser's profile, so the bridge adds nothing it lacked.
+- **No code crosses.** The extension runs only the functions it ships with
+  (`page-functions.js`); `evaluate_js` refuses in this browser, and the media tools use
+  named actions. `run_js_in_navigation` cannot reach the user's Chrome.
+- **Secrets stay with the user.** The extension refuses to type into password,
+  one-time-code and card fields, whatever Jarvis asks; on a sign-in page Jarvis brings
+  the tab to the front and the user signs in.
+- **Their tabs stay theirs.** Jarvis works in a window of its own (tab group
+  "Jarvis"); a tab of the user's is read or worked in only when asked, never closed.
+  Listing tabs goes through the user's site list (`browser/access.py`): a blocked site
+  shows only as blocked.
+- **The user can pause it** from the extension's popup, which drops the link.
+
 ## Prompt injection
 
 Assume every retrieved string can contain instructions:

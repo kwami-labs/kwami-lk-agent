@@ -51,6 +51,9 @@ KEEP_LONGEST: frozenset[str] = frozenset(
         "update_calendar_event",
         "delete_calendar_event",
         "clear_search_results",
+        # How Jarvis shows what it works on in its own interface (2026-11-16): a
+        # report, a video, a page. Without it every result is only spoken.
+        "show_on_screen",
     }
 )
 
@@ -100,10 +103,13 @@ def trim_client_tools(
     kept = ordered[:room_for_client]
     dropped = ordered[room_for_client:]
 
-    logger.error(
+    # Not an error any more: what does not fit waits on the shelf (tools/shelf.py),
+    # one find_more_tools search away. Still worth seeing, since the model has to
+    # think of searching before it can use any of them.
+    logger.warning(
         "Tool limit exceeded: %d built-in + %d client tools is %d, over the %d the "
-        "provider accepts. Dropping %d client tool(s): %s. Those capabilities are "
-        "NOT available this session.",
+        "provider accepts. Shelving %d client tool(s): %s. They are not offered "
+        "directly; the model reaches them through find_more_tools.",
         builtin_count,
         len(client_tools),
         total,
@@ -170,4 +176,6 @@ def tool_inventory(
         "builtin": sorted(name for name in offered_names if name not in client_set),
         "client": sum(1 for name in client_names if name in offered_set),
         "dropped": [name for name in client_names if name not in offered_set],
+        # The dropped tools wait on a shelf the model can search (tools/shelf.py).
+        "shelf": "find_more_tools" in offered_set,
     }

@@ -118,6 +118,24 @@ def isolated_env(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest
         monkeypatch.delenv(name, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def no_claude_in_chrome(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest):
+    """No test starts the PC's real Claude Code to reach Claude in Chrome.
+
+    `user_browser` falls back to Claude in Chrome whenever Kwami's extension is not
+    there, which would run `claude --claude-in-chrome-mcp` and ask Anthropic's bridge,
+    from whichever account the developer's PC is signed in to. Its own tests turn it on
+    with a stand-in server.
+    """
+    import src.browser.claude_chrome as claude_chrome
+
+    if not request.node.get_closest_marker("live"):
+        monkeypatch.setenv(claude_chrome.SWITCH, "off")
+    claude_chrome._port = None
+    yield
+    claude_chrome._port = None
+
+
 @pytest.fixture
 def all_tools_available():
     """Credentials for every gated built-in, so all forty are registered.
@@ -137,6 +155,7 @@ def all_tools_available():
             zep_api_key="test-key-not-real",
             browserbase_api_key="test-key-not-real",
             browserbase_project_id="test-project",
+            supabase_secret_key="test-key-not-real",  # noqa: S106 - a placeholder
         )
     )
     yield

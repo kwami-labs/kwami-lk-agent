@@ -235,7 +235,7 @@ class TestALocalWindow:
         await session.close(quit_browser=True)
         provider.release.assert_awaited_once_with("local-1")
 
-    async def test_starting_one_brings_it_forward_at_its_own_size(self) -> None:
+    async def test_starting_one_leaves_it_behind_at_its_own_size(self) -> None:
         session = CloudBrowserSession()
         session._provider = AsyncMock()
         session._provider.launch.return_value = LaunchedBrowser(
@@ -245,7 +245,7 @@ class TestALocalWindow:
         with patch.object(session_module, "CDPConnection", return_value=cdp):
             await session.start("user-1")
         sent = [call.args[0] for call in cdp.send.await_args_list]
-        assert "Page.bringToFront" in sent
+        assert "Page.bringToFront" not in sent
         assert "Emulation.setDeviceMetricsOverride" not in sent
 
     async def test_a_cloud_browser_still_has_a_timer(self, session: Any) -> None:
