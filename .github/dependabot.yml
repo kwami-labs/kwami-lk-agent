@@ -20,6 +20,12 @@ updates:
         patterns: ["livekit-agents", "livekit-plugins-*"]
       dev-tooling:
         patterns: ["pytest*", "mypy", "ruff", "respx"]
+    ignore:
+      # Every livekit-plugins-anthropic release caps the SDK below 2 (1.8.13:
+      # anthropic>=1.8,<2). Offered 2.x, the resolver fell back to plugin 1.8.1
+      # and the tests failed (#168). Lift this when the plugin allows 2.
+      - dependency-name: "anthropic"
+        versions: [">=2"]
 
   # The Cloudflare Worker.
   - package-ecosystem: npm
