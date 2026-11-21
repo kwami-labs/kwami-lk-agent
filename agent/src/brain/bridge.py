@@ -748,9 +748,9 @@ class Bridge:
         if wanted not in BILLING_MODES:
             return f"Unknown billing {billing!r}: use one of {', '.join(BILLING_MODES)}."
         self.config.billing = cast(Billing, wanted)
-        # The mode's own constant goes to the log, not the user's words: CodeQL reads
-        # anything named billing as private data.
-        logger.info("Billing changed by voice to %s", BILLING_MODES[BILLING_MODES.index(wanted)])
+        # The mode itself stays out of the log (CodeQL reads billing as private data);
+        # the app gets it as `brain_billing` just below.
+        logger.info("Billing changed by voice")
         if self.publisher is not None:
             try:
                 await self.publisher.publish({"type": "brain_billing", "billing": wanted})
