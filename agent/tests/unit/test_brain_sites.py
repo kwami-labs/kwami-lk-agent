@@ -15,6 +15,7 @@ from src.brain.browser_tool import CONNECTED, REFUSED, SIGN_IN_TOOL, SIGNED_OUT
 from src.brain.jobs import BrainJob, JobStore
 from src.brain.worker import Worker
 from src.browser import local_chrome
+from src.browser.safety import UnsafeURLError
 
 
 class _Window:
@@ -56,7 +57,6 @@ class _Window:
 @pytest.fixture
 def window(monkeypatch: pytest.MonkeyPatch) -> _Window:
     held = _Window()
-    monkeypatch.setattr(browser_tool, "SIGN_IN_POLL_SECONDS", 0.001)
     monkeypatch.setattr(sites, "REDIRECT_WAIT_SECONDS", 0.001)
     monkeypatch.setattr(sites, "browser_available", lambda _profile: True)
     monkeypatch.setattr(sites, "window_open", _answer(False))
@@ -77,55 +77,85 @@ def _answer(value: Any) -> Any:
     return answer
 
 
-async def test_a_site_stays_until_the_user_closes_it_and_tells_how_it_ended(
-    window: _Window,
+class _Clean:
+    """The clean window the user signs in in: opened, then closed by them."""
+
+    def __init__(self) -> None:
+        self.opened: list[tuple[str, str]] = []
+        self.closed_in_time = True
+
+
+@pytest.fixture
+def clean(monkeypatch: pytest.MonkeyPatch) -> _Clean:
+    held = _Clean()
+
+    async def open_window(profile: str, url: str) -> None:
+        held.opened.append((profile, url))
+
+    async def wait(_profile: str, _timeout: float) -> bool:
+        return held.closed_in_time
+
+    async def same(url: str) -> str:
+        return url
+
+    monkeypatch.setattr(sites, "open_clean_window", open_window)
+    monkeypatch.setattr(sites, "wait_clean_window_closed", wait)
+    monkeypatch.setattr(sites, "validate_url_async", same)
+    return held
+
+
+async def test_the_user_signs_in_in_a_clean_window_and_is_told_how_it_ended(
+    window: _Window, clean: _Clean
 ) -> None:
     states: list[str] = []
 
     async def note(state: str) -> None:
         states.append(state)
 
+    window.signing_in = [False]
     said = await sites.show_site("https://github.com", "k1", note)
+    assert clean.opened == [("k1", "https://github.com")]
+    # Then the site is looked at the usual way, and that window is closed again.
+    assert window.opened == ["https://github.com"] and window.closed == [True]
     assert "guardado" in said and states == [CONNECTED]
-    assert window.opened == ["https://github.com"] and window.fronted
-    assert window.closed == [False]
 
 
-async def test_a_site_that_refuses_says_so(window: _Window) -> None:
+async def test_a_site_that_refuses_says_so(window: _Window, clean: _Clean) -> None:
     window.refused = True
     assert "no deja" in await sites.show_site("https://accounts.google.com", "k1")
 
 
-async def test_a_site_closed_on_its_sign_in_page_is_not_connected(window: _Window) -> None:
+async def test_a_site_closed_on_its_sign_in_page_is_not_connected(
+    window: _Window, clean: _Clean
+) -> None:
     window.signing_in = [True]
     assert "sigue pidiendo" in await sites.show_site("https://a.b", "k1")
 
 
-async def test_a_window_closed_between_two_looks_is_fine(window: _Window) -> None:
-    window.signing_in = [True]
-    window.active = [True]
-    tools = browser_tool.BrowserTools("k1")
-    looks = 0
-    original = window.on_sign_in_page
-
-    async def twice() -> bool:
-        nonlocal looks
-        looks += 1
-        if looks > 1:
-            raise RuntimeError("gone")
-        return await original()
-
-    window.on_sign_in_page = twice  # type: ignore[method-assign]
-    assert await tools.wait_until_closed() == SIGNED_OUT
-
-
-async def test_a_forgotten_window_is_let_go(
-    window: _Window, monkeypatch: pytest.MonkeyPatch
+async def test_a_window_left_open_is_said_and_nothing_is_noted(
+    window: _Window, clean: _Clean
 ) -> None:
-    window.active = [True]
-    monkeypatch.setattr(browser_tool, "SIGN_IN_WAIT_SECONDS", 0.005)
-    await sites.show_site("https://github.com", "k1")
-    assert window.closed == [False]
+    clean.closed_in_time = False
+    noted: list[str] = []
+
+    async def note(state: str) -> None:
+        noted.append(state)
+
+    assert await sites.show_site("https://a.b", "k1", note) == sites.STILL_OPEN
+    assert noted == [] and window.opened == []
+
+
+async def test_a_chrome_in_use_afterwards_leaves_the_check_for_later(
+    window: _Window, clean: _Clean, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(sites, "window_open", _answer(True))
+    assert await sites.show_site("https://a.b", "k1") == sites.UNCHECKED
+
+
+async def test_a_bad_address_never_opens_a_window(window: _Window) -> None:
+    with pytest.raises(UnsafeURLError):
+        await sites.show_site("http://127.0.0.1", "k1")
+    assert window.opened == []
 
 
 async def test_a_check_looks_and_closes_the_window_it_opened(window: _Window) -> None:

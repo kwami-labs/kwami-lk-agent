@@ -50,6 +50,33 @@ def as_user_id(value: Any) -> str | None:
         return None
 
 
+def kwami_row_id(value: Any, user_id: str | None = None) -> str | None:
+    """The kwami's row in `user_kwamis`, from the ids a kwami arrives with. Else None.
+
+    The app names a kwami two ways: by its row (`<uuid>`, in the dispatch and the
+    API) and, for memory, as `kwami_<user uuid>_<kwami uuid>` -- which is what the
+    config message carries. Every brain column that holds a kwami is a uuid, so the
+    long form reached none of them: after 2026-11-04 no call queued work for the PC
+    or the cloud (it ran in the call instead, on the API key), sites failed to save
+    (22P02), and the voice opened a Chrome profile of its own, without the logins of
+    the one the PC uses.
+
+    With ``user_id``, the long form must be that user's: the config message comes
+    from the client, and a kwami of someone else's is not this call's to label.
+    """
+    if (row := as_user_id(value)) is not None:
+        return row
+    if not isinstance(value, str) or not value.startswith("kwami_"):
+        return None
+    owner, _, kwami = value.removeprefix("kwami_").partition("_")
+    owner_id, row = as_user_id(owner), as_user_id(kwami)
+    if owner_id is None or row is None:
+        return None
+    if user_id and as_user_id(user_id) != owner_id:
+        return None
+    return row
+
+
 class SupabaseClient:
     """Minimal PostgREST + Storage client authenticated with the secret key."""
 

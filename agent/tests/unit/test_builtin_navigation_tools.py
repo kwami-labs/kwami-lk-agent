@@ -397,7 +397,7 @@ async def test_a_window_on_the_computer_is_called_that() -> None:
 
     result = await tools.navigate_to(None, "https://example.com")
 
-    assert "window on the user's computer" in result
+    assert "Chrome window of Jarvis's behind KWAMI" in result
     assert "panel" not in result
 
 
@@ -488,8 +488,8 @@ async def test_the_voice_is_told_a_page_asks_to_sign_in(monkeypatch) -> None:
     session = _SignInSession(True)
     session.bring_to_front = _front  # type: ignore[attr-defined]
     _with_session(tools, session)
-    assert builtin.SIGN_IN_HINT in await tools.navigate_to(None, "https://github.com/login")
-    assert builtin.SIGN_IN_HINT in await tools.read_navigation_page(None)
+    assert builtin.LOCAL_SIGN_IN_HINT in await tools.navigate_to(None, "https://github.com/login")
+    assert builtin.LOCAL_SIGN_IN_HINT in await tools.read_navigation_page(None)
 
 
 async def test_the_voice_never_types_on_a_sign_in_page() -> None:
@@ -498,7 +498,7 @@ async def test_the_voice_never_types_on_a_sign_in_page() -> None:
 
     session = _SignInSession(True)
     _with_session(tools, session)
-    assert await tools.type_in_navigation(None, "hola") == builtin.SIGN_IN_HINT
+    assert await tools.type_in_navigation(None, "hola") == builtin.LOCAL_SIGN_IN_HINT
     assert session.typed == []
 
 
@@ -545,3 +545,18 @@ async def test_the_built_in_browser_says_it_cannot_sign_in(monkeypatch) -> None:
     assert builtin.NO_SIGN_IN_HINT in await tools.read_navigation_page(None)
     assert await tools.type_in_navigation(None, "hola") == builtin.NO_SIGN_IN_HINT
     assert session.typed == []
+
+
+async def test_navigate_to_opens_the_profile_of_the_kwamis_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The app sends the memory's long name; the PC's tasks use the row (2026-11-16)."""
+    from src.tools import builtin
+
+    tools, session = _tools(active=False, kwami_id="kwami_u_k")
+    bridge = SimpleNamespace(kwami_id="row-1", site_access=None, user_id="", jobs=None)
+    monkeypatch.setattr(builtin, "deps_from_context", lambda _c: SimpleNamespace(bridge=bridge))
+
+    await tools.navigate_to(None, "https://example.com")
+
+    assert session.started == [("row-1", "https://example.com")]

@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from livekit import rtc
 from livekit.agents import RunContext, function_tool
+from livekit.agents.voice.agent import find_function_tools
 
 from ..runtime.container import room_from_context
 from ..utils.logging import get_logger
@@ -70,7 +71,7 @@ class ClientToolManager:
     - Handling tool results from the client
     """
 
-    def __init__(self, kwami_agent: "KwamiAgent"):
+    def __init__(self, kwami_agent: "KwamiAgent | None"):
         """Initialize the client tool manager.
 
         Args:
@@ -81,7 +82,7 @@ class ClientToolManager:
         self.registered_tools: list[dict[str, Any]] = []
         self._tools: list[Any] = []
 
-    def register_client_tools(self, tool_definitions: list[dict[str, Any]]) -> None:
+    def register_client_tools(self, tool_definitions: list[Any] | None) -> None:
         """Register tools defined in configuration for the LLM.
 
         Args:
@@ -90,14 +91,29 @@ class ClientToolManager:
         if not tool_definitions:
             return
 
+        # A name the model already has -- one of the agent's own tools, or a client
+        # tool sent twice (a webhook and an MCP tool both called `weather`) -- makes
+        # the framework raise "duplicate function name" while building the agent, so
+        # the config is never applied and the session keeps its placeholder. The
+        # first one wins; the rest are skipped with a warning.
+        taken = self._builtin_names() | {
+            entry.get("function", entry).get("name") for entry in self.registered_tools
+        }
         for tool_def in tool_definitions:
             # Validate tool definition
-            if not validate_tool_definition(tool_def):
+            if not isinstance(tool_def, dict) or not validate_tool_definition(tool_def):
                 continue
 
             # Handle different formats
             func_def = tool_def.get("function", tool_def)
             tool_name = func_def.get("name")
+            if tool_name in taken:
+                logger.warning(
+                    "Client tool %r skipped: the model already has a tool of that name",
+                    tool_name,
+                )
+                continue
+            taken.add(tool_name)
             description = func_def.get("description", "")
             parameters = func_def.get("parameters", {})
 
@@ -107,6 +123,16 @@ class ClientToolManager:
             tool = self._create_client_tool(tool_name, description, parameters)
             self._tools.append(tool)
             self.registered_tools.append(tool_def)
+
+    def _builtin_names(self) -> set[str]:
+        """The names of the agent's own function tools, which a client tool cannot take."""
+        if self.agent is None:
+            return set()
+        try:
+            tools = find_function_tools(type(self.agent))
+        except Exception:  # an agent stand-in in a test, or a framework change
+            return set()
+        return {tool.info.name for tool in tools}
 
     def _create_client_tool(
         self,

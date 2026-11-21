@@ -228,6 +228,8 @@ async def test_without_a_code_model_long_work_stays_in_the_call(tmp_path: Path) 
     bridge.config = default_brain()
     bridge.config.models = [m for m in bridge.config.models if m.role != "code"]
     bridge.config.split = False
+    # The plan made up front; the orchestrator has its own tests.
+    bridge.config.orchestrate = False
     bridge.kwami_id, bridge.user_id = KWAMI, USER
 
     async def online(user_id: str) -> bool:

@@ -416,3 +416,47 @@ async def test_a_failed_instruction_rebuild_does_not_fail_the_tool(caplog) -> No
     assert "it" in result.lower() or "italian" in result.lower()
     assert tools.kwami_config.soul.language == "it"
     assert "instructions were not rebuilt" in caplog.text
+
+
+async def test_a_language_reaches_the_providers_inside_their_fallback_chains() -> None:
+    """Jarvis's pipeline wraps each stage in a chain that takes no options (2026-11-16)."""
+    tts, stt = FakeTTS(), FakeSTT()
+
+    class Chain:
+        def __init__(self, attr: str, member: Any) -> None:
+            setattr(self, attr, [member])
+
+        def update_options(self, **kwargs: Any) -> None:
+            raise AttributeError("a fallback chain takes no options")
+
+    tools = Tools(
+        session=FakeSession(tts=Chain("_tts_instances", tts), stt=Chain("_stt_instances", stt))
+    )
+    said = await tools.change_language(None, "Inglés")
+
+    assert stt.updates == [{"language": "en"}] and tts.updates == [{"language": "en"}]
+    assert "couldn't" not in said
+    assert tools.kwami_config.soul.language_override == "en"
+
+
+async def test_a_language_reaches_the_engines_the_agent_built_itself() -> None:
+    """Kwami builds STT and TTS on the agent: the session has none (call of 2026-11-16)."""
+    tts, stt = FakeTTS(), FakeSTT()
+    tools = Tools(session=FakeSession(tts=None, stt=None))
+    tools.stt, tools.tts = stt, tts  # type: ignore[attr-defined]
+
+    await tools.change_language(None, "en")
+
+    assert stt.updates == [{"language": "en"}] and tts.updates == [{"language": "en"}]
+
+
+async def test_an_agent_without_its_own_engines_uses_the_sessions() -> None:
+    from livekit.agents import NOT_GIVEN
+
+    tts, stt = FakeTTS(), FakeSTT()
+    tools = Tools(session=FakeSession(tts=tts, stt=stt))
+    tools.stt, tools.tts = NOT_GIVEN, None  # type: ignore[attr-defined]
+
+    await tools.change_language(None, "fr")
+
+    assert stt.updates == [{"language": "fr"}] and tts.updates == [{"language": "fr"}]

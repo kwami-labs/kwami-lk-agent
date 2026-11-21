@@ -41,6 +41,10 @@ VOICE_SWITCH_TOOLS: frozenset[str] = frozenset(
 #: itself -- slower, on its own Tavily credit, and with the conversation stalled
 #: while it read the results.
 BRAIN_SEARCH_TOOLS: frozenset[str] = frozenset({"deep_research", "product_search"})
+#: The voice's searches that are paid per search (Tavily, SerpAPI). With "the plan only"
+#: (`brain/plan.py`) nothing is paid per use, so they go too and the brain searches on
+#: the plan: the panel says Tavily is off, and it must be (2026-11-17).
+PAID_SEARCH_TOOLS: frozenset[str] = frozenset({"web_search", "deep_research", "product_search"})
 
 
 @dataclass(frozen=True)
@@ -76,6 +80,16 @@ REQUIREMENTS: tuple[ToolRequirement, ...] = (
         "deep_research",
         "tavily_api_key",
         "A research pass is several Tavily searches.",
+    ),
+    ToolRequirement(
+        "list_my_agents",
+        "supabase_secret_key",
+        "The user's agents live in Supabase (`brain_agents`).",
+    ),
+    ToolRequirement(
+        "save_my_agent",
+        "supabase_secret_key",
+        "The user's agents live in Supabase (`brain_agents`).",
     ),
 )
 

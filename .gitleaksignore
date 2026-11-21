@@ -1,0 +1,3 @@
+# Findings gitleaks may skip, one fingerprint per line (commit:file:rule:line).
+# A made-up key in a test, in a commit of the superseded branch kl/tauri-sync (#171).
+b4831313188d50fbf18c3150963b6b34c79428c3:agent/tests/unit/test_hud_live_actions.py:curl-auth-header:166

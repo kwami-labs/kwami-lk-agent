@@ -5,31 +5,47 @@ turns that into a model from the roster. It never invents one: a model is
 usable only when it is enabled *and* its provider's key is present, so a GPT
 entry added before OPENAI_API_KEY exists is skipped rather than failing.
 
-Routing table (auto mode):
+Routing table (auto mode), the user's rule of 2026-11-13 -- Opus for most of
+the work, Sonnet for writing and reading, Haiku for lookups and chores, Fable
+never (`config.BANNED_MODELS`):
 
 ==========  ==========  ==========  ==========
 kind        simple      normal      hard
 ==========  ==========  ==========  ==========
-research    search      standard    expert
+question    fast        expert      expert
+analysis    fast        expert      expert
+writing     standard    standard    standard
+reading     standard    standard    standard
+research    search      expert      expert
 code        code        code        code
 x_search    x_search    x_search    x_search
-other       fast        standard    expert
 ==========  ==========  ==========  ==========
+
+With the default roster: fast is Haiku 5.5, standard Sonnet 5.5, expert Opus
+5.5, search Gemini 3.5 Flash. A normal or hard research task is also where the
+orchestrator has Opus hand the lookups to the cheap searchers.
 
 Each role falls back to its neighbours when it has no usable model, nearest
 first, so a roster with only Sonnet still answers everything. Searching X has no
 neighbours: nothing else can read it, and a model that cannot would make it up.
 
 A model can hold several roles. Claude models are reached through the Claude
-account on the user's PC or the API key, as each one's `access` says; the bridge
-puts `ACCOUNT_MARK` among the keys while the PC's work thread is there.
+account on the user's PC or the API key, as the user's billing and each one's
+`access` say (`config.reach`, `plan.py`); the bridge puts `ACCOUNT_MARK` among the
+keys while the PC's work thread is there with a plan that has room.
+
+With the plan first (the user's rule, 2026-11-17) a model the plan pays for is
+chosen before a paid one, down the same fallbacks: a simple search goes to Haiku on
+the plan, with its web search, before Gemini on its key. With the plan only, no
+paid model is offered at all, Claude's API or any other.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 
-from .config import BrainConfig, BrainModel
+from .config import BrainConfig, BrainModel, reach
+from .ledger import PRICES, PROVIDER_DEFAULT_PRICES
 
 PROVIDER_KEYS: dict[str, str] = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -55,12 +71,17 @@ ROLE_FALLBACKS: dict[str, tuple[str, ...]] = {
     "fast": ("fast", "standard", "search", "expert"),
     "standard": ("standard", "expert", "fast", "search"),
     "expert": ("expert", "standard", "fast", "search"),
-    "search": ("search", "standard", "fast", "expert"),
+    # A lookup with no search model goes to Haiku, which searches the web too, before
+    # Sonnet: the same facts at a twentieth of the price.
+    "search": ("search", "fast", "standard", "expert"),
     "x_search": ("x_search",),
     "code": ("code",),
 }
 
-KINDS = ("research", "x_search", "code", "analysis", "writing", "question")
+KINDS = ("research", "x_search", "code", "analysis", "writing", "reading", "question")
+#: Text work: drafting, and reading, summarising or extracting from what is given.
+#: Sonnet writes and reads as well as Opus for a fifth of the price.
+TEXT_KINDS = frozenset({"writing", "reading"})
 DIFFICULTIES = ("simple", "normal", "hard")
 
 
@@ -71,21 +92,35 @@ def provider_available(provider: str, keys: Mapping[str, str]) -> bool:
     return bool(name and keys.get(name))
 
 
-def model_available(model: BrainModel, keys: Mapping[str, str]) -> bool:
+def model_available(
+    model: BrainModel, keys: Mapping[str, str], billing: str = "account_first"
+) -> bool:
     """Whether this model can run now, by the way the user lets it be reached."""
     if model.provider not in ACCOUNT_PROVIDERS:
-        return provider_available(model.provider, keys)
+        # Every other provider is paid per token, which "the plan only" rules out.
+        return billing != "account_only" and provider_available(model.provider, keys)
     has_key = bool(keys.get(PROVIDER_KEYS[model.provider]))
     has_account = bool(keys.get(ACCOUNT_MARK))
-    if model.access == "api":
+    way = reach(model, billing)
+    if way == "api":
         return has_key
-    if model.access == "account":
+    if way == "account":
         return has_account
     return has_key or has_account
 
 
+def on_account(model: BrainModel, keys: Mapping[str, str], billing: str = "account_first") -> bool:
+    """Whether this model would answer on the PC's plan now, rather than on a key."""
+    if model.provider not in ACCOUNT_PROVIDERS or not keys.get(ACCOUNT_MARK):
+        return False
+    way = reach(model, billing)
+    if way == "api_first":
+        return not keys.get(PROVIDER_KEYS[model.provider])
+    return way != "api"
+
+
 def usable(config: BrainConfig, keys: Mapping[str, str]) -> list[BrainModel]:
-    return [m for m in config.models if m.enabled and model_available(m, keys)]
+    return [m for m in config.models if m.enabled and model_available(m, keys, config.billing)]
 
 
 def can_delegate(config: BrainConfig, keys: Mapping[str, str]) -> bool:
@@ -96,12 +131,37 @@ def can_delegate(config: BrainConfig, keys: Mapping[str, str]) -> bool:
     return config.enabled and any(m.provider != "local" for m in usable(config, keys))
 
 
+def running_cost(
+    model: BrainModel, keys: Mapping[str, str], billing: str = "account_first"
+) -> float:
+    """What a million tokens in and out cost on this model, as it would be reached now.
+
+    A Claude model the PC's account answers costs nothing per token: the plan pays.
+    """
+    if on_account(model, keys, billing):
+        return 0.0
+    rate_in, rate_out = PRICES.get(model.model) or PROVIDER_DEFAULT_PRICES.get(
+        model.provider, (5.0, 25.0)
+    )
+    return rate_in + rate_out
+
+
+def by_cost(
+    models: list[BrainModel], keys: Mapping[str, str], billing: str = "account_first"
+) -> list[BrainModel]:
+    """Cheapest first; the user's order breaks a tie."""
+    return sorted(models, key=lambda m: running_cost(m, keys, billing))
+
+
 def role_for(kind: str, difficulty: str) -> str:
+    """The role a task of this shape lands on (the table at the top)."""
     if kind in ("code", "x_search"):
         return kind
-    if kind == "research":
-        return {"simple": "search", "hard": "expert"}.get(difficulty, "standard")
-    return {"simple": "fast", "hard": "expert"}.get(difficulty, "standard")
+    if kind in TEXT_KINDS:
+        return "standard"
+    if difficulty == "simple":
+        return "search" if kind == "research" else "fast"
+    return "expert"
 
 
 def find_model(models: list[BrainModel], wanted: str) -> BrainModel | None:
@@ -144,20 +204,38 @@ def pick(
         chosen = find_model(candidates, config.default_model)
         if chosen is not None and chosen.provider != "local":
             return chosen
-    for role in ROLE_FALLBACKS[role_for(kind, difficulty)]:
-        for model in candidates:
+    roles = ROLE_FALLBACKS[role_for(kind, difficulty)]
+    if config.billing == "account_first" and keys.get(ACCOUNT_MARK):
+        # The plan first, all the way down the fallbacks: what it pays for is free, and
+        # the user wants it used up before anything is paid (2026-11-17).
+        on_plan = [m for m in candidates if on_account(m, keys, config.billing)]
+        for role in roles:
+            for model in on_plan:
+                if model.has_role(role) and (model.provider == "local") == wants_code:
+                    return model
+    # Of the models that hold a role, the cheapest does the job: two models the user
+    # gave the same role are both fit for it, and the first in the list used to win
+    # whatever it cost -- an API-billed Sonnet over a free account one, Opus over a
+    # DeepSeek the user had made "standard" to save money.
+    for role in roles:
+        for model in by_cost(candidates, keys, config.billing):
             if model.has_role(role) and (model.provider == "local") == wants_code:
                 return model
     return None
 
 
 def director_of(config: BrainConfig, keys: Mapping[str, str]) -> BrainModel | None:
-    """The model that plans the work: the user's choice, else the router's."""
+    """The model that plans the work: the user's choice, else the expert.
+
+    The director decides what everyone else does, and a wrong plan wastes every
+    step after it, so it is the strongest model the roster has -- Opus by default.
+    Its own tokens stay few: it plans and checks, the cheaper models do the rest.
+    """
     if config.director:
         for model in usable(config, keys):
             if model.id == config.director and model.provider != "local":
                 return model
-    return pick(config, keys, "analysis", "normal")
+    return pick(config, keys, "analysis", "hard")
 
 
 #: Who writes the answer when Gemini's own search is unavailable and Tavily

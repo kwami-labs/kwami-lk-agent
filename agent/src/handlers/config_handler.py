@@ -930,8 +930,13 @@ async def update_tools(
         )
         # Capped at the provider's ceiling: the frontend decides how many client
         # tools arrive, and one over the limit is a 400 on every turn rather
-        # than one missing feature.
-        combined = enforce_tool_limit(builtin_tools, client_tools)
+        # than one missing feature. The agent's own list also shelves what does
+        # not fit, within reach of `find_more_tools`.
+        combined = (
+            agent.offered_tools()
+            if hasattr(agent, "offered_tools")
+            else enforce_tool_limit(builtin_tools, client_tools)
+        )
         await agent.update_tools(combined)
         # The trim is decided here; tell the app's Tools panel what came of it.
         await agent.publish_tool_inventory()
