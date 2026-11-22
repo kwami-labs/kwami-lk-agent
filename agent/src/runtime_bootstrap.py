@@ -13,6 +13,7 @@ import httpx
 
 from .adapters.http import shared_client
 from .adapters.supabase import SupabaseClient, as_user_id, direct_supabase
+from .runtime.sip_call import is_sip, signed
 from .settings import get_settings
 from .utils.logging import get_logger
 
@@ -35,7 +36,10 @@ def _parse_json_dict(value: str | None) -> dict[str, Any]:
 
 
 def resolve_kwami_id(ctx) -> str | None:
-    """Resolve the kwami id from job metadata or SIP participant metadata/attributes."""
+    """Resolve the kwami id from job metadata or SIP participant metadata/attributes.
+
+    A phone caller's attributes count only when the API signed them (`sip_call`).
+    """
     metadata = _parse_json_dict(getattr(ctx.job, "metadata", None))
     if metadata.get("kwami_id"):
         return str(metadata["kwami_id"])
@@ -47,6 +51,10 @@ def resolve_kwami_id(ctx) -> str | None:
 
         attributes = getattr(participant, "attributes", None) or {}
         if isinstance(attributes, dict) and attributes.get("kwami_id"):
+            # A caller's SIP headers are anybody's to send: only the API's signed ones
+            # name the kwami, or a stranger could pick whose kwami answers.
+            if is_sip(participant) and not signed(attributes):
+                continue
             return str(attributes["kwami_id"])
 
     return None

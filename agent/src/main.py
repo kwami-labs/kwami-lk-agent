@@ -39,6 +39,7 @@ from .runtime.away import USER_AWAY_SECONDS, PhoneAwayWatcher
 from .runtime.defaults import placeholder_config
 from .runtime.pipeline import create_agent_from_config
 from .runtime.recovery import install_realtime_rescue
+from .runtime.sip_call import owner_in_room, owner_on_call
 from .runtime.thinking_sound import ThinkingSound
 from .runtime.transcript_relay import TranscriptRelay
 from .runtime.turn_metrics import TurnMetricsRelay
@@ -433,7 +434,9 @@ async def _run_session(ctx: JobContext) -> None:
         state.user_identity = participant_identity
     # The app's token names the participant after the Supabase user. The
     # brain's ledger and file uploads are keyed on it.
-    deps.bridge.set_user(participant_identity or "")
+    # On a phone line the identity is a SIP one; the owner calling, as the API
+    # vouched for it, is the owner, and may ask for what they could from the app.
+    deps.bridge.set_user(owner_in_room(ctx.room) or participant_identity or "")
     logger.info(
         "Room connected with %d remote participant(s); user identity: %s",
         len(ctx.room.remote_participants),
@@ -446,7 +449,7 @@ async def _run_session(ctx: JobContext) -> None:
         # finish with no user_identity and its usage would never be billed.
         resolve_identity_on_join(state, participant)
         if not is_agent_participant(participant):
-            deps.bridge.set_user(participant.identity or "")
+            deps.bridge.set_user(owner_on_call(participant) or participant.identity or "")
 
     await apply_runtime_config(
         session,
